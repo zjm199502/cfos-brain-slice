@@ -147,6 +147,8 @@ class MainWindow(TeachingMixin, FigureMixin, RelocateMixin, QualityMixin, Groups
     # ================================================================ 通用
     def _on_step(self, i):
         self.stack.setCurrentIndex(i)
+        if i != 5 and getattr(self, "_reg_drag_on", False):
+            self._reg_set_drag_mode(False)
         self._refresh_step_marks()
         if i == 1 and self.image is not None:
             self._refresh_section_table()

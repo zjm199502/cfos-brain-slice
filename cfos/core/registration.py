@@ -234,29 +234,41 @@ def adjusted_plane(reg: Registration) -> Plane:
 
 
 def tps_warp(points: list, W: int, H: int):
-    """修正点 → 每个像素的位移（像素单位）。points: [[src_s, src_t, dst_s, dst_t]]，归一化坐标。
-    含义：图谱中原本在 src 处的内容被拖到了 dst，因此在 dst 处采样时要取 src 的图谱内容。"""
+    """修正点 → 每个像素的位移（像素单位）。points: [[src_s, src_t, dst_s, dst_t(, radius)]]，归一化坐标
+    （radius 以图宽为单位，可省略）。含义：图谱中原本在 src 处的内容被拖到了 dst，因此在 dst 处采样时要取 src 的图谱内容。
+    不带 radius 的点：薄板样条（全局平滑，四周固定）。带 radius 的点：只影响 dst 周围 radius 以内，
+    位移按 (1 - (d/r)^2)^2 平滑衰减到 0（边界弹性跟随，远处完全不动）。"""
     if not points:
         return None
-    from scipy.interpolate import RBFInterpolator
-    P = np.asarray(points, float)
-    dst = P[:, 2:4] * [W, H]
-    disp = (P[:, 0:2] - P[:, 2:4]) * [W, H]
-    # 四周固定点，让修正只影响局部
-    border = []
-    for f in np.linspace(0, 1, 6):
-        border += [[f * W, 0], [f * W, H], [0, f * H], [W, f * H]]
-    border = np.unique(np.round(np.array(border), 3), axis=0)
-    # 去掉与修正点重合的固定点
-    if len(dst):
-        dmin = np.min(np.linalg.norm(border[:, None, :] - dst[None, :, :], axis=2), axis=1)
-        border = border[dmin > 1.0]
-    X = np.vstack([dst, border])
-    Y = np.vstack([disp, np.zeros_like(border)])
-    rbf = RBFInterpolator(X, Y, kernel="thin_plate_spline", smoothing=1e-6)
+    P = [list(map(float, q)) for q in points]
+    glob = [q for q in P if len(q) < 5 or q[4] <= 0]
+    local = [q for q in P if len(q) >= 5 and q[4] > 0]
     step = 4
     gy, gx = np.mgrid[0:H:step, 0:W:step]
-    g = rbf(np.stack([gx.ravel(), gy.ravel()], 1)).reshape(gy.shape + (2,))
+    g = np.zeros(gy.shape + (2,), np.float64)
+    if glob:
+        from scipy.interpolate import RBFInterpolator
+        Q = np.asarray(glob, float)
+        dst = Q[:, 2:4] * [W, H]
+        disp = (Q[:, 0:2] - Q[:, 2:4]) * [W, H]
+        # 四周固定点，让修正只影响局部
+        border = []
+        for f in np.linspace(0, 1, 6):
+            border += [[f * W, 0], [f * W, H], [0, f * H], [W, f * H]]
+        border = np.unique(np.round(np.array(border), 3), axis=0)
+        dmin = np.min(np.linalg.norm(border[:, None, :] - dst[None, :, :], axis=2), axis=1)
+        border = border[dmin > 1.0]
+        X = np.vstack([dst, border])
+        Y = np.vstack([disp, np.zeros_like(border)])
+        rbf = RBFInterpolator(X, Y, kernel="thin_plate_spline", smoothing=1e-6)
+        g += rbf(np.stack([gx.ravel(), gy.ravel()], 1)).reshape(gy.shape + (2,))
+    for q in local:
+        sx, sy, dx, dy = q[0] * W, q[1] * H, q[2] * W, q[3] * H
+        r = max(q[4] * W, 2.0)
+        d2 = ((gx - dx) ** 2 + (gy - dy) ** 2) / (r * r)
+        wgt = np.clip(1.0 - d2, 0.0, None) ** 2
+        g[..., 0] += wgt * (sx - dx)
+        g[..., 1] += wgt * (sy - dy)
     full = [ndi.zoom(g[..., k], (H / g.shape[0], W / g.shape[1]), order=1)[:H, :W] for k in range(2)]
     return full[0], full[1]
 
