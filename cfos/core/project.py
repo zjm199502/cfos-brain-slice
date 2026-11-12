@@ -30,6 +30,7 @@ class ImageEntry:
     status: str = "未处理"
     exclusions: list = field(default_factory=list)  # 排除区域：多边形列表，每个为 [(x, y), ...]（第 0 层像素）
     rois: list = field(default_factory=list)        # 自定义分析区域：[{"name": 名称, "polygon": [(x, y), ...]}]
+    figure_rois: list = field(default_factory=list)  # 截图框（⑨ 截图制图）：[{"name", "x", "y", "w", "h"}]（第 0 层像素）
     error: str = ""                                  # 上次处理出错的原因（批量处理时记录）
 
     rel: str | None = None                           # 相对项目文件夹的路径（项目整体移动后自动找回）
@@ -39,7 +40,9 @@ class ImageEntry:
         return {"path": self.path, "rel": self.rel, "size": self.size, "status": self.status, "error": self.error,
                 "sections": [s.to_dict() for s in self.sections],
                 "exclusions": [[list(map(float, p)) for p in poly] for poly in self.exclusions],
-                "rois": [{"name": r["name"], "polygon": [list(map(float, p)) for p in r["polygon"]]} for r in self.rois]}
+                "rois": [{"name": r["name"], "polygon": [list(map(float, p)) for p in r["polygon"]]} for r in self.rois],
+                "figure_rois": [{"name": r["name"], "x": float(r["x"]), "y": float(r["y"]),
+                                 "w": float(r["w"]), "h": float(r["h"])} for r in self.figure_rois]}
 
     @staticmethod
     def from_dict(d):
@@ -47,7 +50,8 @@ class ImageEntry:
                           status=d.get("status", "未处理"), error=d.get("error", ""),
                           sections=[Section.from_dict(s) for s in d.get("sections", [])],
                           exclusions=[[tuple(p) for p in poly] for poly in d.get("exclusions", [])],
-                          rois=[{"name": r["name"], "polygon": [tuple(p) for p in r["polygon"]]} for r in d.get("rois", [])])
+                          rois=[{"name": r["name"], "polygon": [tuple(p) for p in r["polygon"]]} for r in d.get("rois", [])],
+                          figure_rois=[dict(r) for r in d.get("figure_rois", [])])
 
     @property
     def key(self) -> str:
@@ -71,6 +75,7 @@ class Project:
     network: dict = field(default_factory=dict)   # 功能网络分析参数（network.NetParams 的字典）
     relocated: int = 0                             # 打开项目时自动找回的图片数（不保存）
     grading: dict = field(default_factory=dict)   # 强度分级：{通道名: [弱/中分界, 中/强分界]}（倍背景）
+    figure: dict = field(default_factory=dict)    # 截图制图设置（figure.FigureSettings 的字典）
 
     def __post_init__(self):
         from . import slide_io, detection
@@ -106,6 +111,7 @@ class Project:
             "thickness": self.thickness, "z_mode": self.z_mode,
             "export_skip_layers": self.export_skip_layers, "export_max_depth": self.export_max_depth,
             "samples": self.samples, "stats": self.stats, "grading": self.grading, "network": self.network,
+            "figure": self.figure,
         }
         from . import slide_io
         slide_io.Z_MODE = self.z_mode
@@ -147,6 +153,7 @@ class Project:
         p.stats = d.get("stats", {})
         p.grading = d.get("grading", {})
         p.network = d.get("network", {})
+        p.figure = d.get("figure", {})
         p.__post_init__()
         from .relocate import auto_fix
         p.relocated = auto_fix(p)  # 项目和图片一起整体搬走时，自动按相对路径找回

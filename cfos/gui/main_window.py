@@ -31,6 +31,7 @@ from .groups_panel import GroupsMixin
 from .quality_panel import QualityMixin
 from .relocate_panel import RelocateMixin
 from .teaching import TeachingMixin
+from .figure_panel import FigureMixin
 
 APP_NAME = "cFos 脑片分析"
 IMAGE_FILTER = "荧光全片图像 (*.qptiff *.tif *.tiff *.ome.tif *.ome.tiff);;所有文件 (*)"
@@ -38,7 +39,7 @@ COLORMAP = {"DAPI": "blue", "Green": "green", "Red": "red", "Far red": "magenta"
 POINT_COLOR = {"DAPI": "#4f8cff", "Green": "#3ddc4a", "Red": "#ff4040", "Far red": "#ff40ff"}
 
 STEPS = ["① 项目与图片", "② 脑片拆分", "③ 亮度 / 对比度", "④ 细胞识别", "⑤ 共标统计",
-         "⑥ 脑图谱配准", "⑦ 分组与统计", "⑧ 导出 Excel"]
+         "⑥ 脑图谱配准", "⑦ 分组与统计", "⑧ 导出 Excel", "⑨ 截图制图"]
 
 
 def hint(text: str) -> QLabel:
@@ -54,7 +55,7 @@ def big_button(text: str) -> QPushButton:
     return b
 
 
-class MainWindow(TeachingMixin, RelocateMixin, QualityMixin, GroupsMixin, RegistrationMixin, QMainWindow):
+class MainWindow(TeachingMixin, FigureMixin, RelocateMixin, QualityMixin, GroupsMixin, RegistrationMixin, QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle(APP_NAME)
@@ -89,6 +90,7 @@ class MainWindow(TeachingMixin, RelocateMixin, QualityMixin, GroupsMixin, Regist
         self.stack.addWidget(self._panel_registration())
         self.stack.addWidget(self._panel_groups())
         self.stack.addWidget(self._panel_export())
+        self.stack.addWidget(self._panel_figure())
         self.steps.currentRowChanged.connect(self._on_step)
         right = QScrollArea(); right.setWidgetResizable(True); right.setWidget(self.stack)
         right.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
@@ -161,6 +163,8 @@ class MainWindow(TeachingMixin, RelocateMixin, QualityMixin, GroupsMixin, Regist
         if i == 7 and self.project:
             self.exp_skip_layers.setChecked(self.project.export_skip_layers)
             self.exp_depth.setValue(self.project.export_max_depth)
+        if i == 8:
+            self._sync_figure_panel()
 
     def _refresh_enabled(self):
         has_p = self.project is not None
@@ -554,6 +558,7 @@ class MainWindow(TeachingMixin, RelocateMixin, QualityMixin, GroupsMixin, Regist
         self._draw_sections()
         self._draw_polygons()
         self._draw_cells()
+        self._draw_figure_rois(force=self.stack.currentIndex() == 8)
         self.viewer.reset_view()
 
     def _auto_contrast(self, c, layer=None):

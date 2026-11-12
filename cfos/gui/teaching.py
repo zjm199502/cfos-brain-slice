@@ -83,6 +83,13 @@ LESSONS = {
         "<b>导出后先做两件事</b>：看“按脑片汇总”中标红/标黄的脑片；翻一遍“质控图”文件夹。<br>"
         "<b>常见错误</b>：导出时 Excel 文件还开着；不保存分析参数，几个月后无法复现。",
         [("qc_example.png", "质控图：圆圈是识别到的阳性细胞，白线是脑区边界", True)]),
+    8: ("<b>目标</b>：把感兴趣的区域放大截图、加上比例尺，做成论文或 PPT 里用的图。<br>"
+        "<b>做法</b>：画新的截图框 → 在图上拖出矩形 → 保存截图框 → 选通道、叠加内容和比例尺样式 → 预览 → 导出。<br>"
+        "<b>建议</b><br>"
+        "• 同一篇论文里的图用同一个比例尺长度和同样大小的截图框（勾选“固定大小”）；<br>"
+        "• 用“③ 亮度 / 对比度”把亮度调好再截图，所有分组的图要用相同的亮度设置；<br>"
+        "• 投稿用 TIFF（无损）；要在 Illustrator 里改比例尺位置、字体时用 SVG。<br>"
+        "<b>常见错误</b>：不同组的图亮度不一致，看起来“差异很大”其实是显示设置不同。", []),
 }
 
 
@@ -185,6 +192,8 @@ class TeachingMixin:
             return bool(rows) and all(r["动物"] and r["组别"] for r in rows)
         if i == 7:
             return any(p.folder.glob("*.xlsx"))
+        if i == 8:
+            return any((p.folder / "截图").glob("*.png")) or any((p.folder / "截图").glob("*.tif"))
         return False
 
     def _refresh_step_marks(self):
