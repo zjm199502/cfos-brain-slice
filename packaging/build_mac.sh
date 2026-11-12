@@ -6,7 +6,7 @@
 set -euo pipefail
 W=${1:?工作目录}; APP=$(cd "$(dirname "$0")/.." && pwd); PY=/home/user/venv/bin/python; PIP=/home/user/venv/bin/pip
 PY_URL="https://github.com/astral-sh/python-build-standalone/releases/download/20261020/cpython-3.13.16+20261020-aarch64-apple-darwin-install_only.tar.gz"
-NAME="cFos脑片分析"; VER=0.5.1
+NAME="cFos脑片分析"; VER=0.6
 mkdir -p "$W" && cd "$W"
 [ -f py.tar.gz ] || curl -sL -o py.tar.gz "$PY_URL"
 # Mac 上用完整版 tensorflow（没有 tensorflow-cpu）
