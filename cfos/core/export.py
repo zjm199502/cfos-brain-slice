@@ -127,8 +127,57 @@ def _roi_area_mm2(polygon, exclusions, px_um) -> float:
     return float(inn.sum()) * (10.0 / 1000.0) ** 2
 
 
+def _version() -> str:
+    from .. import __version__
+    return __version__
+
+
+def _net_text() -> str:
+    """StarDist 通用模型（2D_versatile_fluo）+ 实际运行方式。"""
+    from . import accel
+    dev = accel._status.get("device") or ""
+    if "ONNX" not in dev:
+        dev = "ONNX Runtime（CPU）" if accel.net_backend() == "onnx" and accel._ort() is not None else "TensorFlow（CPU）"
+    return f"StarDist（{dev}）"
+
+
+def _registration_rows(project: Project) -> list:
+    """每张脑片的配准方法汇总（论文方法部分用）。"""
+    from .registration import Registration
+    n = {"lin": 0, "tex": 0, "cont": 0, "old": 0}
+    fixes, fixed_secs, total = 0, 0, 0
+    for im in project.images:
+        for s in im.sections:
+            r = Registration.from_dict(s.registration)
+            if not r.done:
+                continue
+            total += 1
+            if not r.nonlinear:
+                n["lin"] += 1
+            elif r.nl_method == "轮廓 + DAPI 纹理":
+                n["tex"] += 1
+            elif r.nl_method == "只用轮廓":
+                n["cont"] += 1
+            else:
+                n["old"] += 1
+            if r.control_points:
+                fixes += len(r.control_points); fixed_secs += 1
+    if not total:
+        return []
+    parts = [f"{k} {v} 张" for k, v in (("DeepSlice 定位 + 非线性贴合（轮廓 + DAPI 纹理）", n["tex"]),
+                                       ("DeepSlice 定位 + 非线性贴合（只用轮廓）", n["cont"]),
+                                       ("DeepSlice 定位 + 非线性贴合（只用轮廓，v0.7 之前配准）", n["old"]),
+                                       ("DeepSlice 定位，未做非线性贴合", n["lin"])) if v]
+    return [("图谱", "Allen 小鼠脑图谱 CCFv3（10 µm 标签图）"),
+            (f"配准方法（共 {total} 张脑片）", "；".join(parts)),
+            ("手动修正", f"{fixed_secs} 张脑片，共 {fixes} 个修正点" if fixes else "无")]
+
+
 def params_table(project: Project) -> pd.DataFrame:
     rows = [("导出时间", _dt.datetime.now().strftime("%Y-%m-%d %H:%M")),
+            ("软件版本", f"cFos 脑片分析 v{_version()}"),
+            ("细胞识别神经网络", _net_text()),
+            *_registration_rows(project),
             ("识别分辨率 (µm/像素)", project.detection.pixel_um),
             ("共标距离阈值 (µm)", project.coloc.max_dist_um),
             ("共标：中心落入轮廓也算", "是" if project.coloc.use_contour else "否"),
@@ -144,6 +193,7 @@ def params_table(project: Project) -> pd.DataFrame:
         if p is None:
             continue
         rows += [(f"{nm} 是否识别", "是" if p.detect else "否"),
+                 (f"{nm} 识别模型", f"微调模型“{p.model}”" if p.model else "StarDist 通用荧光细胞核模型（2D_versatile_fluo）"),
                  (f"{nm} 置信度阈值", p.prob_thresh),
                  (f"{nm} 面积范围 (µm²)", f"{p.min_area_um2} – {p.max_area_um2}"),
                  (f"{nm} 最低平均强度", p.min_intensity),

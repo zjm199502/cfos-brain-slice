@@ -138,4 +138,16 @@ assert "电脑和软件信息.json" in names and "项目/cfos_project.json" in n
 info = json.loads(zipfile.ZipFile(z).read("电脑和软件信息.json"))
 print("info", {k: info[k] for k in ("软件版本", "CPU 使用", "细胞识别神经网络") if k in info})
 assert z.stat().st_size < 5_000_000
+
+# ---------------------------------------------------------------- 5. Excel 里的版本 / 识别引擎 / 配准方法
+pt = params_table(w.project)
+keys = pt["参数"].tolist(); print(pt.head(8).to_string())
+assert "软件版本" in keys and "细胞识别神经网络" in keys and any(k.startswith("配准方法") for k in keys) and "手动修正" in keys
+assert "ONNX" in pt.set_index("参数").loc["细胞识别神经网络", "值"]
+
+# ---------------------------------------------------------------- 6. 软件自检
+w.run_selftest(); wait_task()
+print(msgs[-1]); assert "全部正常" in msgs[-1]
+z = make_bundle(w.project)
+assert "软件日志/自检结果.txt" in zipfile.ZipFile(z).namelist()
 print("DONE")

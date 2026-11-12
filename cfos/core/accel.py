@@ -1,7 +1,7 @@
-"""细胞识别的计算设备（GPU 加速）。
+"""细胞识别神经网络的运行方式。
 
-【暂未启用，2026-11-12】安装包里没有 onnxruntime，detection.get_model 也没有调用 accelerate()。
-以后启用：requirements 加 onnx、tf2onnx、onnxruntime(-directml)，在 get_model 里调用 accelerate()，界面加开关。
+v0.7 起默认用 ONNX Runtime（CPU）跑 StarDist 的网络（use_onnx_cpu，见 net_backend）。
+下面的 GPU 加速部分（accelerate()）【暂未启用】：安装包只带 CPU 版 onnxruntime。
 
 StarDist 的神经网络部分改用 ONNX Runtime 运行：
 - Windows：DirectML（英伟达 / AMD / Intel 显卡都能用，不需要另装 CUDA）；
@@ -143,19 +143,41 @@ def export_onnx(keras_model, out: Path, sig: str = "") -> Path:
     return out
 
 
-def ensure_onnx(model, model_dir: Path) -> Path | None:
-    """返回模型的 ONNX 文件，没有或已过期时转换一次（微调后的模型权重变了会重新转换）。"""
-    model_dir = Path(model_dir)
-    p = onnx_path(model_dir)
-    sig = _signature(model_dir)
+def onnx_cache_dir() -> Path:
+    """模型文件夹不可写（如 Windows 的 Program Files）时，转换结果放在用户目录。"""
+    if sys.platform == "darwin":
+        base = Path(os.path.expanduser("~/Library/Caches")) / "cfos脑片分析"
+    else:
+        base = Path(os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")) / "cfos脑片分析"
+    return base / "onnx模型"
+
+
+def _sig_ok(p: Path, sig: str) -> bool:
     sigf = p.with_suffix(".sig")
-    if p.exists() and (not sigf.exists() or sigf.read_text(encoding="utf-8").strip() == sig):
+    return p.exists() and (not sigf.exists() or sigf.read_text(encoding="utf-8").strip() == sig)
+
+
+def ensure_onnx(model, model_dir: Path) -> Path | None:
+    """返回模型的 ONNX 文件，没有或已过期时转换一次（微调后的模型权重变了会重新转换）。
+
+    通用模型的 model.onnx 在打包时就转换好随软件附带（packaging/make_onnx.py）；
+    需要转换时先写模型文件夹，写不进去就写用户目录的缓存。"""
+    model_dir = Path(model_dir)
+    sig = _signature(model_dir)
+    p = onnx_path(model_dir)
+    if _sig_ok(p, sig):
         return p
-    try:
-        return export_onnx(model.keras_model, p, sig)
-    except Exception as e:  # noqa: BLE001  软件安装目录可能不可写，等等
-        log.warning("模型转换为 ONNX 失败（%s），细胞识别使用 CPU。", e)
-        return None
+    cache = onnx_cache_dir() / f"{sig or model_dir.name}.onnx"
+    if _sig_ok(cache, sig):
+        return cache
+    for out in (p, cache):
+        try:
+            out.parent.mkdir(parents=True, exist_ok=True)
+            return export_onnx(model.keras_model, out, sig)
+        except Exception as e:  # noqa: BLE001  软件安装目录可能不可写，等等
+            log.warning("模型转换为 ONNX 失败（%s：%s）", out, e)
+    log.warning("模型无法转换为 ONNX，细胞识别使用 TensorFlow。")
+    return None
 
 
 # ------------------------------------------------------------------ 推理

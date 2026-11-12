@@ -566,6 +566,7 @@ class RegistrationMixin:
             r0 = R.Registration.from_dict(reg.to_dict()); r0.control_points = []
             w = R.nonlinear_fit(r0, R.orient(mask, reg.orientation), R.orient(img, reg.orientation))
             np.save(R.warp_path(results, key, s.name), np.stack(w))
+            reg.nl_method = r0.nl_method
             return True
 
         def done(_):
@@ -650,6 +651,7 @@ class RegistrationMixin:
                     w = R.nonlinear_fit(r0, R.orient(mask, reg.orientation), R.orient(img, reg.orientation))
                     np.save(R.warp_path(results, im.key, s_.name), np.stack(w))
                     reg.nonlinear = True
+                    reg.nl_method = r0.nl_method
                     s_.registration = reg.to_dict()
                 return True
 

@@ -44,7 +44,19 @@ def _splash():
     return lb
 
 
+def selftest_cli():
+    """命令行自检：main.py --selftest。结果打印出来并写到日志文件夹的“自检结果.txt”。退出码 0 = 全部正常。"""
+    from cfos.core.log import setup_logging
+    setup_logging()
+    from cfos.core import selftest
+    ok, text, _ = selftest.run(lambda i, n, t: print(t, flush=True))
+    print(text, flush=True)
+    sys.exit(0 if ok else 1)
+
+
 def main():
+    if "--selftest" in sys.argv:
+        selftest_cli()
     _raise_priority()
     splash = _splash()
     from napari.qt import get_qapp

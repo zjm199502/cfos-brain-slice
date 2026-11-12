@@ -6,6 +6,8 @@
 set -euo pipefail
 W=${1:?工作目录}; APP=$(cd "$(dirname "$0")/.." && pwd); PIP=/home/user/venv/bin/pip; PY=/home/user/venv/bin/python
 PY_URL="https://github.com/astral-sh/python-build-standalone/releases/download/20261020/cpython-3.13.16+20261020-x86_64-pc-windows-msvc-install_only.tar.gz"
+# 通用模型提前转换为 ONNX 随包带上（安装目录不可写，用户电脑上不再转换）
+"$PY" "$APP/packaging/make_onnx.py"
 mkdir -p "$W" && cd "$W"
 [ -f py.tar.gz ] || curl -sL -o py.tar.gz "$PY_URL"
 # 排除：开发用的、只有 Linux 的、以及本软件用不到的组件（见 packaging/不打包的组件.txt）
@@ -44,4 +46,4 @@ cp "$APP"/packaging/cfos.ico stage/app/
 cp "$APP"/packaging/诊断启动（出问题时用）.bat stage/
 find stage -name "__pycache__" -type d -prune -exec rm -rf {} +
 # 注意：NSIS 的数据块不能超过 2 GB，所以不能用 /SOLID 压缩
-LANG=C.UTF-8 LC_ALL=C.UTF-8 makensis -V2 -INPUTCHARSET UTF8 "-DSTAGE=$PWD/stage" "-DOUTFILE=$PWD/cFos脑片分析_v0.6_Windows安装包.exe" "$APP/packaging/installer.nsi"
+LANG=C.UTF-8 LC_ALL=C.UTF-8 makensis -V2 -INPUTCHARSET UTF8 "-DSTAGE=$PWD/stage" "-DOUTFILE=$PWD/cFos脑片分析_v0.7_Windows安装包.exe" "$APP/packaging/installer.nsi"

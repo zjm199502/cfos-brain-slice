@@ -39,6 +39,7 @@ class Registration:
     shift_y: float = 0.0
     control_points: list = field(default_factory=list)  # [[src_s, src_t, dst_s, dst_t], ...] 归一化坐标
     nonlinear: bool = False                # 是否使用 elastix 非线性贴合
+    nl_method: str = ""                    # 非线性贴合实际用的方法（"轮廓 + DAPI 纹理" / "只用轮廓"；v0.7 前为空）
     status: str = "未配准"
 
     def to_dict(self):
@@ -322,7 +323,17 @@ def min_jacobian(w) -> float:
     return float(((1 + gx[1]) * (1 + gy[0]) - gx[0] * gy[1]).min())
 
 
+TEXTURE, CONTOUR = "轮廓 + DAPI 纹理", "只用轮廓"
+
+
 def nonlinear_fit(reg: Registration, mask_oriented: np.ndarray, img_oriented: np.ndarray | None = None):
+    """见 _nonlinear_fit；实际所用的方法记在 reg.nl_method（写进 Excel 的分析参数）。"""
+    w, method = _nonlinear_fit(reg, mask_oriented, img_oriented)
+    reg.nl_method = method
+    return w
+
+
+def _nonlinear_fit(reg: Registration, mask_oriented: np.ndarray, img_oriented: np.ndarray | None = None):
     """用 elastix 把图谱切片贴到组织上，返回 (dx, dy) 像素位移场。
     有 DAPI 缩略图时，同时用组织轮廓和 DAPI 纹理（图谱平均模板 ↔ DAPI，互信息）：胼胝体、前连合、脑室、海马等
     内部结构也会对齐，而不只是外圈。示例脑片实测（NeuN 细胞不参与配准，作为独立检验）：
@@ -343,21 +354,21 @@ def nonlinear_fit(reg: Registration, mask_oriented: np.ndarray, img_oriented: np
                 lab2 = sample_plane(pl, W, H, warp=w)["annotation"]
                 d2 = dice(lab2 > 0, mask_oriented)
                 if d2 >= 0.95:          # 外轮廓贴得好，直接用（通常情况，不用再算一遍）
-                    return w
+                    return w, TEXTURE
                 w0 = _elastix(fixed, moving, grid=60.0)
                 lab0 = sample_plane(pl, W, H, warp=w0)["annotation"]
                 if d2 >= dice(lab0 > 0, mask_oriented) - 0.02:
-                    return w
+                    return w, TEXTURE
                 from .log import log
                 log.info("DAPI 纹理贴合后轮廓重合度下降，改用只用轮廓的结果")
-                return w0
+                return w0, CONTOUR
             from .log import log
             log.info("DAPI 纹理贴合出现折叠（最小雅可比 %.2f），改用只用轮廓", min_jacobian(w))
         except Exception:  # noqa: BLE001
             from .log import log
             import traceback
             log.warning("DAPI 纹理贴合失败，改用只用轮廓\n%s", traceback.format_exc())
-    return _elastix(fixed, moving, grid=60.0)
+    return _elastix(fixed, moving, grid=60.0), CONTOUR
 
 
 def label_maps(reg: Registration, W: int, H: int, warp=None):

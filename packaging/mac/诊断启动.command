@@ -6,5 +6,5 @@ echo "程序位置：$A"
 R="$A/Contents/Resources"
 export PYTHONNOUSERSITE=1
 "$R/python/bin/python3" -X faulthandler -c "import sys; print(sys.version)"
-"$R/python/bin/python3" -X faulthandler "$R/app/main.py"
+"$R/python/bin/python3" -X faulthandler "$R/app/main.py" "$@"
 echo; echo "程序已退出。按回车键关闭窗口。"; read

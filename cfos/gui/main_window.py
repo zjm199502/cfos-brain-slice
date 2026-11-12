@@ -271,12 +271,34 @@ class MainWindow(TeachingMixin, FigureMixin, AccuracyMixin, RelocateMixin, Quali
         t2 = QPushButton("导入参数模板…"); t2.clicked.connect(self.load_template)
         t1.setToolTip("把识别、共标、亮度等所有参数存成一个文件，发给同学或用在下一个项目，保证分析标准一致。")
         row.addWidget(t1); row.addWidget(t2); L.addLayout(row)
+        stb = QPushButton("软件自检（安装后建议做一次，约 1–2 分钟）")
+        stb.setToolTip("用软件自带的示例脑片把读图、细胞识别、图谱配准、导出各走一遍，"
+                       "检查这台电脑上的安装是否完整、能否正常工作。不影响当前项目。")
+        stb.clicked.connect(self.run_selftest)
+        L.addWidget(stb)
         dg = QPushButton("出问题时：导出诊断包（发给开发者）…")
         dg.setToolTip("把运行日志、项目设置、电脑和软件版本打成一个 zip（不含图片和细胞数据，一般几百 KB），"
                       "出问题时把它发给开发者即可，不用截图、不用描述半天。")
         dg.clicked.connect(self.export_diagnostics)
         L.addWidget(dg)
         return w
+
+    def run_selftest(self):
+        from ..core import selftest
+
+        def job(task):
+            return selftest.run(task.report)
+
+        def done(res):
+            ok, text, _ = res
+            from ..core.log import log_dir
+            msg = text + f"\n\n结果已保存到：{log_dir() / '自检结果.txt'}"
+            if ok:
+                self.info(msg)
+            else:
+                self.error(msg + "\n请点“导出诊断包”，把 zip 文件发给开发者。")
+
+        self.run_task(job, done, label="正在自检…")
 
     def export_diagnostics(self):
         from qtpy.QtWidgets import QInputDialog

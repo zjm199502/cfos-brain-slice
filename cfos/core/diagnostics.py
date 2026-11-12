@@ -111,6 +111,9 @@ def make_bundle(project=None, out_dir: Path | None = None, note: str = "") -> Pa
         ld = log_dir()
         for f in sorted(ld.glob("运行日志.txt*")):
             _add_tail(z, f, f"软件日志/{f.name}")
+        st = ld / "自检结果.txt"
+        if st.exists():
+            z.write(st, "软件日志/自检结果.txt")
         if project is not None:
             pf = Path(project.folder)
             for n in ("cfos_project.json", "cfos_project.json.bak"):
