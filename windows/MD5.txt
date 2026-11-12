@@ -1,1 +1,1 @@
-cFos-v0.5.1-Windows-setup.exe  1c9b25e407b61efe2aac82221bdae657  843419819 bytes
+d53420abafc2a9715ded2d3956276aeb  cFos-v0.6-Windows-setup.exe
