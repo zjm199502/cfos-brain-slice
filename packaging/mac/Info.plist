@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleName</key><string>cFos脑片分析</string>
+  <key>CFBundleDisplayName</key><string>cFos脑片分析</string>
+  <key>CFBundleIdentifier</key><string>local.cfos.brainslice</string>
+  <key>CFBundleVersion</key><string>0.5</string>
+  <key>CFBundleShortVersionString</key><string>0.5</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleExecutable</key><string>cfos</string>
+  <key>CFBundleIconFile</key><string>cfos.icns</string>
+  <key>LSMinimumSystemVersion</key><string>15.0</string>
+  <key>LSArchitecturePriority</key><array><string>arm64</string></array>
+  <key>NSHighResolutionCapable</key><true/>
+  <key>LSApplicationCategoryType</key><string>public.app-category.education</string>
+  <key>CFBundleDevelopmentRegion</key><string>zh_CN</string>
+</dict>
+</plist>

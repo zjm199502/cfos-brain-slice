@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+deformationField.nii
+# 体积大的资源不放进仓库，随安装包发布（见 README“资源文件”）
+resources/atlas/
+resources/deepslice/
+resources/demo/
+resources/models/*/model.onnx
+resources/models/*/model.sig

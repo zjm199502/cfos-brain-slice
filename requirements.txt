@@ -1,0 +1,18 @@
+numpy
+scipy
+pandas
+scikit-image
+tifffile
+imagecodecs
+zarr
+openpyxl
+matplotlib
+tensorflow-cpu; sys_platform != "darwin"
+tensorflow; sys_platform == "darwin"
+stardist
+PySide6
+napari[pyside6]
+DeepSlice
+itk-elastix
+h5py
+networkx
