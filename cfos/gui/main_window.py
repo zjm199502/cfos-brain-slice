@@ -130,7 +130,8 @@ class MainWindow(TeachingMixin, RelocateMixin, QualityMixin, GroupsMixin, Regist
         self.cancel_btn.clicked.connect(lambda: self.task and self.task.cancel())
         self.statusBar().addPermanentWidget(self.progress)
         self.statusBar().addPermanentWidget(self.cancel_btn)
-        self.statusBar().showMessage("请先在“① 项目与图片”中新建或打开一个项目。")
+        from ..core.cpu import describe as _cpu_desc
+        self.statusBar().showMessage("请先在“① 项目与图片”中新建或打开一个项目。　" + _cpu_desc())
 
         try:
             from napari.qt import get_stylesheet

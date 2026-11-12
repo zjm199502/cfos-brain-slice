@@ -176,6 +176,10 @@ class OrtNet:
         ort = _ort()
         so = ort.SessionOptions()
         so.log_severity_level = 3
+        if self.provider == "CPUExecutionProvider":
+            from .cpu import main_threads
+            so.intra_op_num_threads = main_threads()
+            so.inter_op_num_threads = 1
         if self.provider == "DmlExecutionProvider":
             so.enable_mem_pattern = False
             so.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
@@ -269,6 +273,36 @@ def accelerate(model, model_dir, name: str = ""):
     static = ep == "CoreMLExecutionProvider" or os.environ.get("CFOS_TEST_STATIC") == "1"
     model.keras_model = _CheckedNet(OrtNet(p, ep, static), tf_model, name)
     return _EP_NAMES.get(ep, ep)
+
+
+def use_onnx_cpu(model, model_dir, name: str = "") -> bool:
+    """用 ONNX Runtime（CPU）代替 TensorFlow 跑神经网络。Windows 上 TensorFlow 的 CPU 计算在多核机器上
+    可能慢几百倍（2026-11-12 在 32 核电脑上实测），ONNX Runtime 没有这个问题。
+    需要模型文件夹里有 model.onnx（通用模型随软件附带；微调模型在有 tf2onnx 时自动转换）。
+    返回是否成功；失败时保持 TensorFlow。"""
+    if _ort() is None or model_dir is None:
+        return False
+    tf_model = getattr(model, "_cfos_tf_model", None) or model.keras_model
+    model._cfos_tf_model = tf_model
+    with _lock:
+        p = ensure_onnx(model, Path(model_dir))
+    if p is None:
+        return False
+    net = OrtNet(p, "CPUExecutionProvider", False)
+    if os.environ.get("CFOS_CHECK_ONNX") == "1":     # 开发时核对；默认不做（TensorFlow 在问题机器上太慢）
+        model.keras_model = _CheckedNet(net, tf_model, name)
+    else:
+        model.keras_model = net
+    _status.update(device="CPU（ONNX Runtime）", failed="")
+    return True
+
+
+def net_backend() -> str:
+    """细胞识别神经网络用什么跑：'onnx' 或 'tf'。环境变量 CFOS_NET=tf 可强制用 TensorFlow。"""
+    env = os.environ.get("CFOS_NET", "").lower()
+    if env in ("tf", "onnx"):
+        return env
+    return "tf"      # 安装包里不带 onnxruntime（按 Lucas 的要求不增加体积）；需要时设 CFOS_NET=onnx
 
 
 def set_pref(pref: str, models: dict | None = None):

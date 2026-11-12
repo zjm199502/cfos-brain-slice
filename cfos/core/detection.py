@@ -19,11 +19,25 @@ _MODELS: dict = {}
 MODEL_ROOT = None   # 项目中微调模型所在的文件夹（打开项目时设置）
 
 
+def _set_tf_threads():
+    """TensorFlow 的线程数按 cpu.main_threads()（只在 TensorFlow 第一次运行前有效）。"""
+    try:
+        import tensorflow as tf
+        from .cpu import main_threads
+        n = main_threads()
+        if tf.config.threading.get_intra_op_parallelism_threads() != n:
+            tf.config.threading.set_intra_op_parallelism_threads(n)
+            tf.config.threading.set_inter_op_parallelism_threads(2 if n >= 4 else 1)
+    except Exception:  # noqa: BLE001  已经初始化过就保持原样
+        pass
+
+
 def get_model(name: str = ""):
     """name 为空 = 软件自带的通用模型；否则为项目 models 文件夹里微调过的模型。"""
     from pathlib import Path
     key = name or ""
     if key not in _MODELS:
+        _set_tf_threads()
         from stardist.models import StarDist2D
         if key:
             d = Path(MODEL_ROOT or ".") / key
@@ -35,7 +49,20 @@ def get_model(name: str = ""):
             d = stardist_model_dir()
             _MODELS[key] = StarDist2D(None, name=d.name, basedir=str(d.parent)) if d is not None \
                 else StarDist2D.from_pretrained("2D_versatile_fluo")
-    return _MODELS[key]
+    m = _MODELS[key]
+    if not getattr(m, "_cfos_net_done", False):
+        m._cfos_net_done = True
+        from . import accel
+        if accel.net_backend() == "onnx":
+            try:
+                ok = accel.use_onnx_cpu(m, getattr(m, "logdir", None), key)
+            except Exception as e:  # noqa: BLE001
+                ok = False
+                import logging
+                logging.getLogger("cfos").warning("ONNX Runtime 不可用，改用 TensorFlow：%s", e)
+            import logging
+            logging.getLogger("cfos").info("细胞识别神经网络：%s", "ONNX Runtime" if ok else "TensorFlow")
+    return m
 
 
 def forget_model(name: str):
@@ -141,11 +168,8 @@ _POOL_N = 0
 
 
 def n_workers() -> int:
-    env = os.environ.get("CFOS_WORKERS")
-    if env is not None:
-        return max(0, int(env))
-    n = os.cpu_count() or 2
-    return max(0, min(6, n - 1))
+    from .cpu import n_workers as _n
+    return _n()
 
 
 def _worker_init():
