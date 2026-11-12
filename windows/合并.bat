@@ -1,0 +1,4 @@
+@echo off
+cd /d "%~dp0"
+copy /b cFos-v0.5-Windows-setup.exe.part01+cFos-v0.5-Windows-setup.exe.part02+cFos-v0.5-Windows-setup.exe.part03+cFos-v0.5-Windows-setup.exe.part04+cFos-v0.5-Windows-setup.exe.part05+cFos-v0.5-Windows-setup.exe.part06+cFos-v0.5-Windows-setup.exe.part07+cFos-v0.5-Windows-setup.exe.part08+cFos-v0.5-Windows-setup.exe.part09 cFos-v0.5-Windows-setup.exe
+pause
