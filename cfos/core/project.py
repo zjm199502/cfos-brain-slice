@@ -76,6 +76,7 @@ class Project:
     relocated: int = 0                             # 打开项目时自动找回的图片数（不保存）
     grading: dict = field(default_factory=dict)   # 强度分级：{通道名: [弱/中分界, 中/强分界]}（倍背景）
     figure: dict = field(default_factory=dict)    # 截图制图设置（figure.FigureSettings 的字典）
+    accuracy: list = field(default_factory=list)  # 识别准确率检查记录（accuracy.check 的结果）
 
     def __post_init__(self):
         from . import slide_io, detection
@@ -112,6 +113,7 @@ class Project:
             "export_skip_layers": self.export_skip_layers, "export_max_depth": self.export_max_depth,
             "samples": self.samples, "stats": self.stats, "grading": self.grading, "network": self.network,
             "figure": self.figure,
+            "accuracy": self.accuracy,
         }
         from . import slide_io
         slide_io.Z_MODE = self.z_mode
@@ -154,6 +156,7 @@ class Project:
         p.grading = d.get("grading", {})
         p.network = d.get("network", {})
         p.figure = d.get("figure", {})
+        p.accuracy = d.get("accuracy", [])
         p.__post_init__()
         from .relocate import auto_fix
         p.relocated = auto_fix(p)  # 项目和图片一起整体搬走时，自动按相对路径找回

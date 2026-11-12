@@ -297,12 +297,23 @@ def use_onnx_cpu(model, model_dir, name: str = "") -> bool:
     return True
 
 
+def backend_text() -> str:
+    """当前细胞识别神经网络用什么在跑（诊断用）。"""
+    d = _status.get("device") or "CPU"
+    return f"{d}（设定：{net_backend()}）" + (f"；GPU 未能使用：{_status['failed']}" if _status.get("failed") else "")
+
+
 def net_backend() -> str:
-    """细胞识别神经网络用什么跑：'onnx' 或 'tf'。环境变量 CFOS_NET=tf 可强制用 TensorFlow。"""
+    """细胞识别神经网络用什么跑：'onnx' 或 'tf'。环境变量 CFOS_NET=tf 可强制用 TensorFlow。
+
+    默认用 ONNX Runtime（CPU）：示例脑片实测比 TensorFlow 快约一倍（446 秒 → 230 秒，4 核），
+    每个细胞的位置、面积、亮度都与 TensorFlow 相同（最大差 0.05 像素）；
+    而且不会碰到 TensorFlow 在某些多核 Windows 电脑上慢几百倍的问题。
+    没装 onnxruntime、或模型转换失败时，自动回到 TensorFlow。"""
     env = os.environ.get("CFOS_NET", "").lower()
     if env in ("tf", "onnx"):
         return env
-    return "tf"      # 安装包里不带 onnxruntime（按 Lucas 的要求不增加体积）；需要时设 CFOS_NET=onnx
+    return "onnx"
 
 
 def set_pref(pref: str, models: dict | None = None):

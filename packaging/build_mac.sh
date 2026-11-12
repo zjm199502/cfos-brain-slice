@@ -10,12 +10,24 @@ NAME="cFos脑片分析"; VER=0.6
 mkdir -p "$W" && cd "$W"
 [ -f py.tar.gz ] || curl -sL -o py.tar.gz "$PY_URL"
 # Mac 上用完整版 tensorflow（没有 tensorflow-cpu）
-$PIP freeze | grep -viE "^(-e|nvidia|triton|tensorflow|tensorflow_cpu|onnx|tf2onnx|sympy|mpmath|pyflakes|typing==)" > constraints.txt
+EXCLUDE="^(-e|nvidia|triton|tensorflow|tensorflow_cpu|sympy|mpmath|pyflakes|typing==|$(tr '\n' '|' < "$APP/packaging/不打包的组件.txt" | sed 's/|$//'))"
+$PIP freeze | grep -viE "$EXCLUDE" > constraints.txt
 echo "tensorflow==2.21.0" >> constraints.txt
 PLAT=(--platform macosx_15_0_arm64 --python-version 3.13 --implementation cp --abi cp313 --only-binary=:all:)
 mkdir -p wheels; : > fail.txt
 while read -r r; do $PIP download -q "${PLAT[@]}" --no-deps "$r" -d wheels >/dev/null 2>&1 || echo "$r" >> fail.txt; done < constraints.txt
 [ -s fail.txt ] && { echo "以下组件没有 Mac 版："; cat fail.txt; }
+# 去掉本软件用不到的组件（上面的 constraints 只能限定版本，依赖还是会被下载下来）
+$PY - "$APP/packaging/不打包的组件.txt" wheels <<'PYEOF'
+import pathlib, re, sys
+names = {re.sub(r"[-_.]+", "-", n.strip().lower()) for n in open(sys.argv[1], encoding="utf-8") if n.strip()}
+total = 0
+for f in sorted(pathlib.Path(sys.argv[2]).glob("*.whl")):
+    if re.sub(r"[-_.]+", "-", f.name.split("-")[0].lower()) in names:
+        total += f.stat().st_size; print("不打包", f.name); f.unlink()
+print(f"共去掉 {total / 2**20:.0f} MB 的组件包")
+PYEOF
+
 # 同一组件既有通用版又有 Mac 专用版时，只留 Mac 专用版
 $PY - <<'PYEOF'
 import collections, pathlib, re
@@ -31,7 +43,9 @@ PYEOF
 rm -rf stage && mkdir -p stage && tar -xzf py.tar.gz -C stage
 SP=stage/python/lib/python3.13/site-packages
 $PIP install -q --no-deps --no-compile --target $SP "${PLAT[@]}" wheels/*.whl
-rm -rf $SP/clang $SP/tensorflow/include $SP/PySide6/Qt/lib/QtWebEngine* $SP/PySide6/QtWebEngine* $SP/PySide6/Qt/qml \
+rm -rf $SP/DeepSlice/metadata/weights $SP/onnxruntime/transformers $SP/onnxruntime/quantization \
+       $SP/onnxruntime/training $SP/onnx/backend/test \
+       $SP/clang $SP/tensorflow/include $SP/PySide6/Qt/lib/QtWebEngine* $SP/PySide6/QtWebEngine* $SP/PySide6/Qt/qml \
        $SP/PySide6/Qt/metatypes $SP/PySide6/examples $SP/pyside6_webengine* $SP/PySide6/*.app \
        $SP/PySide6/Designer.app $SP/PySide6/Assistant.app $SP/PySide6/Linguist.app
 find $SP/PySide6 -path "*translations*" -type f ! -name "*zh_CN*" -delete

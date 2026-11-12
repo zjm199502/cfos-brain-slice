@@ -32,6 +32,7 @@ from .quality_panel import QualityMixin
 from .relocate_panel import RelocateMixin
 from .teaching import TeachingMixin
 from .figure_panel import FigureMixin
+from .accuracy_panel import AccuracyMixin
 
 APP_NAME = "cFos 脑片分析"
 IMAGE_FILTER = "荧光全片图像 (*.qptiff *.tif *.tiff *.ome.tif *.ome.tiff);;所有文件 (*)"
@@ -55,7 +56,7 @@ def big_button(text: str) -> QPushButton:
     return b
 
 
-class MainWindow(TeachingMixin, FigureMixin, RelocateMixin, QualityMixin, GroupsMixin, RegistrationMixin, QMainWindow):
+class MainWindow(TeachingMixin, FigureMixin, AccuracyMixin, RelocateMixin, QualityMixin, GroupsMixin, RegistrationMixin, QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle(APP_NAME)
@@ -270,7 +271,28 @@ class MainWindow(TeachingMixin, FigureMixin, RelocateMixin, QualityMixin, Groups
         t2 = QPushButton("导入参数模板…"); t2.clicked.connect(self.load_template)
         t1.setToolTip("把识别、共标、亮度等所有参数存成一个文件，发给同学或用在下一个项目，保证分析标准一致。")
         row.addWidget(t1); row.addWidget(t2); L.addLayout(row)
+        dg = QPushButton("出问题时：导出诊断包（发给开发者）…")
+        dg.setToolTip("把运行日志、项目设置、电脑和软件版本打成一个 zip（不含图片和细胞数据，一般几百 KB），"
+                      "出问题时把它发给开发者即可，不用截图、不用描述半天。")
+        dg.clicked.connect(self.export_diagnostics)
+        L.addWidget(dg)
         return w
+
+    def export_diagnostics(self):
+        from qtpy.QtWidgets import QInputDialog
+        from ..core.diagnostics import make_bundle
+        note, ok = QInputDialog.getMultiLineText(self, "导出诊断包",
+                                                 "简单写一下出了什么问题（可以不写）：\n例如：点“自动配准”后卡住不动。", "")
+        if not ok:
+            return
+        try:
+            f = make_bundle(self.project, note=note)
+        except Exception as e:  # noqa: BLE001
+            from ..core.log import friendly
+            self.error(f"诊断包导出失败：{friendly(e)}")
+            return
+        self.info(f"诊断包已保存：\n{f}\n\n请把这个 zip 文件发给开发者。")
+        self._open_folder(f.parent)
 
     def _set_z_mode(self, _i=None):
         if self.project is None:
@@ -890,6 +912,7 @@ class MainWindow(TeachingMixin, FigureMixin, RelocateMixin, QualityMixin, Groups
         b = QPushButton("保存手动校正"); b.clicked.connect(self.save_manual); ml.addWidget(b)
         self.man_info = QLabel(""); self.man_info.setWordWrap(True); ml.addWidget(self.man_info)
         L.addWidget(mb)
+        self._accuracy_widgets(L)
 
         tb2 = QGroupBox("用自己的标注改进识别模型（可选）"); tl2 = QVBoxLayout(tb2)
         lb = QLabel("通用模型对你们的染色不够准时使用：①把看图窗口移到有代表性的地方，点“取一块并自动标注”；"
@@ -927,6 +950,7 @@ class MainWindow(TeachingMixin, FigureMixin, RelocateMixin, QualityMixin, Groups
             cb.blockSignals(False)
         self._ft_refresh()
         self._man_refresh_info()
+        self._acc_sync()
         for c, nm in enumerate(self.project.channel_names):
             p = self.project.detection.channels[c]
             box = QGroupBox(nm); f = QFormLayout(box)

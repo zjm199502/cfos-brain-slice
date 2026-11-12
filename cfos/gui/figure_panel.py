@@ -73,6 +73,25 @@ class FigureMixin:
         gl.addWidget(QLabel("亮度 / 对比度沿用“③ 亮度 / 对比度”里的设置。"))
         L.addWidget(g)
 
+        # ---- 脑区轮廓样式 + 整张脑片配准图
+        g = QGroupBox("脑区轮廓 / 整张脑片配准图"); f = QFormLayout(g)
+        self.rg_color = QComboBox(); self.rg_color.addItems(["白", "黑", "黄", "图谱颜色"])
+        self.rg_width = QSpinBox(); self.rg_width.setRange(0, 40); self.rg_width.setSpecialValueText("自动"); self.rg_width.setSuffix(" 像素")
+        self.rg_font = QSpinBox(); self.rg_font.setRange(0, 400); self.rg_font.setSpecialValueText("自动"); self.rg_font.setSuffix(" 像素")
+        self.rg_mid = QCheckBox("画左右半脑分界线")
+        self.rg_only = QCheckBox("只画轮廓（白底黑线，不显示荧光）")
+        f.addRow("线条颜色", self.rg_color); f.addRow("线条粗细", self.rg_width); f.addRow("缩写字号", self.rg_font)
+        f.addRow(self.rg_mid); f.addRow(self.rg_only)
+        hl = QLabel("导出整张脑片：荧光 + 配准后的脑区轮廓 + 缩写 + 比例尺。SVG 里的轮廓线和文字都是矢量，"
+                    "可以在 Illustrator 里改颜色、粗细、删掉不要的脑区。通道、比例尺、分辨率、格式用本页其他设置"
+                    "（整张脑片建议 1–2 µm/像素）。")
+        hl.setWordWrap(True); f.addRow(hl)
+        b = big_button("导出当前图片的配准图（每张脑片一张）"); b.clicked.connect(lambda: self.fig_export_sections(False))
+        f.addRow(b)
+        b = big_button("导出所有图片的配准图"); b.clicked.connect(lambda: self.fig_export_sections(True))
+        f.addRow(b)
+        L.addWidget(g)
+
         # ---- 比例尺
         g = QGroupBox("比例尺"); f = QFormLayout(g)
         self.sb_len = QComboBox(); self.sb_len.setEditable(True)
@@ -98,7 +117,7 @@ class FigureMixin:
         r.addWidget(self.fig_res, 1); gl.addLayout(r)
         gl.addWidget(QLabel("格式（可多选）"))
         self.fig_png = QCheckBox("PNG（通用，PPT 用）"); self.fig_png.setChecked(True)
-        self.fig_tif = QCheckBox("TIFF（无损，投稿用）"); self.fig_svg = QCheckBox("SVG（比例尺可在 Illustrator 中编辑）")
+        self.fig_tif = QCheckBox("TIFF（无损，投稿用）"); self.fig_svg = QCheckBox("SVG（比例尺、脑区轮廓可在 Illustrator 中编辑）")
         for cb in (self.fig_png, self.fig_tif, self.fig_svg):
             gl.addWidget(cb)
         b = big_button("预览选中的框"); b.clicked.connect(self.fig_preview); gl.addWidget(b)
@@ -112,7 +131,8 @@ class FigureMixin:
         self._fig_setting_widgets = [self.fig_fixed, self.fig_fw, self.fig_fh, self.fig_separate, self.fig_cells,
                                      self.fig_regions, self.fig_region_names, self.fig_excl, self.fig_inset, self.sb_len,
                                      self.sb_thick, self.sb_color, self.sb_pos, self.sb_text, self.sb_font, self.fig_res,
-                                     self.fig_png, self.fig_tif, self.fig_svg]
+                                     self.fig_png, self.fig_tif, self.fig_svg, self.rg_color, self.rg_width, self.rg_font,
+                                     self.rg_mid, self.rg_only]
         self._fig_connect_settings(self._fig_setting_widgets)
         self._fig_loading = False
         return w
@@ -158,6 +178,9 @@ class FigureMixin:
             self.fig_separate.setChecked(st.separate); self.fig_cells.setChecked(st.overlay_cells)
             self.fig_regions.setChecked(st.overlay_regions); self.fig_region_names.setChecked(st.overlay_region_names)
             self.fig_excl.setChecked(st.overlay_exclusions); self.fig_inset.setChecked(st.inset)
+            self.rg_color.setCurrentText(st.region_color if st.region_color in ("白", "黑", "黄", "图谱颜色") else "白")
+            self.rg_width.setValue(int(st.region_width_px)); self.rg_font.setValue(int(st.region_name_px))
+            self.rg_mid.setChecked(st.hemisphere_line); self.rg_only.setChecked(st.outline_only)
             sb = st.scale
             idx = self.sb_len.findData(float(sb.length_um))
             if idx >= 0:
@@ -183,6 +206,9 @@ class FigureMixin:
         st.separate = self.fig_separate.isChecked(); st.overlay_cells = self.fig_cells.isChecked()
         st.overlay_regions = self.fig_regions.isChecked(); st.overlay_region_names = self.fig_region_names.isChecked()
         st.overlay_exclusions = self.fig_excl.isChecked(); st.inset = self.fig_inset.isChecked()
+        st.region_color = self.rg_color.currentText(); st.region_width_px = self.rg_width.value()
+        st.region_name_px = self.rg_font.value(); st.hemisphere_line = self.rg_mid.isChecked()
+        st.outline_only = self.rg_only.isChecked()
         txt = self.sb_len.currentText().replace("µm", "").replace("um", "").strip()
         try:
             length = 0.0 if txt in ("", "自动") else float(txt)
@@ -392,3 +418,26 @@ class FigureMixin:
         self.run_task(lambda task: fig.export_images(project, images, st, progress=task.report,
                                                      cancel=task.is_cancelled, out_dir=out_dir),
                       done, label="正在导出截图…")
+
+    def fig_export_sections(self, all_images: bool):
+        if self.project is None or self.image is None:
+            return
+        images = list(self.project.images) if all_images else [self.image]
+        st = self._fig_settings()
+        self.project.figure = st.to_dict(); self.project.save()
+        project = self.project
+        out_dir = self._fig_out_dir(True) / "配准图"
+
+        def done(res):
+            files, errors = res
+            msg = f"已导出 {len(files)} 个文件到：{out_dir}" if files else "没有导出任何文件。"
+            if errors:
+                msg += "\n\n" + "\n".join(errors[:10])
+            self.info(msg)
+            if files:
+                self._open_folder(out_dir)
+            self._refresh_step_marks()
+
+        self.run_task(lambda task: fig.export_sections(project, images, st, progress=task.report,
+                                                       cancel=task.is_cancelled, out_dir=out_dir),
+                      done, label="正在导出配准图…")

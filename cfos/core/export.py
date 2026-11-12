@@ -158,6 +158,15 @@ def params_table(project: Project) -> pd.DataFrame:
                  f"过曝像素 ≥ {Q.SAT_WARN:g}% / {Q.SAT_BAD:g}%；组织缺损 ≥ {Q.DAMAGE_WARN:g}% / {Q.DAMAGE_BAD:g}%；"
                  f"整体清晰度 < 中位数的 {Q.SHARP_WARN:g} / {Q.SHARP_BAD:g} 倍；"
                  f"DAPI 密度 < {Q.DENS_LOW:g} 或 > {Q.DENS_HIGH:g} 倍中位数为可疑"))
+    try:
+        from .accuracy import summary, MATCH_UM
+        acc = summary(project)
+        for _, a in acc.iterrows():
+            rows.append((f"{a['通道']} 识别准确率（人工点数对照，{int(a['检查方框数'])} 个方框）",
+                         f"人工 {a['人工计数']} 个，软件 {a['软件识别']} 个，配对 {a['配对成功']} 个；"
+                         f"查准率 {a['查准率']:.1%}，查全率 {a['查全率']:.1%}，F1 {a['F1']:.3f}（配对距离 ≤ {MATCH_UM:g} µm）"))
+    except Exception:  # noqa: BLE001
+        pass
     rows += [("图片", im.path) for im in project.images]
     return pd.DataFrame(rows, columns=["参数", "值"])
 

@@ -200,7 +200,7 @@ def run_batch(project: Project, files, do_register=True, do_nonlinear=True, redo
                             say(base + 80 + int(15 * k / len(todo)), total, f"{name}：非线性贴合 {s.name}")
                             try:
                                 img, mask, ds = R.section_thumbnail(sl, s, nuc)
-                                w = R.nonlinear_fit(reg, R.orient(mask, reg.orientation))
+                                w = R.nonlinear_fit(reg, R.orient(mask, reg.orientation), R.orient(img, reg.orientation))
                                 np.save(R.warp_path(project.results_dir, im.key, s.name), np.stack(w))
                                 reg.nonlinear = True
                             except Exception:  # noqa: BLE001  非线性贴合失败时保留线性配准

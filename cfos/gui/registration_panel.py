@@ -14,6 +14,8 @@ from ..core.coloc import nucleus_channel
 from ..core.regions import _thumb_geometry
 from ..core.slide_io import open_slide
 
+REG_DISPLAY_UPSCALE = 3   # 脑区边界显示时放大的倍数（越大越顺滑，也越慢）
+
 # 滑块：(属性名, 显示名, 最小, 最大, 每格的值, 单位)
 SLIDERS = [
     ("ap_shift", "前后位置", -40, 40, 1.0, "× 25 µm"),
@@ -101,6 +103,11 @@ class RegistrationMixin:
         bs.setToolTip("同一个脑子的切片是用同一个角度切的。把所有切片的角度统一成中位数，可以去掉单张切片的角度误差；"
                       "知道切片间距时还可以让前后位置等间距排列。")
         L.addWidget(bs)
+        be = QPushButton("导出配准图（整张脑片 + 脑区轮廓，论文用）")
+        be.setToolTip("导出当前图片每张已配准脑片的图：荧光 + 脑区轮廓 + 缩写 + 比例尺（PNG / TIFF / 矢量 SVG）。"
+                      "线条颜色、通道、分辨率等在“⑨ 截图制图”里设置。")
+        be.clicked.connect(self._reg_export_figure)
+        L.addWidget(be)
         self.reg_hover = QLabel("鼠标所在脑区："); self.reg_hover.setWordWrap(True)
         L.addWidget(self.reg_hover)
         L.addStretch(1)
@@ -142,7 +149,7 @@ class RegistrationMixin:
                                     f"正在非线性贴合 {im.key} 的 {s.name}…")
                         img, mask, ds = R.section_thumbnail(sl, s, nuc)
                         reg = regs[s.name]
-                        w = R.nonlinear_fit(reg, R.orient(mask, reg.orientation))
+                        w = R.nonlinear_fit(reg, R.orient(mask, reg.orientation), R.orient(img, reg.orientation))
                         np.save(R.warp_path(project.results_dir, im.key, s.name), np.stack(w))
                         reg.nonlinear = True
                 out[im.path] = regs
@@ -268,13 +275,21 @@ class RegistrationMixin:
         lab_t, hemi_t = R.orient(lab, reg.orientation), R.orient(hemi, reg.orientation)
         self._reg_lab = (s, ds, lab_t, hemi_t)
         b = region_boundaries(lab_t)
-        rgba = np.zeros(lab_t.shape + (4,), np.uint8)
-        rgba[..., :3] = region_colors(lab_t)
-        rgba[..., 3] = np.where(lab_t > 0, 40, 0)
-        rgba[b] = [255, 230, 0, 255]
+        # 显示用：把标签图平滑放大 K 倍再找边界，边界线变细、变顺滑（统计仍按配准分辨率，不受影响）
+        K = REG_DISPLAY_UPSCALE
+        try:
+            from ..core.figure import _smooth_upscale
+            lab_hi = _smooth_upscale(lab_t, (lab_t.shape[0] * K, lab_t.shape[1] * K), cap=max(lab_t.shape) * K)
+        except Exception:  # noqa: BLE001
+            K, lab_hi = 1, lab_t
+        b_hi = region_boundaries(lab_hi)
+        rgba = np.zeros(lab_hi.shape + (4,), np.uint8)
+        rgba[..., :3] = region_colors(lab_hi)
+        rgba[..., 3] = np.where(lab_hi > 0, 40, 0)
+        rgba[b_hi] = [255, 230, 0, 255]
         bx, by = s.bbox0[0], s.bbox0[1]
-        self.viewer.add_image(rgba, rgb=True, name="脑区轮廓", scale=(ds, ds),
-                              translate=(by + ds / 2, bx + ds / 2), opacity=0.9)
+        self.viewer.add_image(rgba, rgb=True, name="脑区轮廓", scale=(ds / K, ds / K),
+                              translate=(by + ds / K / 2, bx + ds / K / 2), opacity=0.9)
         self._reg_bnd = b
         for nm in ("修正箭头", "修正点"):
             if nm in self.viewer.layers:
@@ -282,6 +297,14 @@ class RegistrationMixin:
         ap = R.adjusted_plane(reg).ap_mm()
         self.reg_status.setText(f"{reg.status}；切片中心约在 Bregma {ap:+.2f} mm。"
                                 f"{' 已使用非线性贴合。' if reg.nonlinear and warp is not None else ''}")
+
+    def _reg_export_figure(self):
+        if self.image is None:
+            return
+        self._sync_figure_panel()
+        if not self.fig_svg.isChecked() and not self.fig_tif.isChecked() and self.fig_res.currentIndex() == 0:
+            self.fig_res.setCurrentIndex(max(0, self.fig_res.findData(1.0)))   # 整张脑片默认 1 µm/像素，文件不会太大
+        self.fig_export_sections(False)
 
     def _reg_mouse_move(self, viewer, event):
         if self._reg_lab is None or self.stack.currentIndex() != 5:
@@ -541,7 +564,7 @@ class RegistrationMixin:
             img, mask, ds = R.section_thumbnail(sl, s, nuc)
             sl.close()
             r0 = R.Registration.from_dict(reg.to_dict()); r0.control_points = []
-            w = R.nonlinear_fit(r0, R.orient(mask, reg.orientation))
+            w = R.nonlinear_fit(r0, R.orient(mask, reg.orientation), R.orient(img, reg.orientation))
             np.save(R.warp_path(results, key, s.name), np.stack(w))
             return True
 
@@ -624,7 +647,7 @@ class RegistrationMixin:
                     finally:
                         sl.close()
                     r0 = R.Registration.from_dict(reg.to_dict()); r0.control_points = []
-                    w = R.nonlinear_fit(r0, R.orient(mask, reg.orientation))
+                    w = R.nonlinear_fit(r0, R.orient(mask, reg.orientation), R.orient(img, reg.orientation))
                     np.save(R.warp_path(results, im.key, s_.name), np.stack(w))
                     reg.nonlinear = True
                     s_.registration = reg.to_dict()

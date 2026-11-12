@@ -7,3 +7,5 @@ import os as _os
 
 _os.environ.setdefault("TF_ENABLE_ONEDNN_OPTS", "0")
 _os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
+
+__version__ = "0.7"
