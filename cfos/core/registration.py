@@ -107,8 +107,17 @@ def _deepslice():
             _load_deepslice_weights(model, weights)
             return model
         neural_network.load_xception_weights = _patched
-        model = neural_network.initialise_network(
-            str(d / "xception_weights_tf_dim_ordering_tf_kernels.h5"), None, "mouse")
+        # DeepSlice 的权重文件覆盖了 Xception 的全部卷积层，只有最顶上的 ImageNet 分类层（predictions，8 MB）
+        # 不在里面，所以 v0.8 起只带这一层（xception_top.npz），不再带 92 MB 的完整 Xception 预训练文件；
+        # 两种方式的输出完全相同（实测差值 0）。旧安装（v0.7，补丁升级）仍有完整文件时照旧用它。
+        full = d / "xception_weights_tf_dim_ordering_tf_kernels.h5"
+        top = d / "xception_top.npz"
+        if top.exists():
+            model = neural_network.initialise_network(None, None, "mouse")
+            z = np.load(top)
+            model.layers[0].get_layer("predictions").set_weights([z["kernel"], z["bias"]])
+        else:
+            model = neural_network.initialise_network(str(full), None, "mouse")
         _load_deepslice_weights(model, str(d / "Allen_Mixed_Best.h5"))
         m.model = model
         _DS = m

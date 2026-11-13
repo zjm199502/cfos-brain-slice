@@ -67,8 +67,11 @@ def run(report=None) -> tuple[bool, str, list]:
         from . import accel
         r = resources_dir()
         need = ["atlas/allen_ccfv3_25um.npz", "atlas/structures.csv", "deepslice/Allen_Mixed_Best.h5",
-                "deepslice/xception_weights_tf_dim_ordering_tf_kernels.h5", "demo/示例脑片.ome.tif"]
+                "demo/示例脑片.ome.tif"]
         miss = [p for p in need if not (r / p).exists()]
+        if not (r / "deepslice/xception_top.npz").exists() and \
+                not (r / "deepslice/xception_weights_tf_dim_ordering_tf_kernels.h5").exists():
+            miss.append("deepslice/xception_top.npz")
         d = stardist_model_dir()
         if d is None:
             miss.append("models/2D_versatile_fluo")

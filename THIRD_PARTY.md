@@ -10,8 +10,8 @@
 | StarDist | 0.9.2 | 细胞识别算法 | https://github.com/stardist/stardist | Schmidt et al., MICCAI 2018; Weigert et al., WACV 2020 |
 | StarDist 预训练模型 2D_versatile_fluo | 0.1 | 细胞核识别模型（随安装包附带，并转换为 ONNX 格式） | https://github.com/stardist/stardist-models | 同上 |
 | DeepSlice | 1.2.8 | 切片在图谱中的自动定位 | https://github.com/PolarBean/DeepSlice | Carey et al., Nature Communications 2023 |
-| DeepSlice 小鼠模型权重（Allen_Mixed_Best、Synthetic_data_final） | — | DeepSlice 的预训练模型 | https://github.com/PolarBean/DeepSliceWeightsMQ | 同上 |
-| Xception ImageNet 预训练权重 | v0.4 | DeepSlice 使用的特征提取网络权重 | https://github.com/fchollet/deep-learning-models/releases/tag/v0.4 | Chollet, CVPR 2017 |
+| DeepSlice 小鼠模型权重（Allen_Mixed_Best、Synthetic_data_final） | — | DeepSlice 的预训练模型（两个模型取平均） | https://github.com/PolarBean/DeepSliceWeightsMQ | 同上 |
+| Xception ImageNet 预训练权重 | v0.4 | DeepSlice 网络的顶层（只带其中 ImageNet 分类层的权重） | https://github.com/fchollet/deep-learning-models/releases/tag/v0.4 | Chollet, CVPR 2017 |
 | Allen Mouse Brain Common Coordinate Framework v3（CCFv3） | 2017，25 µm | 脑图谱（注释、平均模板、脑区结构表），经 BrainGlobe（allen_mouse_25um）获取 | https://atlas.brain-map.org/ ； https://brainglobe.info/ | Wang et al., Cell 2020 |
 | elastix（itk-elastix） | 0.25.4 | 非线性配准 | https://github.com/InsightSoftwareConsortium/ITKElastix | Klein et al., IEEE TMI 2010; Shamonin et al., Front. Neuroinform. 2014 |
 | QuickNII 坐标约定 | — | 图谱切面参数（与 DeepSlice 输出一致），只参考了公开的格式说明，没有使用其代码 | https://www.nitrc.org/projects/quicknii | Puchades et al., PLoS ONE 2019 |
