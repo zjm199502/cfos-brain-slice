@@ -11,12 +11,41 @@
 - **重新安装完整安装包**（下面）。
 
 ## 完整安装包（第一次安装用）
-GitHub 网页上单个文件不能超过 100 MB，所以安装包分成了若干个 90 MB 的分卷。把同一个文件夹里的全部分卷下载到同一处后合并：
+GitHub 仓库里单个文件不能超过 100 MB，所以安装包分成了若干个 90 MB 的分卷。**不用下载整个分支**：点下面的链接逐个下载（每个链接直接下载一个分卷），放到同一个文件夹里再合并。
 
-- **Windows**（`windows/`，8 个分卷）：下载全部 `.partNN` 和 `合并.bat` 到同一个文件夹，双击 `合并.bat`，得到 `cFos-v0.8-Windows-setup.exe`（710 MB）。MD5 见 `windows/MD5.txt`。
-- **Mac**（`mac/`，10 个分卷，Apple M 系列芯片，macOS 15 以上）：在终端中进入下载文件夹，运行
-  `cat cFos-v0.8-Mac-AppleSilicon.zip.part* > cFos-v0.8-Mac-AppleSilicon.zip`
-  得到 901 MB 的 zip，MD5 见 `mac/MD5.txt`。解压后把“cFos脑片分析”拖到“应用程序”；第一次打开若提示“无法验证开发者”，到“系统设置 → 隐私与安全性”点“仍要打开”。
+### Windows（8 个分卷 + 合并.bat，合并后 710 MB）
+  - [MD5.txt](https://github.com/zjm199502/cfos-brain-slice/raw/installers/windows/MD5.txt)
+  - [cFos-v0.8-Windows-setup.exe.part01](https://github.com/zjm199502/cfos-brain-slice/raw/installers/windows/cFos-v0.8-Windows-setup.exe.part01)
+  - [cFos-v0.8-Windows-setup.exe.part02](https://github.com/zjm199502/cfos-brain-slice/raw/installers/windows/cFos-v0.8-Windows-setup.exe.part02)
+  - [cFos-v0.8-Windows-setup.exe.part03](https://github.com/zjm199502/cfos-brain-slice/raw/installers/windows/cFos-v0.8-Windows-setup.exe.part03)
+  - [cFos-v0.8-Windows-setup.exe.part04](https://github.com/zjm199502/cfos-brain-slice/raw/installers/windows/cFos-v0.8-Windows-setup.exe.part04)
+  - [cFos-v0.8-Windows-setup.exe.part05](https://github.com/zjm199502/cfos-brain-slice/raw/installers/windows/cFos-v0.8-Windows-setup.exe.part05)
+  - [cFos-v0.8-Windows-setup.exe.part06](https://github.com/zjm199502/cfos-brain-slice/raw/installers/windows/cFos-v0.8-Windows-setup.exe.part06)
+  - [cFos-v0.8-Windows-setup.exe.part07](https://github.com/zjm199502/cfos-brain-slice/raw/installers/windows/cFos-v0.8-Windows-setup.exe.part07)
+  - [cFos-v0.8-Windows-setup.exe.part08](https://github.com/zjm199502/cfos-brain-slice/raw/installers/windows/cFos-v0.8-Windows-setup.exe.part08)
+  - [合并.bat](https://github.com/zjm199502/cfos-brain-slice/raw/installers/windows/%E5%90%88%E5%B9%B6.bat)
+
+下载后双击 `合并.bat`，得到 `cFos-v0.8-Windows-setup.exe`，双击安装（不需要管理员权限）。
+
+### Mac（Apple M 系列芯片，macOS 15 以上；10 个分卷，合并后 901 MB）
+  - [MD5.txt](https://github.com/zjm199502/cfos-brain-slice/raw/installers/mac/MD5.txt)
+  - [cFos-v0.8-Mac-AppleSilicon.zip.part01](https://github.com/zjm199502/cfos-brain-slice/raw/installers/mac/cFos-v0.8-Mac-AppleSilicon.zip.part01)
+  - [cFos-v0.8-Mac-AppleSilicon.zip.part02](https://github.com/zjm199502/cfos-brain-slice/raw/installers/mac/cFos-v0.8-Mac-AppleSilicon.zip.part02)
+  - [cFos-v0.8-Mac-AppleSilicon.zip.part03](https://github.com/zjm199502/cfos-brain-slice/raw/installers/mac/cFos-v0.8-Mac-AppleSilicon.zip.part03)
+  - [cFos-v0.8-Mac-AppleSilicon.zip.part04](https://github.com/zjm199502/cfos-brain-slice/raw/installers/mac/cFos-v0.8-Mac-AppleSilicon.zip.part04)
+  - [cFos-v0.8-Mac-AppleSilicon.zip.part05](https://github.com/zjm199502/cfos-brain-slice/raw/installers/mac/cFos-v0.8-Mac-AppleSilicon.zip.part05)
+  - [cFos-v0.8-Mac-AppleSilicon.zip.part06](https://github.com/zjm199502/cfos-brain-slice/raw/installers/mac/cFos-v0.8-Mac-AppleSilicon.zip.part06)
+  - [cFos-v0.8-Mac-AppleSilicon.zip.part07](https://github.com/zjm199502/cfos-brain-slice/raw/installers/mac/cFos-v0.8-Mac-AppleSilicon.zip.part07)
+  - [cFos-v0.8-Mac-AppleSilicon.zip.part08](https://github.com/zjm199502/cfos-brain-slice/raw/installers/mac/cFos-v0.8-Mac-AppleSilicon.zip.part08)
+  - [cFos-v0.8-Mac-AppleSilicon.zip.part09](https://github.com/zjm199502/cfos-brain-slice/raw/installers/mac/cFos-v0.8-Mac-AppleSilicon.zip.part09)
+  - [cFos-v0.8-Mac-AppleSilicon.zip.part10](https://github.com/zjm199502/cfos-brain-slice/raw/installers/mac/cFos-v0.8-Mac-AppleSilicon.zip.part10)
+
+1. 把 10 个分卷都下载到“下载”文件夹。
+2. 打开“终端”（启动台 → 其他 → 终端），粘贴下面这行并回车：
+   `cd ~/Downloads && cat cFos-v0.8-Mac-AppleSilicon.zip.part* > cFos-v0.8-Mac-AppleSilicon.zip`
+3. 双击得到的 `cFos-v0.8-Mac-AppleSilicon.zip` 解压，把“cFos脑片分析”拖到“应用程序”文件夹。
+4. 第一次打开：在“应用程序”里双击“cFos脑片分析”。如果提示“无法验证开发者”或“已损坏”，点“完成/取消”，打开“系统设置 → 隐私与安全性”，在页面下方点“仍要打开”，再输入开机密码确认。以后就能正常双击打开。
+5. 如果第 4 步仍提示“已损坏”，在终端运行：`xattr -dr com.apple.quarantine /Applications/cFos脑片分析.app`，再打开。
 
 安装后请先在“① 项目与图片”页面点“软件自检”，看到“全部正常”即可。出问题时点“导出诊断包”，把 zip 发给开发者。
 
