@@ -1,1 +1,1 @@
-d755554b6fd7e36394d70bae1a01a623  cFos-v0.7-Windows-setup.exe
+555f5750b7358ada7f64b1949718b009  cFos-v0.8-Windows-setup.exe
