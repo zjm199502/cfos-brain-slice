@@ -1,7 +1,5 @@
 # cFos 脑片分析（开发中）
 
-联系：张金铭，zjm199502@163.com，https://github.com/zjm199502/cfos-brain-slice ｜ 第三方组件与致谢：[THIRD_PARTY.md](THIRD_PARTY.md)
-
 面向小鼠脑切片荧光图像的一体化分析软件：脑片拆分 → 亮度/对比度 → 逐通道细胞识别 → 共标统计 → CCFv3 配准 → 分组统计 / 功能网络 → 导出 Excel。
 
 ## v0.8：补丁更新、厚切片去卷积、脑区平均荧光强度
@@ -125,3 +123,7 @@
 - `tests/gui_smoke.py`：无人值守地走一遍界面流程并截图
 - `tests/figure_smoke.py`：⑨ 截图制图 的界面测试（通过 `tests/run.py` 运行）
 - `tests/boundary_smoke.py`：⑥ 拖动边界手动矫正 的界面测试
+
+## 联系方式：zjm199502@163.com 
+
+## 第三方组件与致谢：[THIRD_PARTY.md](THIRD_PARTY.md)
