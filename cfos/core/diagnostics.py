@@ -29,13 +29,25 @@ def _versions() -> dict:
     return out
 
 
+def _updater_text() -> str:
+    try:
+        from . import updater
+        t = updater.version_text()
+        if os.environ.get("CFOS_PATCH_DISABLED"):
+            t += "；" + os.environ["CFOS_PATCH_DISABLED"]
+        return t
+    except Exception as e:  # noqa: BLE001
+        return f"未知（{e}）"
+
+
 def system_info() -> dict:
     import cfos
     info = {"软件版本": getattr(cfos, "__version__", "?"),
             "时间": _dt.datetime.now().isoformat(timespec="seconds"),
             "系统": platform.platform(), "Python": sys.version.split()[0],
             "处理器": platform.processor() or platform.machine(),
-            "安装位置": str(Path(cfos.__file__).resolve().parent.parent)}
+            "安装位置": str(Path(cfos.__file__).resolve().parent.parent),
+            "版本详情": _updater_text()}
     try:
         import psutil
         vm = psutil.virtual_memory()

@@ -6,7 +6,7 @@
 set -euo pipefail
 W=${1:?工作目录}; APP=$(cd "$(dirname "$0")/.." && pwd); PY=/home/user/venv/bin/python; PIP=/home/user/venv/bin/pip
 PY_URL="https://github.com/astral-sh/python-build-standalone/releases/download/20261020/cpython-3.13.16+20261020-aarch64-apple-darwin-install_only.tar.gz"
-NAME="cFos脑片分析"; VER=0.7
+NAME="cFos脑片分析"; VER=0.8
 # 通用模型提前转换为 ONNX 随包带上（安装目录不可写，用户电脑上不再转换）
 "$PY" "$APP/packaging/make_onnx.py"
 mkdir -p "$W" && cd "$W"
@@ -71,7 +71,7 @@ $PY "$APP/packaging/mac/thin_arm64.py" stage/python
 B="stage/$NAME.app/Contents"
 mkdir -p "$B/MacOS" "$B/Resources/app/resources"
 mv stage/python "$B/Resources/python"
-cp -r "$APP"/cfos "$APP"/main.py "$APP"/README.md "$APP"/requirements.txt "$B/Resources/app/"
+cp -r "$APP"/cfos "$APP"/main.py "$APP"/README.md "$APP"/THIRD_PARTY.md "$APP"/requirements.txt "$B/Resources/app/"
 cp -r "$APP"/resources/{atlas,deepslice,models,demo,teaching} "$B/Resources/app/resources/"
 cp "$APP"/packaging/mac/Info.plist "$B/"
 cp "$APP"/packaging/mac/cfos.icns "$B/Resources/"

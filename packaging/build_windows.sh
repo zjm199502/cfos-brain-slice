@@ -40,10 +40,10 @@ rm -rf $SP/clang $SP/tensorflow/include $SP/include $SP/PySide6/Qt6WebEngine* $S
 rm -rf $SP/DeepSlice/metadata/weights
 find $SP/PySide6/translations -type f ! -name "*zh_CN*" -delete
 mkdir -p stage/app/resources
-cp -r "$APP"/cfos "$APP"/main.py "$APP"/README.md "$APP"/requirements.txt stage/app/
+cp -r "$APP"/cfos "$APP"/main.py "$APP"/README.md "$APP"/THIRD_PARTY.md "$APP"/requirements.txt stage/app/
 cp -r "$APP"/resources/{atlas,deepslice,models,demo,teaching} stage/app/resources/
 cp "$APP"/packaging/cfos.ico stage/app/
 cp "$APP"/packaging/诊断启动（出问题时用）.bat stage/
 find stage -name "__pycache__" -type d -prune -exec rm -rf {} +
 # 注意：NSIS 的数据块不能超过 2 GB，所以不能用 /SOLID 压缩
-LANG=C.UTF-8 LC_ALL=C.UTF-8 makensis -V2 -INPUTCHARSET UTF8 "-DSTAGE=$PWD/stage" "-DOUTFILE=$PWD/cFos脑片分析_v0.7_Windows安装包.exe" "$APP/packaging/installer.nsi"
+LANG=C.UTF-8 LC_ALL=C.UTF-8 makensis -V2 -INPUTCHARSET UTF8 "-DSTAGE=$PWD/stage" "-DOUTFILE=$PWD/cFos脑片分析_v0.8_Windows安装包.exe" "$APP/packaging/installer.nsi"

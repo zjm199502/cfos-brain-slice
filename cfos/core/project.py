@@ -239,7 +239,8 @@ class Project:
         return notes
 
     def apply_thickness_preset(self, thickness: str):
-        """按切片厚度设置推荐参数。厚切片：识别前减背景（去掉焦平面外的雾），去掉和周围差别很小的模糊细胞，
+        """按切片厚度设置推荐参数。厚切片：识别前减背景（去掉焦平面外的雾）并去卷积（细胞边界更清楚），
+        去掉和周围差别很小的模糊细胞，
         共标距离放宽到 8 µm（厚切片中同一细胞在不同通道的中心可能错开得更多）。"""
         self.thickness = thickness
         thick = thickness == "thick"
@@ -248,6 +249,7 @@ class Project:
             if p is None:
                 continue
             p.bg_radius_um = 25.0 if thick else 0.0
+            p.deconv = thick          # 厚切片默认识别前去卷积（亮度测量仍用原图）
             if nm == "DAPI":
                 p.gamma, p.prob_thresh, p.min_contrast = 0.5, 0.3, 0.0
             else:

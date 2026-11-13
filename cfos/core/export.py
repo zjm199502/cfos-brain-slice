@@ -64,7 +64,8 @@ def build_tables(project: Project) -> dict[str, pd.DataFrame]:
         if reg_secs:
             from .regions import assign_regions, region_summary
             from .atlas import load_atlas
-            cells, areas = assign_regions(cells, _sl, reg_secs, project.results_dir, im.key, im.exclusions)
+            cells, areas = assign_regions(cells, _sl, reg_secs, project.results_dir, im.key, im.exclusions,
+                                          intensity=True)
             rcells = cells[cells["section"].isin({s_.name for s_ in reg_secs})]
             region_sec.append(region_summary(rcells, areas, names, ("图片", "section"), project.coloc.require_nucleus))
             st = load_atlas().structures.set_index("index")
@@ -81,6 +82,8 @@ def build_tables(project: Project) -> dict[str, pd.DataFrame]:
                     if len(sub) else pd.DataFrame({"图片": [im.key], "区域": [r["name"]]})
                 area = _roi_area_mm2(r["polygon"], im.exclusions, px)
                 t["面积 (mm²)"] = round(area, 4)
+                for nm, v in zip(names, roi_mean_intensity(_sl, r["polygon"], im.exclusions)):
+                    t[f"{nm} 平均荧光强度"] = round(v, 1) if v == v else None
                 for nm in names:
                     if f"{nm}+" in t.columns and area > 0:
                         t[f"{nm}+ 密度 (个/mm²)"] = (t[f"{nm}+"] / area).round(1)
@@ -109,6 +112,35 @@ def build_tables(project: Project) -> dict[str, pd.DataFrame]:
         if roi_rows:  # 只有画了自定义区域时才有这张表
             out["按自定义区域"] = pd.concat(roi_rows, ignore_index=True)
     return out
+
+
+def roi_mean_intensity(slide, polygon, exclusions, target_um: float = 0.0) -> list[float]:
+    """自定义区域内（去掉排除区域）每个通道的平均荧光强度，原始灰度值。"""
+    from skimage.draw import polygon as skpoly
+    a = np.asarray(polygon, float)
+    n_ch = len(slide.channels)
+    if len(a) < 3:
+        return [float("nan")] * n_ch
+    lv = slide.level_for_pixel_size(target_um)
+    ds = slide.downsample(lv)
+    x0, y0 = a[:, 0].min(), a[:, 1].min()
+    bb = (int(x0), int(y0), int(np.ceil(a[:, 0].max() - x0)) + 1, int(np.ceil(a[:, 1].max() - y0)) + 1)
+    sums, n = np.zeros(n_ch), 0
+    ox, oy = int(bb[0] / ds) * ds, int(bb[1] / ds) * ds
+    for c in range(n_ch):
+        img = slide.read(lv, bb, [c])[0]
+        if c == 0:
+            H, W = img.shape
+            m = np.zeros((H, W), bool)
+            rr, cc = skpoly((a[:, 1] - oy) / ds, (a[:, 0] - ox) / ds, (H, W)); m[rr, cc] = True
+            for e in exclusions or []:
+                e = np.asarray(e, float)
+                if len(e) >= 3:
+                    rr, cc = skpoly((e[:, 1] - oy) / ds, (e[:, 0] - ox) / ds, (H, W)); m[rr, cc] = False
+            n = int(m.sum())
+        if n:
+            sums[c] = float(img[m].astype(np.float64).sum())
+    return [s / n if n else float("nan") for s in sums]
 
 
 def _roi_area_mm2(polygon, exclusions, px_um) -> float:
@@ -168,7 +200,7 @@ def _registration_rows(project: Project) -> list:
                                        ("DeepSlice 定位 + 非线性贴合（只用轮廓）", n["cont"]),
                                        ("DeepSlice 定位 + 非线性贴合（只用轮廓，v0.7 之前配准）", n["old"]),
                                        ("DeepSlice 定位，未做非线性贴合", n["lin"])) if v]
-    return [("图谱", "Allen 小鼠脑图谱 CCFv3（10 µm 标签图）"),
+    return [("图谱", "Allen 小鼠脑图谱 CCFv3（25 µm）"),
             (f"配准方法（共 {total} 张脑片）", "；".join(parts)),
             ("手动修正", f"{fixed_secs} 张脑片，共 {fixes} 个修正点" if fixes else "无")]
 

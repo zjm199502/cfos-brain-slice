@@ -33,7 +33,9 @@ from .relocate_panel import RelocateMixin
 from .teaching import TeachingMixin
 from .figure_panel import FigureMixin
 from .accuracy_panel import AccuracyMixin
+from .update_panel import UpdateMixin
 
+DECONV_SLOWDOWN = "多用 30% 的时间"   # 示例脑片实测（2 通道，4 核）：378 秒 → 488 秒
 APP_NAME = "cFos 脑片分析"
 IMAGE_FILTER = "荧光全片图像 (*.qptiff *.tif *.tiff *.ome.tif *.ome.tiff);;所有文件 (*)"
 COLORMAP = {"DAPI": "blue", "Green": "green", "Red": "red", "Far red": "magenta"}
@@ -56,10 +58,11 @@ def big_button(text: str) -> QPushButton:
     return b
 
 
-class MainWindow(TeachingMixin, FigureMixin, AccuracyMixin, RelocateMixin, QualityMixin, GroupsMixin, RegistrationMixin, QMainWindow):
+class MainWindow(UpdateMixin, TeachingMixin, FigureMixin, AccuracyMixin, RelocateMixin, QualityMixin, GroupsMixin, RegistrationMixin, QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle(APP_NAME)
+        from ..core.updater import version_text
+        self.setWindowTitle(f"{APP_NAME} {version_text()}")
         self.resize(1500, 920)
         self.project: Project | None = None
         self.image: ImageEntry | None = None
@@ -126,6 +129,7 @@ class MainWindow(TeachingMixin, FigureMixin, AccuracyMixin, RelocateMixin, Quali
         split = QSplitter(); split.addWidget(self.steps); split.addWidget(center); split.addWidget(right)
         split.setStretchFactor(1, 1)
         self.setCentralWidget(split)
+        self._build_help_menu()
 
         # 底部进度条
         self.progress = QProgressBar(); self.progress.setMaximumWidth(360); self.progress.hide()
@@ -281,6 +285,11 @@ class MainWindow(TeachingMixin, FigureMixin, AccuracyMixin, RelocateMixin, Quali
                       "出问题时把它发给开发者即可，不用截图、不用描述半天。")
         dg.clicked.connect(self.export_diagnostics)
         L.addWidget(dg)
+        row = QHBoxLayout()
+        ab = QPushButton("关于本软件"); ab.clicked.connect(self.show_about)
+        up = QPushButton("检查更新"); up.clicked.connect(lambda: self.check_updates(silent=False))
+        up.setToolTip("有新版本时下载补丁包（约 1 MB），重启后生效。也可以在“帮助”菜单里从文件安装补丁。")
+        row.addWidget(ab); row.addWidget(up); L.addLayout(row)
         return w
 
     def run_selftest(self):
@@ -905,8 +914,9 @@ class MainWindow(TeachingMixin, FigureMixin, AccuracyMixin, RelocateMixin, Quali
         self.thick_combo.addItem("厚切片（30–50 µm，如 40 µm 漂片）", "thick")
         bt = QPushButton("使用这个厚度的推荐参数"); bt.clicked.connect(self.apply_thickness)
         tl.addWidget(self.thick_combo); tl.addWidget(bt)
-        tl.addWidget(QLabel("厚切片推荐：识别前减背景 25 µm（去掉焦平面外的雾），去掉比周围亮不到 1.5 倍的模糊细胞，"
-                            "共标距离放宽到 8 µm。z-stack 图片请在“① 项目与图片”中选择合成方式。"))
+        tl.addWidget(QLabel("厚切片推荐：识别前减背景 25 µm（去掉焦平面外的雾）并去卷积（细胞边界更清楚），"
+                            "去掉比周围亮不到 1.5 倍的模糊细胞，共标距离放宽到 8 µm。"
+                            "z-stack 图片请在“① 项目与图片”中选择合成方式。"))
         tl.itemAt(2).widget().setWordWrap(True)
         L.addWidget(tb)
         self.det_rows = QVBoxLayout(); L.addLayout(self.det_rows)
@@ -1189,8 +1199,17 @@ class MainWindow(TeachingMixin, FigureMixin, AccuracyMixin, RelocateMixin, Quali
         th = self.thick_combo.currentData()
         self.project.apply_thickness_preset(th)
         self._sync_detection_panel()
-        self.info(("已使用厚切片推荐参数" if th == "thick" else "已使用薄切片推荐参数")
-                  + "。\n建议先放大到一块区域点“预览当前视野的细胞识别”检查效果，再识别全部脑片。")
+        if th == "thick":
+            self.info("已使用厚切片推荐参数。\n\n"
+                      "注意：所有通道已默认勾选“识别前去卷积”。\n"
+                      "• 去卷积让厚切片中模糊的细胞边界变清楚，粘在一起的细胞更容易分开；\n"
+                      "• 只用于找细胞，细胞的亮度、阳性判断和脑区平均荧光强度仍按原图测量；\n"
+                      f"• 识别会变慢（示例脑片{DECONV_SLOWDOWN}）。\n\n"
+                      "不需要时可以在下面各通道里取消勾选。建议先放大到一块区域，"
+                      "点“预览当前视野的减背景/去卷积效果”和“预览当前视野的细胞识别”检查效果，再识别全部脑片。")
+        else:
+            self.info("已使用薄切片推荐参数（不减背景、不去卷积）。\n"
+                      "建议先放大到一块区域点“预览当前视野的细胞识别”检查效果，再识别全部脑片。")
 
     def refilter(self):
         from ..core.pipeline import refilter_all

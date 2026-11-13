@@ -5,8 +5,8 @@
   <key>CFBundleName</key><string>cFos脑片分析</string>
   <key>CFBundleDisplayName</key><string>cFos脑片分析</string>
   <key>CFBundleIdentifier</key><string>local.cfos.brainslice</string>
-  <key>CFBundleVersion</key><string>0.6</string>
-  <key>CFBundleShortVersionString</key><string>0.6</string>
+  <key>CFBundleVersion</key><string>0.8</string>
+  <key>CFBundleShortVersionString</key><string>0.8</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleExecutable</key><string>cfos</string>
   <key>CFBundleIconFile</key><string>cfos.icns</string>

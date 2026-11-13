@@ -36,9 +36,55 @@ def _excluded_mask(section: Section, shape, ds: float, exclusions, orientation: 
     return R.orient(bad, orientation)
 
 
+INTENSITY_UM = 0.0     # 测量脑区平均荧光强度时读图的分辨率（µm/像素）；0 = 原始分辨率。
+# 金字塔低分辨率层不是严格的平均值（示例图片上 2 µm 层的均值比原图差 2–4%），所以用原图。
+
+
+def region_intensity_sums(slide: Slide, section: Section, lab_u: np.ndarray, hemi_u: np.ndarray, ds_lab: float,
+                          target_um: float = INTENSITY_UM) -> dict:
+    """按 (脑区, 半脑) 累加每个通道的原始灰度值和像素数（不是识别用的去卷积 / 减背景后的图）。
+    lab_u / hemi_u：未旋转方向（与原图一致）的标签图，每个像素对应第 0 层 ds_lab 个像素；
+    排除区域和组织外已经是 0。按行分块读图，大图也不会占太多内存。
+    返回 {(region, hemi): (像素数, [各通道灰度和])}。"""
+    lv = slide.level_for_pixel_size(target_um)
+    ds = slide.downsample(lv)
+    x0, y0, w, h = section.bbox0
+    n_ch = len(slide.channels)
+    Hl, Wl = lab_u.shape
+    key = lab_u.astype(np.int64) * 3 + hemi_u.astype(np.int64)
+    K = int(key.max()) + 1 if key.size else 1
+    tot = np.zeros(K, np.float64)
+    sums = np.zeros((n_ch, K), np.float64)
+    # 按标签图的行分块：每块对应原图的若干行
+    rows_per = max(1, int(np.ceil(1024 * ds / ds_lab)))
+    for r0 in range(0, Hl, rows_per):
+        r1 = min(Hl, r0 + rows_per)
+        bb = (x0, y0 + r0 * ds_lab, w, (r1 - r0) * ds_lab)
+        a = slide.read(lv, bb)
+        if a.size == 0:
+            continue
+        _, Ha, Wa = a.shape
+        # 读出的每个像素 → 标签图像素（读取的起点按 int(y/ds) 取整，误差 < 1 个像素）
+        oy = int((y0 + r0 * ds_lab) / ds) * ds
+        ox = int(x0 / ds) * ds
+        iy = np.clip(((oy + (np.arange(Ha) + 0.5) * ds) - y0) / ds_lab, 0, Hl - 1).astype(int)
+        ix = np.clip(((ox + (np.arange(Wa) + 0.5) * ds) - x0) / ds_lab, 0, Wl - 1).astype(int)
+        k = key[iy][:, ix].ravel()
+        m = k >= 3                      # 0 = 不在任何脑区
+        k = k[m]
+        tot += np.bincount(k, minlength=K)
+        for c in range(n_ch):
+            sums[c] += np.bincount(k, weights=a[c].ravel()[m].astype(np.float64), minlength=K)
+    out = {}
+    for kk in np.nonzero(tot)[0]:
+        out[(int(kk // 3), int(kk % 3))] = (float(tot[kk]), sums[:, kk].tolist())
+    return out
+
+
 def assign_regions(cells: pd.DataFrame, slide: Slide, sections: list[Section], results_dir, image_key,
-                   exclusions=None):
-    """cells: merged_cells 的输出（x, y 为第 0 层像素）。增加 region_index, hemisphere, 以及每张脑片的脑区面积表。"""
+                   exclusions=None, intensity: bool = False):
+    """cells: merged_cells 的输出（x, y 为第 0 层像素）。增加 region_index, hemisphere, 以及每张脑片的脑区面积表。
+    intensity=True 时面积表还带每个通道的灰度和（sum_ch0…）与像素数（n_px），用于算脑区平均荧光强度。"""
     cells = cells.copy()
     cells["region_index"] = 0
     cells["hemisphere"] = 0
@@ -70,11 +116,22 @@ def assign_regions(cells: pd.DataFrame, slide: Slide, sections: list[Section], r
             cells.loc[sel, "region_index"] = lab[iy, ix]
             cells.loc[sel, "hemisphere"] = hemi[iy, ix]
         pix_mm2 = (ds * px0 / 1000.0) ** 2
+        inten = region_intensity_sums(slide, s, R.orient(lab, reg.orientation), R.orient(hemi, reg.orientation), ds) \
+            if intensity else {}
         idx, cnt = np.unique(np.stack([lab.ravel(), hemi.ravel()], 1), axis=0, return_counts=True)
         for (ri, hm), n in zip(idx, cnt):
             if ri:
-                areas.append({"section": s.name, "region_index": int(ri), "hemisphere": int(hm), "area_mm2": n * pix_mm2})
-    return cells, pd.DataFrame(areas, columns=["section", "region_index", "hemisphere", "area_mm2"])
+                row = {"section": s.name, "region_index": int(ri), "hemisphere": int(hm), "area_mm2": n * pix_mm2}
+                if intensity:
+                    npx, sm = inten.get((int(ri), int(hm)), (0.0, [0.0] * len(slide.channels)))
+                    row["n_px"] = npx
+                    for c, v in enumerate(sm):
+                        row[f"sum_ch{c}"] = v
+                areas.append(row)
+    cols = ["section", "region_index", "hemisphere", "area_mm2"]
+    if intensity:
+        cols += ["n_px"] + [f"sum_ch{c}" for c in range(len(slide.channels))]
+    return cells, pd.DataFrame(areas, columns=cols)
 
 
 def _ancestors():
@@ -112,8 +169,17 @@ def region_summary(cells: pd.DataFrame, areas: pd.DataFrame, channel_names, grou
     a_h = a.assign(半脑=a["hemisphere"].map(hemi_name))
     a_b = a.assign(半脑="左右合计")
     gcols = [g for g in group_cols if g in a.columns]
-    aa = pd.concat([a_h, a_b]).groupby(gcols + ["region", "半脑"], as_index=False)["area_mm2"].sum()
-    t = t.merge(aa, on=gcols + ["region", "半脑"], how="left")
+    icols = [c for c in a.columns if c == "n_px" or c.startswith("sum_ch")]
+    aa = pd.concat([a_h, a_b]).groupby(gcols + ["region", "半脑"], as_index=False)[["area_mm2"] + icols].sum()
+    cnt_cols = [c for c in t.columns if c not in tuple(group_cols) + ("region", "半脑")]
+    t = t.merge(aa, on=gcols + ["region", "半脑"], how="outer" if icols else "left")
+    if icols:   # 没有细胞、但有面积的脑区也列出来（平均荧光强度仍有意义），细胞数为 0
+        for col in cnt_cols:
+            v = t[col].fillna(0)
+            t[col] = v.astype(int) if (v % 1 == 0).all() else v
+        for g in group_cols:
+            if g not in gcols and g in t.columns:
+                t[g] = t[g].ffill().bfill()
     t.insert(len(group_cols), "脑区缩写", t["region"].map(st["acronym"]))
     t.insert(len(group_cols) + 1, "脑区名称", t["region"].map(st["name"]))
     t.insert(len(group_cols) + 2, "层级", t["region"].map(lambda i: len(anc.get(i, [])) - 1))
@@ -122,5 +188,22 @@ def region_summary(cells: pd.DataFrame, areas: pd.DataFrame, channel_names, grou
         col = f"{nm}+"
         if col in t.columns:
             t[f"{nm}+ 密度 (个/mm²)"] = (t[col] / t["面积 (mm²)"]).round(1)
+    if icols:
+        # 平均荧光强度（原始灰度值）；相对值 = 除以同一张脑片整个组织（root，左右合计）的平均值，便于不同脑片比较
+        npx = t.pop("n_px").replace(0, np.nan)
+        root = st.index[st["acronym"] == "root"]
+        root = int(root[0]) if len(root) else None
+        for c, nm in enumerate(channel_names):
+            sc = f"sum_ch{c}"
+            if sc not in t.columns:
+                continue
+            mean = t.pop(sc) / npx
+            t[f"{nm} 平均荧光强度"] = mean.round(1)
+            if root is not None:
+                rm = t.assign(_m=mean)[(t["region"] == root) & (t["半脑"] == "左右合计")]
+                ref = rm.set_index(gcols)["_m"] if gcols else rm["_m"]
+                if gcols:
+                    base = t.set_index(gcols).index.map(ref)
+                    t[f"{nm} 平均荧光强度（相对整张脑片）"] = (mean.to_numpy() / np.asarray(base, float)).round(3)
     t = t.sort_values(list(group_cols) + ["region", "半脑"]).drop(columns=["region"])
     return t

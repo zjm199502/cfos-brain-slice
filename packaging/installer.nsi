@@ -2,12 +2,12 @@
 Unicode true
 !define APPNAME "cFos脑片分析"
 !define DISPNAME "cFos 脑片分析"
-!define VERSION "0.7"
+!define VERSION "0.8"
 !ifndef STAGE
   !define STAGE "stage"
 !endif
 !ifndef OUTFILE
-  !define OUTFILE "cFos脑片分析_v0.7_Windows安装包.exe"
+  !define OUTFILE "cFos脑片分析_v0.8_Windows安装包.exe"
 !endif
 
 Name "${DISPNAME} ${VERSION}"

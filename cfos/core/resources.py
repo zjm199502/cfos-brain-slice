@@ -8,6 +8,10 @@ from pathlib import Path
 def app_root() -> Path:
     if getattr(sys, "frozen", False):
         return Path(getattr(sys, "_MEIPASS", Path(sys.executable).parent))
+    # 用补丁运行时，代码在用户目录的“更新”文件夹里，资源（模型、图谱）仍在安装目录（main.py 设置 CFOS_BASE_APP）
+    import os
+    if os.environ.get("CFOS_BASE_APP"):
+        return Path(os.environ["CFOS_BASE_APP"])
     return Path(__file__).resolve().parents[2]
 
 

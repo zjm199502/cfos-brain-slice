@@ -1,9 +1,32 @@
-"""cFos 脑片分析软件入口。"""
+"""cFos 脑片分析软件入口（启动器）。
+
+这个文件尽量保持简单、以后不再改动：真正的启动流程在 cfos/app.py。
+有补丁（软件更新）时，先把补丁的代码放到最前面（见 cfos/core/updater.py），再导入 cfos。"""
 import os
 import sys
 
 os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
 os.environ.setdefault("TF_ENABLE_ONEDNN_OPTS", "0")   # 见 cfos/__init__.py
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+os.environ["CFOS_BASE_APP"] = _HERE                   # 安装目录（资源文件在这里）
+
+
+def _boot_patch(main_process: bool):
+    """补丁：直接按文件路径执行安装目录里的 updater.py（只用标准库），决定用哪一份程序代码。
+    后台计算进程（多进程 spawn 会重新执行本文件）也走这里，保证和主进程用同一份代码。"""
+    try:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "_cfos_boot_updater", os.path.join(_HERE, "cfos", "core", "updater.py"))
+        m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(m)
+        return m.boot_path(main_process)
+    except Exception:  # noqa: BLE001  更新机制出问题时照常用安装时的版本
+        return None
+
+
+_boot_patch(__name__ == "__main__")
 
 # 最多用一半的 CPU 核，并分配好线程（必须在导入 numpy / TensorFlow 之前）。
 # 后台测量进程也会导入本文件（多进程 spawn），它们只用 1 个线程。
@@ -19,78 +42,6 @@ if sys.stderr is None:
     sys.stderr = open(os.devnull, "w", encoding="utf-8")
 
 
-def _raise_priority():
-    """Windows 上把软件（以及它启动的后台计算进程，会继承）设为“高于正常”优先级。
-    不用“高”或“实时”：满载时会让鼠标键盘和系统卡住。"""
-    if sys.platform != "win32":
-        return
-    try:
-        import psutil
-        psutil.Process().nice(psutil.ABOVE_NORMAL_PRIORITY_CLASS)
-    except Exception:  # noqa: BLE001
-        pass
-
-
-def _splash():
-    """第一次启动要加载深度学习组件，可能要十几秒；先显示一个小窗口，免得以为没反应又点一次。"""
-    from qtpy.QtCore import Qt
-    from qtpy.QtWidgets import QApplication, QLabel
-    app = QApplication.instance() or QApplication(sys.argv)
-    lb = QLabel("cFos 脑片分析\n\n正在启动，请稍候…\n（第一次启动可能需要半分钟）")
-    lb.setAlignment(Qt.AlignCenter)
-    lb.setWindowFlags(Qt.SplashScreen | Qt.WindowStaysOnTopHint)
-    lb.setStyleSheet("background:#262930; color:white; font-size:16px; padding:30px; border:1px solid #4a7ab8;")
-    lb.resize(380, 180); lb.show(); app.processEvents()
-    return lb
-
-
-def selftest_cli():
-    """命令行自检：main.py --selftest。结果打印出来并写到日志文件夹的“自检结果.txt”。退出码 0 = 全部正常。"""
-    from cfos.core.log import setup_logging
-    setup_logging()
-    from cfos.core import selftest
-    ok, text, _ = selftest.run(lambda i, n, t: print(t, flush=True))
-    print(text, flush=True)
-    sys.exit(0 if ok else 1)
-
-
-def main():
-    if "--selftest" in sys.argv:
-        selftest_cli()
-    _raise_priority()
-    splash = _splash()
-    from napari.qt import get_qapp
-
-    from cfos.core.log import setup_logging, log, log_dir
-    setup_logging()
-    app = get_qapp()
-
-    def excepthook(t, e, tb):
-        import traceback
-        log.error("未处理的错误\n%s", "".join(traceback.format_exception(t, e, tb)))
-        try:
-            from qtpy.QtWidgets import QMessageBox
-            from cfos.core.log import friendly
-            QMessageBox.critical(None, "cFos 脑片分析",
-                                 f"{friendly(e)}\n\n软件没有关闭，已保存的结果不受影响。\n"
-                                 f"详细记录在：{log_dir()}")
-        except Exception:  # noqa: BLE001
-            pass
-    sys.excepthook = excepthook
-    app.setApplicationName("cFos 脑片分析")
-    from cfos.gui.i18n import install_chinese
-    install_chinese(app)
-    from cfos.gui.main_window import MainWindow
-
-    w = MainWindow()
-    w.show()
-    splash.close()
-    if len(sys.argv) > 1:
-        from cfos.core.project import Project
-        if Project.is_project(sys.argv[1]):
-            w._load_project(Project.load(sys.argv[1]))
-    sys.exit(app.exec_() if hasattr(app, "exec_") else app.exec())
-
-
 if __name__ == "__main__":
+    from cfos.app import main
     main()
