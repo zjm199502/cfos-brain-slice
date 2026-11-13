@@ -51,4 +51,4 @@ GitHub 仓库里单个文件不能超过 100 MB，所以安装包分成了若干
 
 源码在 `main` 分支；用到的第三方软件包、模型和数据见 main 分支的 THIRD_PARTY.md。
 
-联系方式：张金铭，zjm199502@163.com，https://github.com/zjm199502/cfos-brain-slice
+联系方式：zjm199502@163.com，https://github.com/zjm199502/cfos-brain-slice
