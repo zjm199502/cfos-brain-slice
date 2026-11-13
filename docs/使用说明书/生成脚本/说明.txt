@@ -1,0 +1,7 @@
+重新生成说明书：
+1. 截图：xvfb-run -a -s "-screen 0 1920x1080x24" python tests/run.py docs/使用说明书/生成脚本/shoot.py <新项目目录> <截图目录>
+   （Linux 无显卡环境下需 GALLIUM_DRIVER=softpipe，否则 napari 绘图可能崩溃；CFOS_NET=tf 可避免现场转换 ONNX）
+2. 把截图和其他配图放到 img/，修改 使用说明书.md。
+3. python prep.py（缩放图片、长面板分两栏）→ node build.js 输出.docx "Microsoft YaHei"
+   PDF：node build.js pdfsrc.docx "Noto Sans CJK SC" → soffice --headless --convert-to pdf pdfsrc.docx
+脚本里的路径按需修改。
