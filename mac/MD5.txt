@@ -1,1 +1,1 @@
-696367bf84dd9f9941d4a7dfda0d448b  cFos-v0.6-Mac-AppleSilicon.zip
+9d11130d200ab7c702c40945aeadb12e  cFos-v0.7-Mac-AppleSilicon.zip
