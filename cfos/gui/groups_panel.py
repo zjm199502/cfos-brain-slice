@@ -26,10 +26,12 @@ class GroupsMixin:
         w = QWidget(); L = QVBoxLayout(w)
         L.addWidget(hint("为每张脑片填写“动物编号”和“组别”（例如 对照 / 电击）。同一只动物的多张脑片会先合并"
                          "（细胞数相加、面积相加），再按动物做组间比较，避免把脑片当作独立样本。\n"
+                         "要做“脑区活动与行为相关”时，再填“行为分数”（每只动物一个数，如冻结时间 %；"
+                         "填在这只动物的任意一行即可）。\n"
                          "可以在表格里直接双击修改；也可以选中多行后点“把选中的设为…”，或导出到 Excel 填好再导入。"))
         self.st_test_tip = "Welch t 检验：常用，允许两组方差不同。\nMann-Whitney U：非参数，动物数少或数据明显偏态时用。"
-        self.grp_table = QTableWidget(0, 4)
-        self.grp_table.setHorizontalHeaderLabels(["图片", "脑片", "动物编号", "组别"])
+        self.grp_table = QTableWidget(0, 5)
+        self.grp_table.setHorizontalHeaderLabels(["图片", "脑片", "动物编号", "组别", "行为分数"])
         self.grp_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.grp_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.grp_table.itemChanged.connect(self._grp_item_changed)
@@ -68,7 +70,59 @@ class GroupsMixin:
         self.st_open = QPushButton("打开统计结果文件夹"); self.st_open.hide(); L.addWidget(self.st_open)
         self.st_open.clicked.connect(lambda: self._open_folder(self._st_out))
         self._network_box(L)
+        self._behavior_box(L)
         return w
+
+    # ------------------------------------------------------------ 脑区活动与行为相关
+    def _behavior_box(self, L):
+        from qtpy.QtWidgets import QLineEdit
+        box = QGroupBox("脑区活动与行为相关"); f = QFormLayout(box)
+        lb = QLabel("逐个脑区算 c-Fos 指标与每只动物行为分数的 Spearman 相关，FDR 校正，给出 95% 置信区间，"
+                    "按相关强弱排序并画散点图。指标、半脑、最小面积、脑区范围沿用上面“组间比较”的设置。\n"
+                    "至少 5 只动物填了行为分数才能算，建议 ≥ 8 只；动物少时相关很不稳定，请看置信区间。")
+        lb.setWordWrap(True); f.addRow(lb)
+        self.bh_name = QLineEdit(); self.bh_name.setPlaceholderText("例如 冻结时间 %")
+        self.bh_name.setToolTip("只用于结果表和图上的文字。")
+        self.bh_group = QComboBox()
+        self.bh_group.setToolTip("几个组放在一起算时，相关可能只是反映组间差异；建议再分别看每个组。")
+        f.addRow("行为指标名称", self.bh_name); f.addRow("用哪些动物", self.bh_group)
+        L.addWidget(box)
+        b = big_button_local("计算脑区与行为相关"); b.clicked.connect(lambda: self.run_behavior()); L.addWidget(b)
+        self.bh_summary = QLabel(""); self.bh_summary.setWordWrap(True); L.addWidget(self.bh_summary)
+        self.bh_preview = QLabel(); self.bh_preview.setAlignment(Qt.AlignCenter); L.addWidget(self.bh_preview)
+        self.bh_open = QPushButton("打开行为相关结果文件夹"); self.bh_open.hide(); L.addWidget(self.bh_open)
+        self.bh_open.clicked.connect(lambda: self._open_folder(self._bh_out))
+
+    def _sync_behavior_box(self, groups):
+        from ..core.behavior import ALL_ANIMALS
+        d = self.project.behavior_params or {}
+        self.bh_name.setText(d.get("behavior_name", "") if d.get("behavior_name") != "行为分数" else "")
+        cur = d.get("group", ALL_ANIMALS)
+        self.bh_group.clear(); self.bh_group.addItems([ALL_ANIMALS] + list(groups))
+        if cur in [ALL_ANIMALS] + list(groups):
+            self.bh_group.setCurrentText(cur)
+
+    def run_behavior(self, region_sec=None):
+        if not isinstance(region_sec, pd.DataFrame):  # 按钮信号会传入 checked=False
+            region_sec = None
+        from ..core.behavior import BehaviorParams, run_behavior_correlation
+        sp = self._stats_params()
+        bp = BehaviorParams(metric=sp.metric, hemisphere=sp.hemisphere, min_area_mm2=sp.min_area_mm2,
+                            max_depth=sp.max_depth, behavior_name=self.bh_name.text().strip() or "行为分数",
+                            group=self.bh_group.currentText() or "全部动物")
+        self.project.behavior_params = bp.to_dict(); self.project.save()
+        project = self.project
+        out = project.folder / f"行为相关_{_dt.datetime.now():%Y%m%d_%H%M}"
+
+        def done(res):
+            self._bh_out, summary, figs = res
+            self.bh_summary.setText(f"结果已保存到“{Path(self._bh_out).name}”文件夹（脑区与行为相关.xlsx 和图片）。\n{summary}")
+            self.bh_open.show()
+            if figs:
+                self.bh_preview.setPixmap(QPixmap(str(figs[-1])).scaledToWidth(360, Qt.SmoothTransformation))
+
+        self.run_task(lambda task: run_behavior_correlation(project, out, bp, region_sec=region_sec, progress=task.report),
+                      done, label="正在计算脑区与行为相关…")
 
     # ------------------------------------------------------------ 功能网络
     def _network_box(self, L):
@@ -138,7 +192,7 @@ class GroupsMixin:
         t.blockSignals(True)
         t.setRowCount(len(rows))
         for i, r in enumerate(rows):
-            for j, col in enumerate(["图片", "脑片", "动物", "组别"]):
+            for j, col in enumerate(["图片", "脑片", "动物", "组别", "行为分数"]):
                 it = QTableWidgetItem(r[col])
                 if j < 2:
                     it.setFlags(it.flags() & ~Qt.ItemIsEditable)
@@ -160,15 +214,38 @@ class GroupsMixin:
         self.st_hemi.setCurrentText(sp.hemisphere)
         self.st_area.setValue(sp.min_area_mm2); self.st_depth.setValue(sp.max_depth)
         self._sync_network_box()
+        self._sync_behavior_box(groups)
 
     def _grp_item_changed(self, item):
         key = item.data(Qt.UserRole)
         if item.column() == 2:
             self.project.set_sample(key, animal=item.text())
+            self._save_later(); self._refresh_behavior_cells()
+            return
         elif item.column() == 3:
             self.project.set_sample(key, group=item.text())
             self._refresh_ctrl_groups()
+        elif item.column() == 4:
+            animal = self.project.samples.get(key, {}).get("animal", "")
+            if not animal:
+                self.info("请先填这张脑片的“动物编号”，行为分数是按动物记录的。")
+            elif not self.project.set_behavior(animal, item.text()):
+                self.info(f"“{item.text()}”不是数字。行为分数请填数字，例如 35.2。")
+            self._save_later(); self._refresh_behavior_cells()
+            return
         self._save_later()
+
+    def _refresh_behavior_cells(self):
+        """同一只动物的所有行显示同一个行为分数。"""
+        t = self.grp_table
+        rows = {r["key"]: r for r in self.project.sample_rows()}
+        t.blockSignals(True)
+        for i in range(t.rowCount()):
+            it = t.item(i, 4)
+            r = rows.get(it.data(Qt.UserRole)) if it is not None else None
+            if r is not None:
+                it.setText(r["行为分数"])
+        t.blockSignals(False)
 
     def _refresh_ctrl_groups(self):
         cur = self.st_ctrl.currentText()
@@ -205,7 +282,8 @@ class GroupsMixin:
         except PermissionError:
             self.error("文件正在被 Excel 打开，请先关闭它。")
             return
-        self.info(f"已导出：{f}\n在 Excel 中填写“动物编号”和“组别”两列，保存后点“导入分组表”。不要修改“图片”和“脑片”两列。")
+        self.info(f"已导出：{f}\n在 Excel 中填写“动物编号”“组别”（和需要时的“行为分数”）列，保存后点“导入分组表”。"
+                  "不要修改“图片”和“脑片”两列。")
 
     def _grp_import(self):
         f, _ = QFileDialog.getOpenFileName(self, "导入分组表", str(self.project.folder), "表格 (*.xlsx *.xls *.csv)")
@@ -222,17 +300,24 @@ class GroupsMixin:
             return
         df = df.fillna("")
         keys = {r["key"] for r in self.project.sample_rows()}
-        n, miss = 0, []
+        n, miss, bad = 0, [], []
         for _, r in df.iterrows():
             k = f"{r['图片']}/{r['脑片']}"
             if k not in keys:
                 miss.append(k); continue
-            self.project.set_sample(k, animal=str(r.get("动物编号", r.get("动物", ""))), group=str(r.get("组别", "")))
+            animal = str(r.get("动物编号", r.get("动物", "")))
+            self.project.set_sample(k, animal=animal, group=str(r.get("组别", "")))
+            b = str(r.get("行为分数", "")).strip()
+            if "行为分数" in df.columns and animal.strip() and b:
+                if not self.project.set_behavior(animal, b):
+                    bad.append(f"{animal}：{b}")
             n += 1
         self.project.save(); self._sync_groups_panel()
         msg = f"已导入 {n} 张脑片的分组。"
         if miss:
             msg += f"\n以下 {len(miss)} 行在项目中找不到，已忽略：\n" + "\n".join(miss[:10])
+        if bad:
+            msg += "\n以下行为分数不是数字，已忽略：\n" + "\n".join(bad[:10])
         self.info(msg)
 
     # ------------------------------------------------------------ 统计

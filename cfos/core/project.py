@@ -77,6 +77,8 @@ class Project:
     grading: dict = field(default_factory=dict)   # 强度分级：{通道名: [弱/中分界, 中/强分界]}（倍背景）
     figure: dict = field(default_factory=dict)    # 截图制图设置（figure.FigureSettings 的字典）
     accuracy: list = field(default_factory=list)  # 识别准确率检查记录（accuracy.check 的结果）
+    behavior: dict = field(default_factory=dict)  # 每只动物的行为分数：{动物编号: 数值}（v0.8.1）
+    behavior_params: dict = field(default_factory=dict)  # 脑区与行为相关的参数（behavior.BehaviorParams 的字典）
 
     def __post_init__(self):
         from . import slide_io, detection
@@ -114,6 +116,7 @@ class Project:
             "samples": self.samples, "stats": self.stats, "grading": self.grading, "network": self.network,
             "figure": self.figure,
             "accuracy": self.accuracy,
+            "behavior": self.behavior, "behavior_params": self.behavior_params,
         }
         from . import slide_io
         slide_io.Z_MODE = self.z_mode
@@ -157,6 +160,8 @@ class Project:
         p.network = d.get("network", {})
         p.figure = d.get("figure", {})
         p.accuracy = d.get("accuracy", [])
+        p.behavior = d.get("behavior", {})
+        p.behavior_params = d.get("behavior_params", {})
         p.__post_init__()
         from .relocate import auto_fix
         p.relocated = auto_fix(p)  # 项目和图片一起整体搬走时，自动按相对路径找回
@@ -174,8 +179,10 @@ class Project:
                     continue
                 k = f"{im.key}/{s.name}"
                 d = self.samples.get(k, {})
-                rows.append({"key": k, "图片": im.key, "脑片": s.name, "动物": d.get("animal", ""),
-                             "组别": d.get("group", "")})
+                a = d.get("animal", "")
+                b = self.behavior.get(a) if a else None
+                rows.append({"key": k, "图片": im.key, "脑片": s.name, "动物": a,
+                             "组别": d.get("group", ""), "行为分数": "" if b is None else f"{b:g}"})
         return rows
 
     def set_sample(self, key: str, animal: str | None = None, group: str | None = None):
@@ -184,6 +191,25 @@ class Project:
             d["animal"] = animal.strip()
         if group is not None:
             d["group"] = group.strip()
+
+    def set_behavior(self, animal: str, text: str) -> bool:
+        """填写一只动物的行为分数（空 = 删除）。不是数字时返回 False。"""
+        animal = (animal or "").strip()
+        if not animal:
+            return False
+        t = str(text).strip().replace("％", "").replace("%", "")
+        if not t:
+            self.behavior.pop(animal, None)
+            return True
+        try:
+            v = float(t)
+        except ValueError:
+            return False
+        if v != v:   # NaN
+            self.behavior.pop(animal, None)
+            return True
+        self.behavior[animal] = v
+        return True
 
     def guess_animals(self) -> int:
         """按图片名猜动物编号：没填的脑片，动物编号 = 图片名（一张玻片 = 一只动物的常见情况）。返回填写数。"""
