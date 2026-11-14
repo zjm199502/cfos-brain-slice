@@ -165,6 +165,8 @@ def marker_misplaced(project, im, s, cells, nuc, mask_shape, ds) -> dict:
 def _cells_signature(project, im) -> str:
     """识别结果文件的修改时间和大小：重新识别、改阈值、人工补点删点后会变。"""
     p = project.cells_path(im)
+    if not p.exists():
+        p = project._old_cells_path(im)
     try:
         st = p.stat()
         return f"{st.st_mtime_ns}-{st.st_size}"

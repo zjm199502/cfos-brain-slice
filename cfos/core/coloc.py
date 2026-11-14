@@ -57,6 +57,17 @@ def colocalize(df: pd.DataFrame, pixel_um0: float, params: ColocParams,
     uf = _UF(n)
     r0 = params.max_dist_um / pixel_um0
     search = max(r0, 20.0 / pixel_um0)
+    conts = df["contour"].to_numpy() if params.use_contour and "contour" in df.columns else None
+    paths = {}
+
+    def inside(i, pt):
+        """细胞 i 的轮廓是否包含点 pt。每个轮廓只建一次 Path（以前每次比较都重建）。"""
+        pth = paths.get(i, False)
+        if pth is False:
+            c = conts[i]
+            pth = paths[i] = MplPath(np.asarray(c, float)) if c is not None and len(c) > 2 else None
+        return pth is not None and pth.contains_point(pt)
+
     for sec, g in df.groupby("section"):
         chans = sorted(g["channel"].unique())
         idx_by_ch = {c: g.index[g["channel"] == c].to_numpy() for c in chans}
@@ -76,11 +87,8 @@ def colocalize(df: pd.DataFrame, pixel_um0: float, params: ColocParams,
                 for o in np.argsort(d):
                     j = js[o]
                     ok = d[o] <= r0
-                    if not ok and params.use_contour:
-                        ca = df.at[ia[k], "contour"]
-                        cb = df.at[ib[j], "contour"]
-                        ok = (len(cb) > 2 and MplPath(np.asarray(cb)).contains_point(pa[k])) or \
-                             (len(ca) > 2 and MplPath(np.asarray(ca)).contains_point(pb[j]))
+                    if not ok and conts is not None:
+                        ok = inside(ib[j], pa[k]) or inside(ia[k], pb[j])
                     if ok:
                         pairs.append((d[o], k, j))
             # 一对一匹配：距离最近的优先，每个细胞最多与另一通道的一个细胞配对

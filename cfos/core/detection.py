@@ -238,7 +238,7 @@ def _measure_tile(lab, img, c, tile, geo, crit):
         ys_ = (cont[:, 0] + sl[0].start + ry0) * ds + y0
         xs_ = (cont[:, 1] + sl[1].start + rx0) * ds + x0
         row = {"channel": c, "x": X0, "y": Y0, "area_um2": area, "background": bg, "contrast": contrast,
-               "contour": np.round(np.stack([xs_, ys_], 1), 1).tolist()}
+               "contour": np.round(np.stack([xs_, ys_], 1), 1).astype(np.float32)}
         for k in range(n_ch):
             row[f"mean_ch{k}"] = means[k]
         rows.append(row)

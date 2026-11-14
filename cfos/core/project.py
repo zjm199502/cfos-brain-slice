@@ -288,34 +288,57 @@ class Project:
                     self.detection.channels[i] = ChannelParams(min_area_um2=30, max_area_um2=600)
 
     # ---------- 结果 ----------
+    # v0.8.1 起结果文件改用紧凑格式（见 core/contours.py），换了文件名：
+    # 旧版本软件（比如“恢复到安装时的版本”之后）看不懂新格式，换名可以让它当作“还没识别”，而不是出错。
     def cells_path(self, image: ImageEntry) -> Path:
+        return self.results_dir / f"{image.key}_cells.v2.pkl"
+
+    def _old_cells_path(self, image: ImageEntry) -> Path:
         return self.results_dir / f"{image.key}_cells.pkl"
 
-    def save_cells(self, image: ImageEntry, df: pd.DataFrame):
-        p = self.cells_path(image)
+    def has_cells(self, image: ImageEntry) -> bool:
+        return self.cells_path(image).exists() or self._old_cells_path(image).exists()
+
+    @staticmethod
+    def _dump(p: Path, obj):
+        import pickle
         tmp = p.with_suffix(".tmp")
-        df.to_pickle(tmp)
+        with open(tmp, "wb") as f:
+            pickle.dump(obj, f, protocol=pickle.HIGHEST_PROTOCOL)
         tmp.replace(p)
+
+    def save_cells(self, image: ImageEntry, df: pd.DataFrame):
+        from .contours import pack
+        self._dump(self.cells_path(image), pack(df))
+        old = self._old_cells_path(image)
+        if old.exists():
+            old.unlink()
 
     # 每张脑片的原始识别结果（未按阈值筛选），用于中断后继续、改阈值后不重新识别
     def part_path(self, image: ImageEntry, section_name: str) -> Path:
         d = self.results_dir / "parts" / image.key
         d.mkdir(parents=True, exist_ok=True)
-        return d / f"{section_name}.pkl"
+        return d / f"{section_name}.v2.pkl"
+
+    def _old_part_path(self, image: ImageEntry, section_name: str) -> Path:
+        return self.results_dir / "parts" / image.key / f"{section_name}.pkl"
 
     def save_part(self, image: ImageEntry, section, signature: str, df: pd.DataFrame):
-        import pickle
-        p = self.part_path(image, section.name)
-        tmp = p.with_suffix(".tmp")
-        with open(tmp, "wb") as f:
-            pickle.dump({"signature": signature, "bbox0": tuple(section.bbox0), "cells": df}, f)
-        tmp.replace(p)
+        from .contours import pack
+        self._dump(self.part_path(image, section.name),
+                   {"signature": signature, "bbox0": tuple(section.bbox0), **pack(df)})
+        old = self._old_part_path(image, section.name)
+        if old.exists():
+            old.unlink()
 
     def load_part(self, image: ImageEntry, section, signature: str | None = None):
         import pickle
+        from .contours import normalize, unpack
         p = self.part_path(image, section.name)
         if not p.exists():
-            return None
+            p = self._old_part_path(image, section.name)
+            if not p.exists():
+                return None
         try:
             with open(p, "rb") as f:
                 d = pickle.load(f)
@@ -325,8 +348,14 @@ class Project:
             return None
         if signature is not None and d.get("signature") != signature:
             return None
-        return d["cells"]
+        return unpack(d) if d.get("format") else normalize(d["cells"])
 
     def load_cells(self, image: ImageEntry) -> pd.DataFrame | None:
+        import pickle
+        from .contours import normalize, unpack
         p = self.cells_path(image)
-        return pd.read_pickle(p) if p.exists() else None
+        if p.exists():
+            with open(p, "rb") as f:
+                return unpack(pickle.load(f))
+        p = self._old_cells_path(image)
+        return normalize(pd.read_pickle(p)) if p.exists() else None

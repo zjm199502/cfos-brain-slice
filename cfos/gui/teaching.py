@@ -184,7 +184,7 @@ class TeachingMixin:
         if i == 1:
             return all(im.sections for im in p.images)
         if i == 3 or i == 4:
-            return all(p.cells_path(im).exists() for im in p.images)
+            return all(p.has_cells(im) for im in p.images)
         if i == 5:
             return bool(secs) and all(s.registration.get("plane") for s in secs)
         if i == 6:
