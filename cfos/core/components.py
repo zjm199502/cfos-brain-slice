@@ -154,6 +154,7 @@ def _download(url: str, dst: Path, size: int, progress=None, cancel=None):
 
 def download_pack(progress=None, cancel=None) -> Path:
     """下载本平台的组件包（各分卷核对 MD5 后合并成一个 zip），返回 zip 路径。"""
+    import urllib.parse                      # 分卷文件名有中文，网址里要转义
     man, base = fetch_manifest()
     if man.get("version") != REQUIRED:
         raise RuntimeError(f"服务器上的微调组件版本（{man.get('version')}）与软件需要的（{REQUIRED}）不一致。"
@@ -171,7 +172,7 @@ def download_pack(progress=None, cancel=None) -> Path:
             if not (dst.exists() and dst.stat().st_size == p["size"] and _md5(dst) == p["md5"]):
                 if dst.exists():
                     dst.unlink()
-                _download(f"{base}/{p['file']}", dst, p["size"],
+                _download(f"{base}/{urllib.parse.quote(p['file'])}", dst, p["size"],
                           (lambda n, d0=done: progress(d0 + n, total) if progress else None), cancel)
             if _md5(dst) == p["md5"]:
                 break

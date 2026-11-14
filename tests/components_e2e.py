@@ -65,7 +65,7 @@ det.MODEL_ROOT = str(proj / "models")
 c = p.channel_names.index("Red")
 cx, cy = s.bbox0[0] + s.bbox0[2] / 2, s.bbox0[1] + s.bbox0[3] / 2
 for dx in (-800, 0, 800):
-    x, lab, meta = F.make_patch(p, im, sl, c, (cx + dx, cy))
+    x, lab, meta = F.make_patch(p, sl, im, (cx + dx, cy), c)
     F.save_patch(p, c, x, lab, meta)
 assert "tensorflow" not in sys.modules, "做标注块时不应加载 TensorFlow"
 info = F.finetune(p, c, epochs=1, steps_per_epoch=2)

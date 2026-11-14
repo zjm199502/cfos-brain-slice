@@ -6,15 +6,15 @@ S=${1:?临时文件夹}
 PY=${PY:-python}
 T=$S/updtest; rm -rf $T; mkdir -p $T/inst/app $T/pub $T/src
 SRC=$(cd "$(dirname "$0")/.." && pwd)
-cp -r $SRC/cfos $SRC/main.py $T/inst/app/; ln -s $SRC/resources $T/inst/app/resources
+# 安装目录用旧版本的代码（BASE_REF，默认 origin/main 上的 v0.8），检查补丁能把新文件、图标都带过去
+(cd $SRC && git archive ${BASE_REF:-origin/main} cfos main.py) | tar -x -C $T/inst/app; ln -s $SRC/resources $T/inst/app/resources
 find $T/inst -name __pycache__ -prune -exec rm -rf {} +
 export CFOS_UPDATES_DIR=$T/userdata
 echo "== 1. 安装版本"; (cd /; $PY $T/inst/app/main.py --version)
 # 发布 0.8.1
 cp -r $SRC/cfos $SRC/main.py $SRC/packaging $T/src/; find $T/src -name __pycache__ -prune -exec rm -rf {} +
-sed -i 's/__version__ = "0.8"/__version__ = "0.8.1"/' $T/src/cfos/__init__.py
 printf -- '- 测试补丁 0.8.1\n' > $T/src/packaging/更新公告/0.8.1.md
-$PY $T/src/packaging/make_patch.py $T/pub --min-base 0.8
+$PY $T/src/packaging/make_patch.py $T/pub --min-base 0.7
 (cd $T/pub && $PY -m http.server 8765 >/dev/null 2>&1 & echo $! > $T/http.pid); sleep 1
 export CFOS_UPDATE_URL=http://127.0.0.1:8765/latest.json
 echo "== 2. 检查、下载、安装"
