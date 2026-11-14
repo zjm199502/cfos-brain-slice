@@ -139,7 +139,24 @@ def main():
         z.writestr(_zinfo("手动安装（Windows 旧版本用）.bat"), fill(WIN_BAT).replace("\n", "\r\n"))
         z.writestr(_zinfo("手动安装（Mac 旧版本用）.command", 0o755), fill(MAC_CMD))
     data = zp.read_bytes()
-    latest = {"version": version, "min_base": a.min_base, "date": info["date"], "notes": notes,
+    # 检查更新时显示的公告：这一版 + 之前的小更新（补丁是整套代码，用户可能跳过了中间几版，
+    # 例如 0.8 直接升到 0.8.2，也要能看到 0.8.1 改了什么）。只列比 min_base 新的版本。
+    hist = out / "更新公告.md"
+    earlier = []
+    if hist.exists():
+        import re
+        txt = hist.read_text(encoding="utf-8")
+        for m in re.finditer(r"^## v([0-9.]+)（[^）]*）\n(.*?)(?=^## v|\Z)", txt, re.S | re.M):
+            v, body = m.group(1), m.group(2).strip()
+            if updater.vtuple(a.min_base) < updater.vtuple(v) < updater.vtuple(version):
+                body = body.replace(CONTACT_MD, "").strip()
+                body = re.sub(r"^# .*\n*", "", body, flags=re.M)        # 每段自己的大标题（“# v0.8.1 更新内容”）不要
+                body = re.sub(r"^## ", "#### ", body, flags=re.M)
+                earlier.append(f"### v{v}\n\n{body}")
+    shown = notes if not earlier else (
+        notes.replace(CONTACT_MD, "").strip() + "\n\n## 之前的小更新（已经装过这些版本的可以跳过）\n\n"
+        + "\n\n".join(earlier) + "\n\n" + CONTACT_MD)
+    latest = {"version": version, "min_base": a.min_base, "date": info["date"], "notes": shown,
               "patch": {"file": zname, "size": len(data), "sha256": hashlib.sha256(data).hexdigest()},
               "full_installer": updater.FULL_PAGE}
     (out / "latest.json").write_text(json.dumps(latest, ensure_ascii=False, indent=1), encoding="utf-8")
