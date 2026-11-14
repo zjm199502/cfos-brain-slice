@@ -38,6 +38,8 @@ def list_patches(project, ch: int) -> list[Path]:
 def make_patch(project, slide, image, center_xy, ch: int):
     """在 center_xy（第 0 层坐标）附近取一块，返回 (x 预处理后的图, labels 自动识别的初始标注, meta)。"""
     settings = project.detection
+    from .unmix import prepare as _prepare_unmix
+    _prepare_unmix(project, slide, image)      # 与正式识别一致：开启了串色校正时，标注块也用校正后的图
     p = settings.channels[ch]
     lv = slide.level_for_pixel_size(settings.pixel_um)
     ds = slide.downsample(lv)
@@ -47,12 +49,16 @@ def make_patch(project, slide, image, center_xy, ch: int):
     x0 = int(center_xy[0] - size0 / 2); y0 = int(center_xy[1] - size0 / 2)
     H0, W0 = slide.level_shapes[0]
     x0 = int(np.clip(x0, 0, max(W0 - size0, 0))); y0 = int(np.clip(y0, 0, max(H0 - size0, 0)))
-    raw = slide.read(lv, (x0, y0, size0, size0), [ch])[0][:n, :n]
+    raw = det.read_unmixed(slide, lv, (x0, y0, size0, size0), ch, getattr(project.detection, "unmix", None))[:n, :n]
     # 归一化范围：用这块所在脑片的范围（与正式识别一致）
     sec = next((s for s in image.sections if s.enabled and s.bbox0[0] <= center_xy[0] < s.bbox0[0] + s.bbox0[2]
                 and s.bbox0[1] <= center_xy[1] < s.bbox0[1] + s.bbox0[3]), None)
     if sec is not None:
-        lo, hi, _ = det._norm_percentiles(slide, sec, ch, p.norm_low, p.norm_high)
+        det._CUR_UNMIX = getattr(project.detection, "unmix", None)
+        try:
+            lo, hi, _ = det._norm_percentiles(slide, sec, ch, p.norm_low, p.norm_high)
+        finally:
+            det._CUR_UNMIX = None
     else:
         lo, hi = np.percentile(raw, [p.norm_low, p.norm_high])
     x = det.prepare_input(raw, p, lo, hi, pix)

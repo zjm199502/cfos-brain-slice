@@ -64,7 +64,7 @@ class RelocateMixin:
             return
         im = self.project.images[r]
         f, _ = QFileDialog.getOpenFileName(self, f"为 {Path(im.path).name} 选择新文件", str(self.project.folder.parent),
-                                           "荧光全片图像 (*.qptiff *.tif *.tiff);;所有文件 (*)")
+                                           "荧光全片图像 (*.qptiff *.tif *.tiff *.kfbf);;所有文件 (*)")
         if not f:
             return
         try:

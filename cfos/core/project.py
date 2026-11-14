@@ -13,6 +13,13 @@ from .sections import Section
 
 PROJECT_FILE = "cfos_project.json"
 STANDARD_CHANNELS = ["DAPI", "Green", "Red", "Far red"]
+# 脑片拆分步骤里每个通道的下拉框（v0.8.2）：显示文字 → 保存的通道名
+DYE_LABELS = {"DAPI": "DAPI（AF405）", "Green": "Green（AF488）", "Red": "Red（AF594）", "Far red": "Far Red（AF647）"}
+UNUSED_LABEL = "不使用"
+
+
+def unused_name(c: int) -> str:
+    return f"未用通道{c + 1}"
 
 
 @dataclass
@@ -80,6 +87,9 @@ class Project:
     accuracy: list = field(default_factory=list)  # 识别准确率检查记录（accuracy.check 的结果）
     behavior: dict = field(default_factory=dict)  # 每只动物的行为分数：{动物编号: 数值}（v0.8.1）
     behavior_params: dict = field(default_factory=dict)  # 脑区与行为相关的参数（behavior.BehaviorParams 的字典）
+    unused_channels: list = field(default_factory=list)  # 不使用的通道（不识别、不显示、不参与拆分和串色校正，导出表里不列）（v0.8.2）
+    section_channels: list = field(default_factory=list)  # 找组织轮廓、拆分脑片用哪些通道（空 = 所有在用的通道）（v0.8.2）
+    unmix: dict = field(default_factory=dict)  # 识别前去除通道串色的设置（unmix.UnmixSettings 的字典）（v0.8.2）
 
     def __post_init__(self):
         from . import slide_io, detection
@@ -119,6 +129,8 @@ class Project:
             "figure": self.figure,
             "accuracy": self.accuracy,
             "behavior": self.behavior, "behavior_params": self.behavior_params,
+            "unused_channels": self.unused_channels, "section_channels": self.section_channels,
+            "unmix": self.unmix,
         }
         from . import slide_io
         slide_io.Z_MODE = self.z_mode
@@ -165,6 +177,10 @@ class Project:
         p.accuracy = d.get("accuracy", [])
         p.behavior = d.get("behavior", {})
         p.behavior_params = d.get("behavior_params", {})
+        p.unused_channels = [int(c) for c in d.get("unused_channels", [])]
+        p.section_channels = [int(c) for c in d.get("section_channels", [])]
+        # 旧项目（v0.8.2 之前）没有这一项：保持“不做串色校正”，原来的识别结果不变；新项目默认开启（见 ensure_channels）
+        p.unmix = d.get("unmix", {"enabled": False})
         p.__post_init__()
         from .relocate import auto_fix
         p.relocated = auto_fix(p)  # 项目和图片一起整体搬走时，自动按相对路径找回
@@ -230,7 +246,9 @@ class Project:
                               "overlap": self.detection.overlap,
                               "channels": {str(k): v.to_dict() for k, v in self.detection.channels.items()}},
                 "coloc": self.coloc.to_dict(), "thickness": self.thickness, "z_mode": self.z_mode,
-                "grading": self.grading,
+                "grading": self.grading, "unused_channels": self.unused_channels,
+                "section_channels": self.section_channels,
+                "unmix": {k: v for k, v in self.unmix.items() if k in ("enabled", "scale")},
                 "display": {str(k): asdict(v) for k, v in self.display.items()}}
 
     def save_template(self, path):
@@ -264,8 +282,56 @@ class Project:
         self.thickness = d.get("thickness", self.thickness)
         self.grading = d.get("grading", self.grading)
         self.z_mode = d.get("z_mode", self.z_mode)
+        if len(names) == len(self.channel_names):
+            self.unused_channels = list(d.get("unused_channels", self.unused_channels))
+            self.section_channels = list(d.get("section_channels", self.section_channels))
+        if "unmix" in d:   # 只带开关和微调比例；串色比例每个项目按自己的图片重新估算
+            self.unmix = {**self.unmix, **d["unmix"]}
         self.save()
         return notes
+
+    # ---------- 通道（v0.8.2） ----------
+    def used_channels(self) -> list[int]:
+        return [c for c in range(len(self.channel_names)) if c not in self.unused_channels]
+
+    def tissue_channels(self) -> list[int] | None:
+        """找组织轮廓、拆分脑片用的通道；None = 所有通道（与 v0.8.1 以前相同）。"""
+        chs = [c for c in self.section_channels if c in self.used_channels()]
+        if chs:
+            return chs
+        return self.used_channels() if self.unused_channels else None
+
+    def set_channel_role(self, c: int, label: str) -> str:
+        """脑片拆分步骤里改某个通道的下拉框。label：DYE_LABELS 的值、标准名称或 UNUSED_LABEL。
+        返回空字符串表示成功，否则返回不能这样改的原因。"""
+        if label == UNUSED_LABEL:
+            if c not in self.unused_channels:
+                if len(self.used_channels()) <= 1:
+                    return "至少要保留一个通道。"
+                self.unused_channels.append(c)
+            self.channel_names[c] = unused_name(c)   # 换成不会和在用通道重名的名字（导出时整列去掉）
+            p = self.detection.channels.get(c)
+            if p is not None:
+                p.detect = False
+            self.display.setdefault(c, DisplayChannel()).visible = False
+            self.save()
+            return ""
+        name = {v: k for k, v in DYE_LABELS.items()}.get(label, label).strip()
+        if not name:
+            return "通道名称不能为空。"
+        for i, n in enumerate(self.channel_names):
+            if i != c and i not in self.unused_channels and n == name:
+                return f"“{name}”已经用在第 {i + 1} 个通道上了，两个通道不能同名。"
+        was_unused = c in self.unused_channels
+        if was_unused:
+            self.unused_channels.remove(c)
+            p = self.detection.channels.get(c)
+            if p is not None:
+                p.detect = True
+            self.display.setdefault(c, DisplayChannel()).visible = True
+        self.channel_names[c] = name
+        self.save()
+        return ""
 
     def apply_thickness_preset(self, thickness: str):
         """按切片厚度设置推荐参数。厚切片：识别前减背景（去掉焦平面外的雾）并去卷积（细胞边界更清楚），
@@ -294,6 +360,7 @@ class Project:
     def ensure_channels(self, slide_channels):
         """第一次加入图片时，按图片里的通道初始化名称和参数。"""
         if not self.channel_names:
+            self.unmix = {"enabled": True}      # 新项目默认识别前去除串色（v0.8.2）
             names = []
             for ch in slide_channels:
                 n = ch.name.upper()

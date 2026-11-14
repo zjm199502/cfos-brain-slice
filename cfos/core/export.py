@@ -117,7 +117,18 @@ def build_tables(project: Project, intensity: bool | None = None) -> dict[str, p
             out["按脑区×脑片"] = t
         if roi_rows:  # 只有画了自定义区域时才有这张表
             out["按自定义区域"] = pd.concat(roi_rows, ignore_index=True)
-    return out
+    return _drop_unused(out, project)
+
+
+def _drop_unused(tables: dict, project: Project) -> dict:
+    """“② 脑片拆分”里设为“不使用”的通道，导出表里不列（它们的名字是“未用通道N”，不会和在用的通道重名）。"""
+    bad = [project.channel_names[c] for c in getattr(project, "unused_channels", []) if c < len(project.channel_names)]
+    if not bad:
+        return tables
+    def unused(col):
+        col = str(col)
+        return any(b in col for b in bad)
+    return {k: v.loc[:, [c for c in v.columns if not unused(c)]] for k, v in tables.items()}
 
 
 def roi_mean_intensity(slide, polygon, exclusions, target_um: float = 0.0) -> list[float]:
@@ -224,11 +235,17 @@ def params_table(project: Project) -> pd.DataFrame:
             ("切片厚度预设", "厚切片（30–50 µm）" if project.thickness == "thick" else "薄切片（≤ 20 µm）"),
             ("z-stack 合成方式", {"max": "最大投影", "edf": "景深合成", "mean": "平均投影"}.get(project.z_mode, project.z_mode)),
             ("排除区域数", sum(len(im.exclusions) for im in project.images))]
+    from .unmix import describe_settings
+    rows.append(("通道串色校正", describe_settings(project.unmix, project.channel_names)))
+    tc = project.tissue_channels()
+    rows.append(("拆分脑片用的通道", "全部通道" if tc is None else "、".join(project.channel_names[c] for c in tc)))
+    if project.unused_channels:
+        rows.append(("不使用的通道", "、".join(f"第 {c + 1} 通道" for c in sorted(project.unused_channels))))
     for nm, cuts in (project.grading or {}).items():
         rows.append((f"{nm} 强度分级（倍背景）", f"弱 < {cuts[0]} ≤ 中 < {cuts[1]} ≤ 强"))
     for c, nm in enumerate(project.channel_names):
         p = project.detection.channels.get(c)
-        if p is None:
+        if p is None or c in project.unused_channels:
             continue
         rows += [(f"{nm} 是否识别", "是" if p.detect else "否"),
                  (f"{nm} 识别模型", f"微调模型“{p.model}”" if p.model else "StarDist 通用荧光细胞核模型（2D_versatile_fluo）"),

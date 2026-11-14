@@ -1,4 +1,4 @@
-"""读取多通道荧光全片图像（qptiff / ome.tif / tif），支持金字塔分辨率按需读取。"""
+"""读取多通道荧光全片图像（qptiff / ome.tif / tif / 江丰 .kfbf），支持金字塔分辨率按需读取。"""
 from __future__ import annotations
 
 import re
@@ -36,6 +36,7 @@ class Slide:
     axes: str = "CYX"                 # 原始文件的轴顺序（可能含 Z）
     n_z: int = 1                      # z-stack 层数，1 表示单层扫描 / 已做景深合成
     z_mode: str = "max"               # z-stack 的合成方式：max=最大投影，edf=景深合成（取最清晰的层），或 "z3" 表示只用第 3 层
+    _kf: object = field(repr=False, default=None)   # 江丰 .kfbf 文件（v0.8.2），不是 TIFF 时用它读
 
     @property
     def n_levels(self) -> int:
@@ -55,6 +56,9 @@ class Slide:
     def _arr(self, level: int):
         while len(self._levels) <= level:
             self._levels.append(None)
+        if self._levels[level] is None and self._kf is not None:
+            from .kfbf import _KfbfLevelArray
+            self._levels[level] = _KfbfLevelArray(self._kf, level)
         if self._levels[level] is None:
             raw = zarr.open(self._tif.series[0].aszarr(level=level), mode="r")
             self._levels[level] = raw if self.axes in ("CYX", "YX") else ZProjected(raw, self.axes, self.z_mode)
@@ -82,6 +86,8 @@ class Slide:
     def close(self):
         if self._tif is not None:
             self._tif.close()
+        if self._kf is not None:
+            self._kf.close()
 
 
 def _sharpness(stack: np.ndarray) -> np.ndarray:
@@ -163,7 +169,7 @@ def _guess_color(name: str, idx: int):
         return DEFAULT_COLORS["DAPI"]
     if any(k in n for k in ("FITC", "GFP", "488", "520", "GREEN", "CY2")):
         return DEFAULT_COLORS["GREEN"]
-    if any(k in n for k in ("647", "690", "CY5", "FAR")):
+    if any(k in n for k in ("647", "650", "660", "670", "680", "690", "700", "CY5", "FAR")):
         return DEFAULT_COLORS["FAR RED"]
     if any(k in n for k in ("TRITC", "CY3", "555", "568", "594", "620", "RED")):
         return DEFAULT_COLORS["RED"]
@@ -182,6 +188,8 @@ def open_slide(path: str | Path, z_mode: str | None = None) -> Slide:
     z_mode = z_mode or Z_MODE
     if not path.exists():
         raise FileNotFoundError(f"找不到图片文件：{path}（可能被移动、改名，或移动硬盘没有插上）")
+    if path.suffix.lower() == ".kfbf":
+        return _open_kfbf(path, z_mode)
     tif = tifffile.TiffFile(path)
     s = tif.series[0]
     axes = s.axes.replace("Q", "Z").replace("I", "Z")
@@ -236,6 +244,27 @@ def open_slide(path: str | Path, z_mode: str | None = None) -> Slide:
     slide = Slide(path=path, channels=channels, pixel_size_um=float(px),
                   level_shapes=level_shapes, _tif=tif, axes=axes, n_z=n_z, z_mode=z_mode)
     # 部分扫描仪写出的最粗几层是空白图（全为同一数值），去掉这些层，避免显示成黑屏
+    while slide.n_levels > 1 and max(slide.level_shapes[-1]) <= 4096:
+        a = slide.read(slide.n_levels - 1)
+        if int(a.max()) - int(a.min()) > 2:
+            break
+        slide.level_shapes.pop()
+    return slide
+
+
+def _open_kfbf(path: Path, z_mode: str) -> Slide:
+    """江丰生物（KFBIO）扫描仪的荧光原始文件 .kfbf（v0.8.2 起直接读取，不用先转格式）。
+    每个通道是 8 位灰度 JPEG 图块，自带金字塔（20x、10x、5x …）；目前见过的样本都是单层扫描。"""
+    from .kfbf import KfbfFile
+    try:
+        kf = KfbfFile(path)
+    except Exception as e:  # noqa: BLE001
+        raise ValueError(f"无法读取江丰 .kfbf 文件（{path.name}）：{e}。"
+                         "如果是很旧或很新的扫描软件导出的，请用江丰的软件另存为 TIFF 再导入。") from e
+    channels = [ChannelInfo(i, nm, _guess_color(nm, i)) for i, nm in enumerate(kf.channel_names)]
+    slide = Slide(path=path, channels=channels, pixel_size_um=float(kf.pixel_size_um),
+                  level_shapes=[tuple(lv.shape) for lv in kf.levels], axes="CYX", n_z=1, z_mode=z_mode, _kf=kf)
+    # 只存了组织图块的最粗几层可能全是 0，和 TIFF 一样去掉，避免显示成黑屏
     while slide.n_levels > 1 and max(slide.level_shapes[-1]) <= 4096:
         a = slide.read(slide.n_levels - 1)
         if int(a.max()) - int(a.min()) > 2:

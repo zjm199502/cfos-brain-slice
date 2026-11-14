@@ -116,16 +116,30 @@ class DetectionSettings:
     tile: int = 2048
     overlap: int = 96
     channels: dict = field(default_factory=dict)  # 通道序号 -> ChannelParams
+    # 识别前去除通道串色（v0.8.2）：unmix.prepare() 在识别前设置，不单独保存（设置在 Project.unmix 里）
+    unmix: object = field(default=None, repr=False, compare=False)
+    unmix_sig: object = field(default=None, repr=False, compare=False)
 
 
 def _norm_percentiles(slide: Slide, section: Section, ch: int, lo: float, hi: float):
     """在较低分辨率下估计整张脑片的归一化范围，保证各分块亮度一致。"""
     lv = slide.level_for_pixel_size(2.0)
-    a = slide.read(lv, section.bbox0, [ch])[0]
+    a = read_unmixed(slide, lv, section.bbox0, ch, _CUR_UNMIX)
     mask = section_mask(section, a.shape, slide.downsample(lv))
     v = a[mask] if mask.any() else a.ravel()
     lo_v, hi_v, bg = np.percentile(v, [lo, hi, 50])
     return lo_v, hi_v, max(float(bg), 1.0)
+
+
+_CUR_UNMIX = None      # detect_section 运行时的解混模型（_norm_percentiles 用）
+
+
+def read_unmixed(slide: Slide, lv: int, bbox0, ch: int, model=None) -> np.ndarray:
+    """读一个通道；给了解混模型时先读全部通道、去除串色，再取这个通道（v0.8.2）。"""
+    if model is None or len(slide.channels) < 2 or np.asarray(model.matrix).shape[0] != len(slide.channels):
+        return slide.read(lv, bbox0, [ch])[0]
+    from .unmix import apply
+    return apply(slide.read(lv, bbox0), model, [ch])[0]
 
 
 def section_mask(section: Section, shape, ds: float) -> np.ndarray:
@@ -289,8 +303,15 @@ def detect_section(slide: Slide, section: Section, settings: DetectionSettings,
     geo = (x0, y0, ds, pix, contour0)
 
     det_chs = [c for c in range(n_ch) if settings.channels.get(c, ChannelParams()).detect]
-    norms = {c: _norm_percentiles(slide, section, c, settings.channels[c].norm_low,
-                                  settings.channels[c].norm_high) for c in det_chs}
+    global _CUR_UNMIX
+    um = getattr(settings, "unmix", None)
+    um = um if um is not None and np.asarray(um.matrix).shape == (n_ch, n_ch) else None
+    _CUR_UNMIX = um
+    try:
+        norms = {c: _norm_percentiles(slide, section, c, settings.channels[c].norm_low,
+                                      settings.channels[c].norm_high) for c in det_chs}
+    finally:
+        _CUR_UNMIX = None
 
     T, ov = settings.tile, settings.overlap
     tiles = [(tx, ty) for ty in range(0, H, T) for tx in range(0, W, T)]
@@ -354,6 +375,9 @@ def detect_section(slide: Slide, section: Section, settings: DetectionSettings,
             rx1, ry1 = min(W, tx + T + ov), min(H, ty + T + ov)
             bb = (x0 + rx0 * ds, y0 + ry0 * ds, (rx1 - rx0) * ds, (ry1 - ry0) * ds)
             img = slide.read(lv, bb)
+            if um is not None and img.size:
+                from .unmix import apply as _unmix
+                img = _unmix(img, um)       # 识别前去除通道串色；之后的识别和亮度测量都用校正后的图
             if img.size == 0:
                 tick(len(det_chs))
                 continue
@@ -411,6 +435,8 @@ def raw_signature(settings: DetectionSettings) -> str:
     d = {"px": settings.pixel_um, "tile": settings.tile, "ov": settings.overlap,
          "ch": {str(c): {k: getattr(p, k) for k in RAW_KEYS if not (k == "model" and not p.model)}
                 for c, p in sorted(settings.channels.items())}}
+    if getattr(settings, "unmix_sig", None):     # 只有开启了串色校正才加进签名，旧项目的签名不变
+        d["unmix"] = settings.unmix_sig
     return json.dumps(d, sort_keys=True)
 
 

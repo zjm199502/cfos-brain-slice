@@ -22,7 +22,7 @@ from qtpy.QtWidgets import (
 from ..core import detection as det
 from ..core.coloc import colocalize, merged_cells, summarize, nucleus_channel
 from ..core.export import export_excel
-from ..core.project import Project, ImageEntry, STANDARD_CHANNELS
+from ..core.project import Project, ImageEntry, STANDARD_CHANNELS, DYE_LABELS, UNUSED_LABEL
 from ..core.sections import Section, find_sections, contour_in_bbox
 from ..core.slide_io import open_slide
 from .worker import Task
@@ -37,7 +37,7 @@ from .update_panel import UpdateMixin
 
 DECONV_SLOWDOWN = "多用 30–45% 的时间"   # 示例脑片实测（2 通道，4 核）：378 → 488 秒（v0.8）、403 → 581 秒（v0.8.1）
 from .. import APP_NAME  # noqa: E402
-IMAGE_FILTER = "荧光全片图像 (*.qptiff *.tif *.tiff *.ome.tif *.ome.tiff);;所有文件 (*)"
+IMAGE_FILTER = "荧光全片图像 (*.qptiff *.tif *.tiff *.ome.tif *.ome.tiff *.kfbf);;所有文件 (*)"
 COLORMAP = {"DAPI": "blue", "Green": "green", "Red": "red", "Far red": "magenta"}
 POINT_COLOR = {"DAPI": "#4f8cff", "Green": "#3ddc4a", "Red": "#ff4040", "Far red": "#ff40ff"}
 
@@ -257,9 +257,7 @@ class MainWindow(UpdateMixin, TeachingMixin, FigureMixin, AccuracyMixin, Relocat
         L.addWidget(rm)
         self._relocate_widgets(L)
 
-        self.channels_box = QGroupBox("通道名称（对应实验中的染色）")
-        self.channels_form = QFormLayout(self.channels_box)
-        L.addWidget(self.channels_box)
+        L.addWidget(QLabel("各通道对应哪种染色、哪些通道不用，在“② 脑片拆分”里设置。"))
 
         zb = QGroupBox("z-stack（多层扫描）图片的合成方式"); zf = QVBoxLayout(zb)
         from ..core.slide_io import Z_MODE_NAMES
@@ -443,7 +441,7 @@ class MainWindow(UpdateMixin, TeachingMixin, FigureMixin, AccuracyMixin, Relocat
         from ..core.pipeline import list_images
         dlg = QDialog(self); dlg.setWindowTitle("一键批量处理")
         L = QVBoxLayout(dlg)
-        L.addWidget(hint("选择放图片的文件夹，软件会依次处理其中所有 .qptiff / .tif 图片，"
+        L.addWidget(hint("选择放图片的文件夹，软件会依次处理其中所有 .qptiff / .tif / .kfbf 图片，"
                          "全部使用当前项目里的识别参数（建议先用一张图片调好参数）。\n"
                          "完成后会在项目文件夹里生成 Excel，并列出需要人工检查配准的脑片。"))
         row = QHBoxLayout(); path = QLineEdit(); pick = QPushButton("选择文件夹…")
@@ -475,7 +473,7 @@ class MainWindow(UpdateMixin, TeachingMixin, FigureMixin, AccuracyMixin, Relocat
         from ..core.pipeline import list_images, run_batch
         files = list_images(folder)
         if not files:
-            self.error("这个文件夹里没有找到 .qptiff / .tif 图片。")
+            self.error("这个文件夹里没有找到 .qptiff / .tif / .kfbf 图片。")
             return
         if self.project is None:
             pf = Path(folder) / "cFos分析项目"
@@ -554,18 +552,67 @@ class MainWindow(UpdateMixin, TeachingMixin, FigureMixin, AccuracyMixin, Relocat
         self.z_combo.blockSignals(True)
         self.z_combo.setCurrentIndex(max(0, self.z_combo.findData(self.project.z_mode)))
         self.z_combo.blockSignals(False)
-        for c, nm in enumerate(self.project.channel_names):
-            cb = QComboBox(); cb.setEditable(True); cb.addItems(STANDARD_CHANNELS)
-            cb.setCurrentText(nm)
-            cb.currentTextChanged.connect(lambda t, c=c: self._rename_channel(c, t))
-            self.channels_form.addRow(f"图像第 {c + 1} 通道：", cb)
+        p = self.project
+        file_names = [ch.name for ch in self.slide.channels] if self.slide is not None else []
+        tissue = p.tissue_channels()
+        for c, nm in enumerate(p.channel_names):
+            cb = QComboBox()
+            labels = list(DYE_LABELS.values())
+            unused = c in p.unused_channels
+            cur = UNUSED_LABEL if unused else DYE_LABELS.get(nm, nm)
+            if cur not in labels and cur != UNUSED_LABEL:
+                labels.append(cur)      # 以前自己填的名字（如“NeuN”）也保留在列表里
+            cb.addItems(labels + [UNUSED_LABEL])
+            cb.setCurrentText(cur)
+            cb.currentTextChanged.connect(lambda t, c=c, cb=cb: self._rename_channel(c, t, cb))
+            use = QCheckBox("拆分"); use.setEnabled(not unused)
+            use.setChecked(not unused and (tissue is None or c in tissue))
+            use.setToolTip("用这个通道找组织轮廓、拆分脑片。改了以后请重新点“自动识别脑片”。")
+            use.toggled.connect(lambda on, c=c: self._set_tissue_channel(c, on))
+            row = QHBoxLayout(); row.addWidget(cb, 1); row.addWidget(use)
+            fn = f"（{file_names[c]}）" if c < len(file_names) else ""
+            cb.setToolTip(f"图片文件里第 {c + 1} 个通道" + (f"，扫描仪写的名字是“{file_names[c]}”" if fn else "") + "。")
+            self.channels_form.addRow(f"通道 {c + 1}{fn}", row)
 
-    def _rename_channel(self, c, text):
-        if not text.strip():
+    def _set_tissue_channel(self, c, on):
+        p = self.project
+        cur = p.tissue_channels() or p.used_channels()
+        chs = sorted(set(cur) | {c}) if on else [x for x in cur if x != c]
+        if not chs:
+            self.error("至少要用一个通道来拆分脑片。")
+            self._refresh_channels_form(); return
+        p.section_channels = [] if chs == p.used_channels() else chs
+        p.save()
+        self.statusBar().showMessage("拆分用的通道已改。请重新点“自动识别脑片”，按新设置找组织轮廓。", 10000)
+
+    def _rename_channel(self, c, label, cb=None):
+        p = self.project
+        was_unused = c in p.unused_channels
+        old_name = p.channel_names[c]
+        why = p.set_channel_role(c, label)
+        if why:
+            self.error(why)
+            QTimer.singleShot(0, self._refresh_channels_form)
             return
-        self.project.channel_names[c] = text.strip(); self.project.save()
+        detected = any(p.has_cells(im) for im in p.images)
+        if detected:
+            notes = []
+            if label == UNUSED_LABEL or was_unused:
+                notes.append("启用 / 停用通道后，请在“④ 细胞识别”里重新识别（没变的通道会直接用上次的结果）。")
+            if "DAPI" in (old_name, p.channel_names[c]):
+                notes.append("细胞核（DAPI）通道变了，请在“④ 细胞识别”里点“按新阈值重新筛选”，更新共标结果。")
+            if notes:
+                self.info("通道设置已保存。\n\n" + "\n".join(notes))
+        QTimer.singleShot(0, self._refresh_channels_form)
+        self._refresh_detection_panel_safe()
         if self.slide is not None:
             self._show_image()
+
+    def _refresh_detection_panel_safe(self):
+        try:
+            self._sync_detection_panel()
+        except Exception:  # noqa: BLE001  面板还没建好时忽略
+            pass
 
     # ================================================================ 看图
     def _on_image_changed(self, idx):
@@ -586,6 +633,7 @@ class MainWindow(UpdateMixin, TeachingMixin, FigureMixin, AccuracyMixin, Relocat
             return
         self.z_info.setText(f"当前图片是 z-stack（{self.slide.n_z} 层），正在使用“{self.z_combo.currentText()}”。"
                             if self.slide.n_z > 1 else "当前图片是单层图像（或扫描仪已做景深合成），不需要设置。")
+        self._refresh_channels_form()
         self._show_image()
         if self.stack.currentIndex() == 1:
             self._refresh_section_table()
@@ -647,6 +695,12 @@ class MainWindow(UpdateMixin, TeachingMixin, FigureMixin, AccuracyMixin, Relocat
                          "• 方框不准时：在左侧图层列表选中“脑片”图层，用“选择 / 移动方框”“拖动顶点调整大小”调整；"
                          "也可以“画新的矩形”，或选中后点“删除选中的方框”。\n"
                          "• 调整完点“保存方框修改”。\n• 破损或不想分析的脑片，在下表中取消“分析”勾选。"))
+        self.channels_box = QGroupBox("通道设置（对应实验中的染色）")
+        cbl = QVBoxLayout(self.channels_box)
+        cbl.addWidget(hint("每个通道选一种染色；没用的通道选“不使用”（不识别、不显示、不导出）。\n"
+                           "勾选“拆分”的通道用来找组织轮廓、拆分脑片；某个通道背景太亮、把载玻片也当成组织时，取消勾选它。"))
+        self.channels_form = QFormLayout(); cbl.addLayout(self.channels_form)
+        L.addWidget(self.channels_box)
         b1 = big_button("自动识别当前图片的脑片"); b1.clicked.connect(lambda: self.auto_sections(False))
         b2 = big_button("自动识别所有图片的脑片"); b2.clicked.connect(lambda: self.auto_sections(True))
         b3 = big_button("保存方框修改"); b3.clicked.connect(self.save_section_edits)
@@ -750,7 +804,7 @@ class MainWindow(UpdateMixin, TeachingMixin, FigureMixin, AccuracyMixin, Relocat
             for i, im in enumerate(targets):
                 task.report(i, len(targets), f"正在识别脑片：{Path(im.path).name}")
                 sl = open_slide(im.path)
-                out[im.path] = find_sections(sl)
+                out[im.path] = find_sections(sl, channels=self.project.tissue_channels())
                 sl.close()
             return out
 
@@ -829,7 +883,7 @@ class MainWindow(UpdateMixin, TeachingMixin, FigureMixin, AccuracyMixin, Relocat
             if prev is not None and tuple(prev.bbox0) == bbox:
                 s = prev
             else:
-                s = Section(id=i + 1, bbox0=bbox, contour0=contour_in_bbox(self.slide, bbox),
+                s = Section(id=i + 1, bbox0=bbox, contour0=contour_in_bbox(self.slide, bbox, self.project.tissue_channels()),
                             name=prev.name if prev else "", enabled=prev.enabled if prev else True)
             new.append(s)
         for s in new:
@@ -920,6 +974,7 @@ class MainWindow(UpdateMixin, TeachingMixin, FigureMixin, AccuracyMixin, Relocat
                             "z-stack 图片请在“① 项目与图片”中选择合成方式。"))
         tl.itemAt(2).widget().setWordWrap(True)
         L.addWidget(tb)
+        L.addWidget(self._unmix_box())
         self.det_rows = QVBoxLayout(); L.addLayout(self.det_rows)
         b0 = big_button("预览当前视野的减背景/去卷积效果"); b0.clicked.connect(self.preview_enhance)
         L.addWidget(b0)
@@ -966,7 +1021,101 @@ class MainWindow(UpdateMixin, TeachingMixin, FigureMixin, AccuracyMixin, Relocat
         L.addStretch(1)
         return w
 
+    # ---------------------------------------------------------------- 识别前去除通道串色（v0.8.2）
+    UNMIX_OFF_WARN = "可能把串过来的信号当成阳性细胞，共标数会偏高。"
+
+    def _unmix_box(self):
+        box = QGroupBox("通道串色"); v = QVBoxLayout(box)
+        self.um_on = QCheckBox("识别前去除通道串色（推荐）")
+        self.um_on.setToolTip("短波长染料的荧光会有一部分“漏”进长波长通道（例如 488 漏进 647），\n"
+                              "让那个通道里出现假的阳性细胞、共标数偏高。软件从图片本身自动估算漏进去的比例并扣除，\n"
+                              "不需要单染对照。只影响识别和细胞亮度；脑区平均荧光强度仍按原图测量。")
+        self.um_on.toggled.connect(self._unmix_toggled)
+        v.addWidget(self.um_on)
+        self.um_warn = QLabel("⚠ " + self.UNMIX_OFF_WARN); self.um_warn.setWordWrap(True)
+        self.um_warn.setStyleSheet("color: #d08000;")
+        v.addWidget(self.um_warn)
+        self.um_info = QLabel(""); self.um_info.setWordWrap(True); self.um_info.setStyleSheet("color: gray;")
+        v.addWidget(self.um_info)
+        self.um_sliders = QFormLayout(); v.addLayout(self.um_sliders)
+        self.um_est = QPushButton("重新估算串色比例（用当前图片）"); self.um_est.clicked.connect(self._unmix_estimate)
+        v.addWidget(self.um_est)
+        return box
+
+    def _sync_unmix_box(self):
+        p = self.project
+        while self.um_sliders.rowCount():
+            self.um_sliders.removeRow(0)
+        d = p.unmix or {}
+        on = bool(d.get("enabled"))
+        self.um_on.blockSignals(True); self.um_on.setChecked(on); self.um_on.blockSignals(False)
+        self.um_warn.setVisible(not on)
+        self.um_est.setEnabled(on)
+        if not on:
+            self.um_info.setText("")
+            return
+        if "coef" not in d:
+            self.um_info.setText("第一次识别（或预览）时会自动估算各通道的串色比例，估算后可以在这里微调。")
+            return
+        names = p.channel_names
+        if d.get("names") and list(d["names"]) != list(names):
+            self.um_info.setText("通道名称改过了，建议点下面的按钮重新估算。")
+        else:
+            self.um_info.setText(f"自动估算（用“{d.get('image', '')}”）。拖动滑块可以微调；"
+                                 "比例太大会把弱的真阳性细胞也减掉，太小则去不干净。改动后需要重新识别。")
+        if not d.get("coef"):
+            self.um_sliders.addRow(QLabel("没有发现明显的串色，识别时不需要扣除。"))
+        for k, a in sorted(d.get("coef", {}).items()):
+            j, i = (int(x) for x in k.split(","))
+            if j >= len(names) or i >= len(names) or j in p.unused_channels or i in p.unused_channels:
+                continue
+            auto = d.get("auto", {}).get(k, a)
+            sl = QSlider(Qt.Horizontal); sl.setRange(0, 400); sl.setValue(int(round(a * 1000)))  # 0.1% 一格，最多 40%
+            lab = QLabel(f"{a * 100:.1f}%"); lab.setMinimumWidth(110)
+            def moved(val, k=k, lab=lab, auto=auto):
+                lab.setText(f"{val / 10:.1f}%" + ("" if abs(val / 1000 - auto) < 5e-4 else f"（自动 {auto * 100:.1f}%）"))
+            def released(k=k, sl=sl):
+                self.project.unmix.setdefault("coef", {})[k] = round(sl.value() / 1000, 4)
+                self.project.save()
+                self.statusBar().showMessage("串色比例已改。需要重新识别细胞才会生效。", 8000)
+            sl.valueChanged.connect(moved); sl.sliderReleased.connect(released)
+            sl.valueChanged.connect(lambda _v, sl=sl, released=released: None if sl.isSliderDown() else released())
+            moved(sl.value())
+            row = QHBoxLayout(); row.addWidget(sl, 1); row.addWidget(lab)
+            self.um_sliders.addRow(f"{names[j]} → {names[i]}", row)
+
+    def _unmix_toggled(self, on):
+        self.project.unmix = {**(self.project.unmix or {}), "enabled": bool(on)}
+        self.project.save()
+        self._sync_unmix_box()
+        if not on:
+            self.info("已关闭“识别前去除通道串色”。\n\n" + self.UNMIX_OFF_WARN +
+                      "\n\n改动后需要重新识别细胞才会生效。")
+        else:
+            self.statusBar().showMessage("已开启识别前去除通道串色。需要重新识别细胞才会生效。", 8000)
+
+    def _unmix_estimate(self):
+        if self.image is None:
+            self.error("请先在上方选择一张图片。"); return
+        project, image = self.project, self.image
+
+        def job(task):
+            from ..core.unmix import estimate_project
+            task.report(0, 1, "正在估算通道串色比例…")
+            return estimate_project(project, image=image)
+
+        def done(d):
+            self._sync_unmix_box()
+            lines = d.get("detail") or ["没有发现明显的串色。"]
+            self.info("串色比例已重新估算：\n" + "\n".join(lines) + "\n\n需要重新识别细胞才会生效。")
+
+        self.run_task(job, done, label="正在估算通道串色比例…")
+
     def _sync_detection_panel(self):
+        try:
+            self._sync_unmix_box()
+        except AttributeError:
+            pass
         while self.det_rows.count():
             it = self.det_rows.takeAt(0)
             wd = it.widget()
@@ -985,6 +1134,8 @@ class MainWindow(UpdateMixin, TeachingMixin, FigureMixin, AccuracyMixin, Relocat
         self._man_refresh_info()
         self._acc_sync()
         for c, nm in enumerate(self.project.channel_names):
+            if c in self.project.unused_channels:
+                continue            # “② 脑片拆分”里设为不使用的通道
             p = self.project.detection.channels[c]
             box = QGroupBox(nm); f = QFormLayout(box)
             on = QCheckBox("识别这个通道的细胞"); on.setChecked(p.detect)
@@ -1068,15 +1219,22 @@ class MainWindow(UpdateMixin, TeachingMixin, FigureMixin, AccuracyMixin, Relocat
         path = self.image.path
         settings = self.project.detection
 
+        project, image = self.project, self.image
+
         def job(task):
             s = open_slide(path)
             try:
+                from ..core.unmix import prepare as _prepare_unmix
+                if (project.unmix or {}).get("enabled") and "coef" not in project.unmix:
+                    task.report(0, 1, "第一次识别：正在估算通道串色比例…")
+                _prepare_unmix(project, s, image)
                 return det.detect_section(s, sec, settings, progress=lambda d, t: task.report(d, t, "正在预览识别…"),
                                           cancel=task.is_cancelled)
             finally:
                 s.close()
 
         def done(df):
+            self._sync_unmix_box()
             for nm in [l.name for l in self.viewer.layers if l.name.startswith("预览")]:
                 self.viewer.layers.remove(nm)
             rect = np.array([[y, x], [y, x + w], [y + h, x + w], [y + h, x]], float)
@@ -1180,7 +1338,7 @@ class MainWindow(UpdateMixin, TeachingMixin, FigureMixin, AccuracyMixin, Relocat
 
         def done(out):
             res, errors, reused = out
-            self.project.save(); self._refresh_images()
+            self.project.save(); self._refresh_images(); self._sync_unmix_box()
             for k_, df in res.items():
                 self._cells_cache[k_] = df
             self._draw_cells()

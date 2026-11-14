@@ -17,7 +17,7 @@ from .project import Project, ImageEntry
 from .sections import find_sections
 from .slide_io import open_slide
 
-IMAGE_EXTS = (".qptiff", ".tif", ".tiff")
+IMAGE_EXTS = (".qptiff", ".tif", ".tiff", ".kfbf")
 
 
 def list_images(folder) -> list[Path]:
@@ -75,8 +75,10 @@ def detect_image(project: Project, im: ImageEntry, sl=None, redo=False, report=N
         sl = open_slide(im.path)
     try:
         if not im.sections:
-            im.sections = find_sections(sl)
+            im.sections = find_sections(sl, channels=project.tissue_channels())
         secs = [s for s in im.sections if s.enabled]
+        from .unmix import prepare as _prepare_unmix
+        _prepare_unmix(project, sl, im)        # 识别前去除串色：开启了但还没估算时，先用这张图片估算
         sig = det.raw_signature(project.detection)
         a, b = progress_range
         reused = done = 0
@@ -182,7 +184,7 @@ def run_batch(project: Project, files, do_register=True, do_nonlinear=True, redo
         try:
             if not im.sections or redo:
                 say(base, total, f"{name}：拆分脑片")
-                im.sections = find_sections(sl)
+                im.sections = find_sections(sl, channels=project.tissue_channels())
                 if not im.sections:
                     raise ValueError("没有找到脑片（图片可能是空白的，或组织太暗）")
             secs = [s for s in im.sections if s.enabled]

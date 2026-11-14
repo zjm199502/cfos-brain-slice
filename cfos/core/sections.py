@@ -33,6 +33,22 @@ class Section:
 
 def tissue_mask(img: np.ndarray, pixel_um: float, sensitivity: float = 1.0) -> np.ndarray:
     """img: (C, H, W) 低分辨率图。返回组织掩膜。"""
+    k = int(round(8.0 / pixel_um)) if 0 < pixel_um < 6.0 else 1
+    if k >= 2 and min(img.shape[1:]) >= 8 * k:
+        # 金字塔里没有约 8 µm 的层（如江丰 .kfbf 是 5.2 µm）时，先缩小再算：形态学运算的耗时随半径平方增长，
+        # 原来要几十秒，缩小后不到 1 秒。结果放大回原尺寸。
+        C, H, W = img.shape
+        h, w = H // k, W // k
+        small = img[:, :h * k, :w * k].astype(np.float32).reshape(C, h, k, w, k).mean(axis=(2, 4))
+        m = tissue_mask(small, pixel_um * k, sensitivity)
+        out = np.zeros((H, W), bool)
+        big = np.repeat(np.repeat(m, k, 0), k, 1)
+        out[:h * k, :w * k] = big
+        if H > h * k:
+            out[h * k:, :w * k] = big[-1:, :]
+        if W > w * k:
+            out[:, w * k:] = out[:, w * k - 1:w * k]
+        return out
     chans = []
     for c in img.astype(np.float32):
         lo, hi = np.percentile(c, [1, 99.5])
@@ -48,11 +64,12 @@ def tissue_mask(img: np.ndarray, pixel_um: float, sensitivity: float = 1.0) -> n
 
 
 def find_sections(slide: Slide, min_area_mm2: float = 3.0, pad_um: float = 200.0,
-                  sensitivity: float = 1.0) -> list[Section]:
+                  sensitivity: float = 1.0, channels: list[int] | None = None) -> list[Section]:
+    """channels：用哪些通道找组织轮廓（None = 全部通道）。某个通道背景太亮时可以不用它（v0.8.2）。"""
     level = slide.level_for_pixel_size(8.0)
     ds = slide.downsample(level)
     pix = slide.pixel_size_um * ds
-    img = slide.read(level)
+    img = slide.read(level, None, _valid(slide, channels))
     mask = tissue_mask(img, pix, sensitivity)
     lab = measure.label(mask)
     min_px = min_area_mm2 * 1e6 / pix ** 2
@@ -78,12 +95,18 @@ def find_sections(slide: Slide, min_area_mm2: float = 3.0, pad_um: float = 200.0
     return [Section(id=i + 1, bbox0=b, contour0=c, name=f"S{i + 1:02d}") for i, (b, c) in enumerate(secs)]
 
 
-def contour_in_bbox(slide: Slide, bbox0: tuple[int, int, int, int]) -> list[tuple[float, float]]:
+def _valid(slide: Slide, channels):
+    chs = [c for c in (channels or []) if 0 <= c < len(slide.channels)]
+    return chs or None
+
+
+def contour_in_bbox(slide: Slide, bbox0: tuple[int, int, int, int],
+                    channels: list[int] | None = None) -> list[tuple[float, float]]:
     """用户手动调整矩形后，在矩形内重新找组织轮廓（取最大的一块组织）。"""
     level = slide.level_for_pixel_size(8.0)
     ds = slide.downsample(level)
     pix = slide.pixel_size_um * ds
-    img = slide.read(level, bbox0)
+    img = slide.read(level, bbox0, _valid(slide, channels))
     x0, y0 = bbox0[0], bbox0[1]
     rect = [(x0, y0), (x0 + bbox0[2], y0), (x0 + bbox0[2], y0 + bbox0[3]), (x0, y0 + bbox0[3])]
     if img.shape[1] < 4 or img.shape[2] < 4:
