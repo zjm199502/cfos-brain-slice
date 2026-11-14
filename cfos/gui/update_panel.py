@@ -6,10 +6,10 @@ from qtpy.QtGui import QAction, QDesktopServices
 from qtpy.QtWidgets import QDialog, QDialogButtonBox, QFileDialog, QLabel, QMessageBox, QTextBrowser, \
     QVBoxLayout
 
+from .. import APP_NAME
 from ..core import updater
 
 LINK_CSS = "a { color: #6cb6ff; }"
-AUTHOR = "张金铭"
 EMAIL = "zjm199502@163.com"
 
 FEATURES = [
@@ -27,20 +27,23 @@ FEATURES = [
 
 
 def contact_html() -> str:
-    return (f"联系：{AUTHOR}，<a href='mailto:{EMAIL}'>{EMAIL}</a><br>"
+    return (f"联系：<a href='mailto:{EMAIL}'>{EMAIL}</a><br>"
             f"源码：<a href='{updater.SOURCE_URL}'>{updater.SOURCE_URL}</a>")
 
 
 def about_html() -> str:
     rows = "".join(f"<li><b>{a}</b>：{b}</li>" for a, b in FEATURES)
-    return (f"<h2>cFos 脑片分析 {updater.version_text()}</h2>"
+    import os
+    logo = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "fosmap_128.png")
+    img = (f"<p><img src='{QUrl.fromLocalFile(logo).toString()}' width='96' height='96'></p>"
+           if os.path.exists(logo) else "")
+    return (f"{img}<h2>{APP_NAME} {updater.version_text()}</h2>"
             "<p>面向小鼠脑切片荧光图像的一体化分析软件：从扫描图到按脑区统计的 cFos 阳性细胞数，"
-            "全部步骤在一个中文界面里完成，只用 CPU，离线运行。</p>"
+            "全部步骤在一个中文界面里完成，只用 CPU，离线运行。原名“cFos 脑片分析”。</p>"
             f"<ul>{rows}</ul>"
             f"<p>{contact_html()}</p>"
             "<p>本软件使用了 StarDist、DeepSlice、elastix、Allen 小鼠脑图谱（CCFv3）、napari 等公开的软件和数据，"
-            "完整列表和来源见 GitHub 上的 THIRD_PARTY.md；"
-            "发表论文时请同时引用这些方法。</p>")
+            "完整列表和来源见 GitHub 上的 THIRD_PARTY.md。</p>")
 
 
 def notes_html(text: str) -> str:
@@ -68,7 +71,7 @@ def notes_html(text: str) -> str:
 class UpdateMixin:
     def _build_help_menu(self):
         m = self.menuBar().addMenu("帮助")
-        a = QAction("关于 cFos 脑片分析…", self); a.triggered.connect(self.show_about); m.addAction(a)
+        a = QAction(f"关于 {APP_NAME}…", self); a.triggered.connect(self.show_about); m.addAction(a)
         m.addSeparator()
         a = QAction("检查更新…", self); a.triggered.connect(lambda: self.check_updates(silent=False)); m.addAction(a)
         a = QAction("从文件安装补丁…", self); a.triggered.connect(self.install_patch_file); m.addAction(a)
@@ -82,7 +85,7 @@ class UpdateMixin:
 
     # ---------------------------------------------------------------- 关于
     def show_about(self):
-        dlg = QDialog(self); dlg.setWindowTitle("关于 cFos 脑片分析"); dlg.resize(620, 620)
+        dlg = QDialog(self); dlg.setWindowTitle(f"关于 {APP_NAME}"); dlg.resize(620, 620)
         L = QVBoxLayout(dlg)
         tb = QTextBrowser(); tb.setOpenExternalLinks(True)
         tb.document().setDefaultStyleSheet(LINK_CSS); tb.setHtml(about_html())

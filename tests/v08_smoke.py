@@ -63,7 +63,7 @@ print("help menu", acts)
 assert any("关于" in a for a in acts) and any("检查更新" in a for a in acts) and any("从文件安装补丁" in a for a in acts)
 grab_dialog("u1_about"); w.show_about(); pump(0.5)
 from cfos.gui.update_panel import about_html
-assert "zjm199502@163.com" in about_html() and "张金铭" in about_html()
+assert "zjm199502@163.com" in about_html() and "张金铭" not in about_html() and "引用" not in about_html()
 
 # 3. 检查更新（本地测试服务器）
 if os.environ.get("CFOS_UPDATE_URL"):

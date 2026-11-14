@@ -2,6 +2,21 @@
 import os
 import sys
 
+from cfos import APP_NAME
+
+ASSETS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "gui", "assets")
+
+
+def app_icon():
+    """程序图标（FosMap 活动热图点阵）：小尺寸用点更少的简化版，缩小后不糊。"""
+    from qtpy.QtGui import QIcon
+    ic = QIcon()
+    for n in (16, 32, 64, 128, 256):
+        f = os.path.join(ASSETS, f"fosmap_{n}.png")
+        if os.path.exists(f):
+            ic.addFile(f)
+    return ic
+
 
 def _raise_priority():
     """Windows 上把软件（以及它启动的后台计算进程，会继承）设为“高于正常”优先级。
@@ -20,11 +35,14 @@ def _splash():
     from qtpy.QtCore import Qt
     from qtpy.QtWidgets import QApplication, QLabel
     app = QApplication.instance() or QApplication(sys.argv)
-    lb = QLabel("cFos 脑片分析\n\n正在启动，请稍候…\n（第一次启动可能需要半分钟）")
+    logo = os.path.join(ASSETS, "fosmap_128.png").replace("\\", "/")
+    img = f"<img src='{logo}' width='96' height='96'><br>" if os.path.exists(logo) else ""
+    lb = QLabel(f"{img}<b style='font-size:20px'>{APP_NAME}</b><br><br>正在启动，请稍候…<br>（第一次启动可能需要半分钟）")
+    lb.setTextFormat(Qt.RichText)
     lb.setAlignment(Qt.AlignCenter)
     lb.setWindowFlags(Qt.SplashScreen | Qt.WindowStaysOnTopHint)
     lb.setStyleSheet("background:#262930; color:white; font-size:16px; padding:30px; border:1px solid #4a7ab8;")
-    lb.resize(380, 180); lb.show(); app.processEvents()
+    lb.setWindowIcon(app_icon()); lb.resize(400, 300); lb.show(); app.processEvents()
     return lb
 
 
@@ -61,18 +79,20 @@ def main():
         try:
             from qtpy.QtWidgets import QMessageBox
             from cfos.core.log import friendly
-            QMessageBox.critical(None, "cFos 脑片分析",
+            QMessageBox.critical(None, APP_NAME,
                                  f"{friendly(e)}\n\n软件没有关闭，已保存的结果不受影响。\n"
                                  f"详细记录在：{log_dir()}")
         except Exception:  # noqa: BLE001
             pass
     sys.excepthook = excepthook
-    app.setApplicationName("cFos 脑片分析")
+    app.setApplicationName(APP_NAME)
+    app.setWindowIcon(app_icon())
     from cfos.gui.i18n import install_chinese
     install_chinese(app)
     from cfos.gui.main_window import MainWindow
 
     w = MainWindow()
+    w.setWindowIcon(app_icon())
     w.show()
     splash.close()
     _after_start(w)

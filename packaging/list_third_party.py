@@ -94,9 +94,8 @@ def main():
         rows.append((n, d.version, _license(d), _url(d)))
     rows.sort(key=lambda r: r[0].lower())
     L = ["# 第三方组件与致谢 / Third-party components and acknowledgements", "",
-         "下面列出 cFos 脑片分析用到的所有公开软件包、模型、数据和代码，以及它们的版本和来源；"
+         "下面列出 FosMap 脑片活动图谱用到的所有公开软件包、模型、数据和代码，以及它们的版本和来源；"
          "版本即安装包中实际使用的版本。",
-         "发表论文时，请同时引用下表中 StarDist、DeepSlice、elastix 和 Allen CCFv3 的原始文献。", "",
          "## 模型、数据和主要算法", "",
          "| 名称 | 版本 | 用途 | 来源 | 引用 |", "|---|---|---|---|---|"]
     for r in KEY:
@@ -108,8 +107,8 @@ def main():
         L.append(f"| {n} | {v} | {u} |")
     L += ["", "## 本软件自己的代码", "",
           "`cfos/` 文件夹中的全部代码、`packaging/` 中的打包脚本和 `resources/teaching/` 中的教学示意图由本项目编写。"
-          "`resources/demo/` 中的示例脑片由张金铭实验室提供，仅供学习本软件使用。", "",
-          "联系：张金铭，zjm199502@163.com，https://github.com/zjm199502/cfos-brain-slice", ""]
+          "`resources/demo/` 中的示例脑片由本项目提供，仅供学习本软件使用。", "",
+          "联系：zjm199502@163.com，https://github.com/zjm199502/cfos-brain-slice", ""]
     (APP / "THIRD_PARTY.md").write_text("\n".join(L), encoding="utf-8")
     print("已写出 THIRD_PARTY.md：", len(KEY), "项模型/数据/算法，", len(rows), "个 Python 包")
 

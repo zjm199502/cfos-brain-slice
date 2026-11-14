@@ -1,7 +1,9 @@
 #!/bin/bash
 # 软件打不开时双击运行：在终端里启动，并显示出错信息。请把窗口里的文字截图发给开发者。
-A="$(cd "$(dirname "$0")" && pwd)/cFos脑片分析.app"
-[ -d "$A" ] || A="/Applications/cFos脑片分析.app"
+H="$(cd "$(dirname "$0")" && pwd)"
+for A in "$H/FosMap脑片活动图谱.app" "/Applications/FosMap脑片活动图谱.app" "$H/cFos脑片分析.app" "/Applications/cFos脑片分析.app"; do
+  [ -d "$A" ] && break
+done
 echo "程序位置：$A"
 R="$A/Contents/Resources"
 export PYTHONNOUSERSITE=1

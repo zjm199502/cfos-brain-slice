@@ -162,9 +162,9 @@ def run(report=None) -> tuple[bool, str, list]:
 
 
 def _format(steps, ok) -> str:
-    from .. import __version__
+    from .. import __version__, APP_NAME
     from .cpu import describe
-    lines = [f"cFos 脑片分析 v{__version__} 自检（{_dt.datetime.now():%Y-%m-%d %H:%M}）",
+    lines = [f"{APP_NAME} v{__version__} 自检（{_dt.datetime.now():%Y-%m-%d %H:%M}）",
              "结果：全部正常" if ok else "结果：有步骤出错（请把诊断包发给开发者）", describe(), ""]
     for s in steps:
         lines.append(f"{'✔' if s.ok else '✘'} {s.name}（{s.sec:.0f} 秒）：{s.detail}")

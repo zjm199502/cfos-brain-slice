@@ -36,7 +36,7 @@ from .accuracy_panel import AccuracyMixin
 from .update_panel import UpdateMixin
 
 DECONV_SLOWDOWN = "多用 30% 的时间"   # 示例脑片实测（2 通道，4 核）：378 秒 → 488 秒
-APP_NAME = "cFos 脑片分析"
+from .. import APP_NAME  # noqa: E402
 IMAGE_FILTER = "荧光全片图像 (*.qptiff *.tif *.tiff *.ome.tif *.ome.tiff);;所有文件 (*)"
 COLORMAP = {"DAPI": "blue", "Green": "green", "Red": "red", "Far red": "magenta"}
 POINT_COLOR = {"DAPI": "#4f8cff", "Green": "#3ddc4a", "Red": "#ff4040", "Far red": "#ff40ff"}

@@ -11,6 +11,7 @@ from openpyxl.utils import get_column_letter
 
 from .coloc import colocalize, merged_cells, summarize, nucleus_channel
 from .project import Project
+from .. import APP_NAME
 
 
 def build_tables(project: Project) -> dict[str, pd.DataFrame]:
@@ -207,7 +208,7 @@ def _registration_rows(project: Project) -> list:
 
 def params_table(project: Project) -> pd.DataFrame:
     rows = [("导出时间", _dt.datetime.now().strftime("%Y-%m-%d %H:%M")),
-            ("软件版本", f"cFos 脑片分析 v{_version()}"),
+            ("软件版本", f"{APP_NAME} v{_version()}"),
             ("细胞识别神经网络", _net_text()),
             *_registration_rows(project),
             ("识别分辨率 (µm/像素)", project.detection.pixel_um),

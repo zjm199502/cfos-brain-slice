@@ -6,7 +6,7 @@
 set -euo pipefail
 W=${1:?工作目录}; APP=$(cd "$(dirname "$0")/.." && pwd); PY=/home/user/venv/bin/python; PIP=/home/user/venv/bin/pip
 PY_URL="https://github.com/astral-sh/python-build-standalone/releases/download/20261020/cpython-3.13.16+20261020-aarch64-apple-darwin-install_only.tar.gz"
-NAME="cFos脑片分析"; VER=0.8
+NAME="FosMap脑片活动图谱"; VER=0.8.1
 # 通用模型提前转换为 ONNX 随包带上（安装目录不可写，用户电脑上不再转换）
 "$PY" "$APP/packaging/make_onnx.py"
 mkdir -p "$W" && cd "$W"
@@ -82,7 +82,8 @@ printf "APPL????" > "$B/PkgInfo"
 find stage -name "__pycache__" -type d -prune -exec rm -rf {} +
 # 不预编译 .pyc（会让压缩包大 100 多 MB）；第一次启动时 Python 自己编译并保存，以后启动就快了
 cat > stage/安装说明.txt <<'EOT'
-1. 把“cFos脑片分析”拖到“应用程序”文件夹。
+1. 如果“应用程序”里有旧版“cFos脑片分析”，可以先把它拖到废纸篓（项目和结果不受影响）。
+   把“FosMap脑片活动图谱”拖到“应用程序”文件夹。
 2. 第一次打开：双击后如果提示“无法验证开发者”，点“完成”，再打开“系统设置 → 隐私与安全性”，
    在页面下方找到“仍要打开”，点它，输入开机密码确认。以后就可以直接双击打开。
 3. 如果打不开，双击“诊断启动.command”，把终端窗口里的文字截图发给开发者。

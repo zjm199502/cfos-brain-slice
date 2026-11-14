@@ -1,13 +1,14 @@
-; cFos 脑片分析 Windows 安装程序（NSIS）。由 packaging/build_windows.sh 生成 stage 目录后编译。
+; FosMap 脑片活动图谱（原名 cFos 脑片分析）Windows 安装程序（NSIS）。由 packaging/build_windows.sh 生成 stage 目录后编译。
 Unicode true
-!define APPNAME "cFos脑片分析"
-!define DISPNAME "cFos 脑片分析"
-!define VERSION "0.8"
+!define APPNAME "cFos脑片分析"     ; 安装目录和注册表键沿用旧名：旧版升级、补丁手动安装脚本都靠它找到安装位置
+!define DISPNAME "FosMap 脑片活动图谱"
+!define OLDDISP "cFos 脑片分析"
+!define VERSION "0.8.1"
 !ifndef STAGE
   !define STAGE "stage"
 !endif
 !ifndef OUTFILE
-  !define OUTFILE "cFos脑片分析_v0.8_Windows安装包.exe"
+  !define OUTFILE "FosMap脑片活动图谱_v0.8.1_Windows安装包.exe"
 !endif
 
 Name "${DISPNAME} ${VERSION}"
@@ -55,6 +56,9 @@ Section "主程序" SecMain
   nsExec::ExecToLog '"$INSTDIR\python\python.exe" -m compileall -q -j 0 "$INSTDIR\app\cfos" "$INSTDIR\python\Lib"'
   Pop $0
 
+  ; 改名前（cFos 脑片分析）的快捷方式
+  Delete "$DESKTOP\${OLDDISP}.lnk"
+  RMDir /r "$SMPROGRAMS\${OLDDISP}"
   SetOutPath "$INSTDIR\app"
   CreateShortCut "$DESKTOP\${DISPNAME}.lnk" "$INSTDIR\python\pythonw.exe" '"$INSTDIR\app\main.py"' "$INSTDIR\app\cfos.ico"
   CreateDirectory "$SMPROGRAMS\${DISPNAME}"
@@ -73,6 +77,8 @@ SectionEnd
 
 Section "Uninstall"
   Delete "$DESKTOP\${DISPNAME}.lnk"
+  Delete "$DESKTOP\${OLDDISP}.lnk"
+  RMDir /r "$SMPROGRAMS\${OLDDISP}"
   RMDir /r "$SMPROGRAMS\${DISPNAME}"
   RMDir /r "$INSTDIR\python"
   RMDir /r "$INSTDIR\app"
