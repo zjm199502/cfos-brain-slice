@@ -78,6 +78,7 @@ if os.environ.get("CFOS_UPDATE_URL"):
 import pandas as pd
 from cfos.core.export import export_excel
 f = proj / "v08_test.xlsx"
+w.project.export_intensity = True        # v0.8.2 起默认不算，需要勾选
 export_excel(w.project, f)
 r = pd.read_excel(f, sheet_name="按脑区×脑片")
 cols = [c for c in r.columns if "平均荧光强度" in c]

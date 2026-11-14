@@ -81,6 +81,52 @@ def region_intensity_sums(slide: Slide, section: Section, lab_u: np.ndarray, hem
     return out
 
 
+def _intensity_signature(slide: Slide, section: Section, reg, warp_file, exclusions) -> str:
+    """决定脑区平均荧光强度结果的所有输入：原图文件、脑片方框、配准（含非线性贴合文件）、排除区域、z-stack 合成方式。
+    任何一项改了，缓存就作废、重新计算。"""
+    import hashlib, json, os
+    from . import slide_io
+    def stat(p):
+        try:
+            st = os.stat(p)
+            return [st.st_size, st.st_mtime_ns]
+        except OSError:
+            return None
+    d = {"v": 1, "file": stat(getattr(slide, "path", "")), "path": str(getattr(slide, "path", "")),
+         "bbox0": list(section.bbox0), "contour": np.asarray(section.contour0 or [], float).round(1).tolist(),
+         "reg": reg.to_dict(), "warp": stat(warp_file) if reg.nonlinear else None,
+         "exclusions": [np.asarray(e, float).round(1).tolist() for e in (exclusions or [])],
+         "z": getattr(slide_io, "Z_MODE", ""), "um": INTENSITY_UM, "n_ch": len(slide.channels)}
+    return hashlib.sha1(json.dumps(d, sort_keys=True, default=str).encode()).hexdigest()
+
+
+def cached_intensity_sums(slide: Slide, section: Section, lab, hemi, ds, reg, results_dir, image_key,
+                          exclusions, warp_file) -> dict:
+    """region_intensity_sums 的结果按脑片缓存在 results/intensity/<图片>/<脑片>.pkl（v0.8.2）。
+    配准、排除区域、方框都没改时直接用上次的结果，不再读原图；结果与重新计算完全相同。"""
+    import pickle
+    from pathlib import Path
+    sig = _intensity_signature(slide, section, reg, warp_file, exclusions)
+    f = Path(results_dir) / "intensity" / str(image_key) / f"{section.name}.pkl"
+    try:
+        with open(f, "rb") as fh:
+            d = pickle.load(fh)
+        if d.get("signature") == sig:
+            return d["sums"]
+    except Exception:  # noqa: BLE001  没有缓存或缓存损坏时重新计算
+        pass
+    out = region_intensity_sums(slide, section, R.orient(lab, reg.orientation), R.orient(hemi, reg.orientation), ds)
+    try:
+        f.parent.mkdir(parents=True, exist_ok=True)
+        tmp = f.with_suffix(".tmp")
+        with open(tmp, "wb") as fh:
+            pickle.dump({"signature": sig, "sums": out}, fh, protocol=pickle.HIGHEST_PROTOCOL)
+        tmp.replace(f)
+    except OSError:
+        pass
+    return out
+
+
 def assign_regions(cells: pd.DataFrame, slide: Slide, sections: list[Section], results_dir, image_key,
                    exclusions=None, intensity: bool = False):
     """cells: merged_cells 的输出（x, y 为第 0 层像素）。增加 region_index, hemisphere, 以及每张脑片的脑区面积表。
@@ -116,7 +162,7 @@ def assign_regions(cells: pd.DataFrame, slide: Slide, sections: list[Section], r
             cells.loc[sel, "region_index"] = lab[iy, ix]
             cells.loc[sel, "hemisphere"] = hemi[iy, ix]
         pix_mm2 = (ds * px0 / 1000.0) ** 2
-        inten = region_intensity_sums(slide, s, R.orient(lab, reg.orientation), R.orient(hemi, reg.orientation), ds) \
+        inten = cached_intensity_sums(slide, s, lab, hemi, ds, reg, results_dir, image_key, exclusions, wp) \
             if intensity else {}
         idx, cnt = np.unique(np.stack([lab.ravel(), hemi.ravel()], 1), axis=0, return_counts=True)
         for (ri, hm), n in zip(idx, cnt):

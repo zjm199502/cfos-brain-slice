@@ -35,7 +35,7 @@ from .figure_panel import FigureMixin
 from .accuracy_panel import AccuracyMixin
 from .update_panel import UpdateMixin
 
-DECONV_SLOWDOWN = "多用 30% 的时间"   # 示例脑片实测（2 通道，4 核）：378 秒 → 488 秒
+DECONV_SLOWDOWN = "多用 30–45% 的时间"   # 示例脑片实测（2 通道，4 核）：378 → 488 秒（v0.8）、403 → 581 秒（v0.8.1）
 from .. import APP_NAME  # noqa: E402
 IMAGE_FILTER = "荧光全片图像 (*.qptiff *.tif *.tiff *.ome.tif *.ome.tiff);;所有文件 (*)"
 COLORMAP = {"DAPI": "blue", "Green": "green", "Red": "red", "Far red": "magenta"}
@@ -170,6 +170,7 @@ class MainWindow(UpdateMixin, TeachingMixin, FigureMixin, AccuracyMixin, Relocat
         if i == 7 and self.project:
             self.exp_skip_layers.setChecked(self.project.export_skip_layers)
             self.exp_depth.setValue(self.project.export_max_depth)
+            self.exp_intensity.setChecked(self.project.export_intensity)
         if i == 8:
             self._sync_figure_panel()
 
@@ -1021,11 +1022,15 @@ class MainWindow(UpdateMixin, TeachingMixin, FigureMixin, AccuracyMixin, Relocat
             bgr.setSuffix(" µm"); bgr.setSpecialValueText("不减背景")
             bgr.setToolTip("识别前去掉大范围的雾状背景。半径要比细胞大，一般 20–50 µm。只影响识别，强度测量仍用原图。")
             f.addRow("识别前减背景", bgr)
-            dcv = QCheckBox("识别前去卷积（让细胞边界更清楚，会变慢）"); dcv.setChecked(p.deconv)
+            dcv = QCheckBox("识别前去卷积"); dcv.setChecked(p.deconv)
+            dcv.setToolTip(f"让模糊的细胞边界变清楚，粘在一起的细胞更容易分开，识别更准；但识别时间会增加（示例脑片{DECONV_SLOWDOWN}）。\n"
+                           "厚切片推荐勾选（厚切片预设默认勾选），薄切片一般不需要（默认不勾选）。")
             dcb = QDoubleSpinBox(); dcb.setRange(0.1, 3.0); dcb.setSingleStep(0.1); dcb.setValue(p.deconv_blur_um); dcb.setSuffix(" µm")
             dcb.setToolTip("图像的模糊程度。太大会让细胞变成空心圆环，样图建议 0.4 µm。")
             dci = QDoubleSpinBox(); dci.setDecimals(0); dci.setRange(1, 50); dci.setValue(p.deconv_iter)
-            f.addRow(dcv); f.addRow("去卷积模糊程度", dcb); f.addRow("去卷积迭代次数", dci)
+            dch = QLabel(f"勾选会增加运行时间（{DECONV_SLOWDOWN}），但提高识别精度")
+            dch.setStyleSheet("color: gray;"); dch.setWordWrap(True)
+            f.addRow(dcv); f.addRow(dch); f.addRow("去卷积模糊程度", dcb); f.addRow("去卷积迭代次数", dci)
 
             def apply(_=None, c=c, on=on, prob=prob, amin=amin, amax=amax, imin=imin, gm=gm, bgf=bgf,
                       bgr=bgr, dcv=dcv, dcb=dcb, dci=dci, mct=mct, mdl=mdl):
@@ -1581,11 +1586,17 @@ class MainWindow(UpdateMixin, TeachingMixin, FigureMixin, AccuracyMixin, Relocat
                                   "7–8 级到具体脑区。细胞数已经包含所有下级脑区，所以少列几级不会漏数。")
         self.exp_masks = QCheckBox("同时保存细胞 mask（1/3 分辨率）"); self.exp_masks.setChecked(True)
         self.exp_qc = QCheckBox("同时生成每张脑片的质控图（PNG，方便快速检查）"); self.exp_qc.setChecked(True)
+        self.exp_intensity = QCheckBox("统计每个脑区的平均荧光强度（较慢）")
+        self.exp_intensity.setToolTip("按原始分辨率读一遍原图，算每个脑区（和自定义区域）各通道的平均灰度值。\n"
+                                      "图片越大越慢（每张图片多几十秒）；只看细胞数和密度时不用勾选。\n"
+                                      "算过一次后会保存下来，配准和排除区域没改时再次导出不用重新算。\n"
+                                      "组间统计、行为相关、功能网络不需要这一项。")
         self.exp_depth.setPrefix("第 ")
         dr = QHBoxLayout(); dr.addWidget(QLabel("按脑区表最多列到：")); dr.addWidget(self.exp_depth, 1)
         of.addWidget(self.exp_skip_layers); of.addLayout(dr)
-        for wdg in (self.exp_masks, self.exp_qc):
+        for wdg in (self.exp_masks, self.exp_qc, self.exp_intensity):
             of.addWidget(wdg)
+        of.addWidget(hint("勾选“平均荧光强度”会增加导出时间（需要读原图），但可以比较各脑区的整体荧光亮度。"))
         L.addWidget(ob)
         b = big_button("导出 Excel…"); b.clicked.connect(self.export)
         L.addWidget(b)
@@ -1602,6 +1613,7 @@ class MainWindow(UpdateMixin, TeachingMixin, FigureMixin, AccuracyMixin, Relocat
         project = self.project
         project.export_skip_layers = self.exp_skip_layers.isChecked()
         project.export_max_depth = int(self.exp_depth.value())
+        project.export_intensity = self.exp_intensity.isChecked()
         project.save()
         masks, qc = self.exp_masks.isChecked(), self.exp_qc.isChecked()
 

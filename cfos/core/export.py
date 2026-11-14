@@ -14,7 +14,11 @@ from .project import Project
 from .. import APP_NAME
 
 
-def build_tables(project: Project) -> dict[str, pd.DataFrame]:
+def build_tables(project: Project, intensity: bool | None = None) -> dict[str, pd.DataFrame]:
+    """intensity：是否统计脑区 / 自定义区域的平均荧光强度（要按原始分辨率读原图，较慢）。
+    None = 按项目设置（“⑧ 导出 Excel”里的勾选框）；组间统计、行为相关、功能网络用不到，传 False。"""
+    if intensity is None:
+        intensity = bool(getattr(project, "export_intensity", False))
     names = project.channel_names
     per_section, per_image, details = [], [], []
     region_img, region_sec, roi_rows = [], [], []
@@ -66,7 +70,7 @@ def build_tables(project: Project) -> dict[str, pd.DataFrame]:
             from .regions import assign_regions, region_summary
             from .atlas import load_atlas
             cells, areas = assign_regions(cells, _sl, reg_secs, project.results_dir, im.key, im.exclusions,
-                                          intensity=True)
+                                          intensity=intensity)
             rcells = cells[cells["section"].isin({s_.name for s_ in reg_secs})]
             region_sec.append(region_summary(rcells, areas, names, ("图片", "section"), project.coloc.require_nucleus))
             st = load_atlas().structures.set_index("index")
@@ -83,8 +87,9 @@ def build_tables(project: Project) -> dict[str, pd.DataFrame]:
                     if len(sub) else pd.DataFrame({"图片": [im.key], "区域": [r["name"]]})
                 area = _roi_area_mm2(r["polygon"], im.exclusions, px)
                 t["面积 (mm²)"] = round(area, 4)
-                for nm, v in zip(names, roi_mean_intensity(_sl, r["polygon"], im.exclusions)):
-                    t[f"{nm} 平均荧光强度"] = round(v, 1) if v == v else None
+                if intensity:
+                    for nm, v in zip(names, roi_mean_intensity(_sl, r["polygon"], im.exclusions)):
+                        t[f"{nm} 平均荧光强度"] = round(v, 1) if v == v else None
                 for nm in names:
                     if f"{nm}+" in t.columns and area > 0:
                         t[f"{nm}+ 密度 (个/mm²)"] = (t[f"{nm}+"] / area).round(1)

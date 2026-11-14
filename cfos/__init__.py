@@ -10,4 +10,4 @@ APP_NAME = "FosMap 脑片活动图谱"   # 显示名称；安装目录、用户�
 _os.environ.setdefault("TF_ENABLE_ONEDNN_OPTS", "0")
 _os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
 
-__version__ = "0.8.1"
+__version__ = "0.8.2"

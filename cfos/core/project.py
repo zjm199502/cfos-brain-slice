@@ -70,6 +70,7 @@ class Project:
     z_mode: str = "max"                # z-stack 合成方式，见 slide_io.Z_MODE_NAMES
     export_skip_layers: bool = False   # 导出按脑区表时不列出皮层各层（layer 1、2/3…）
     export_max_depth: int = 0          # 导出按脑区表时最多列到第几级（0 = 不限）
+    export_intensity: bool = False     # 导出时统计脑区平均荧光强度（要读原图，较慢；v0.8.2 起默认不算）
     samples: dict = field(default_factory=dict)   # 实验分组：{"图片/脑片": {"animal": 动物编号, "group": 组别}}
     stats: dict = field(default_factory=dict)     # 组间统计参数（stats.StatsParams 的字典）
     network: dict = field(default_factory=dict)   # 功能网络分析参数（network.NetParams 的字典）
@@ -113,6 +114,7 @@ class Project:
             "coloc": self.coloc.to_dict(),
             "thickness": self.thickness, "z_mode": self.z_mode,
             "export_skip_layers": self.export_skip_layers, "export_max_depth": self.export_max_depth,
+            "export_intensity": self.export_intensity,
             "samples": self.samples, "stats": self.stats, "grading": self.grading, "network": self.network,
             "figure": self.figure,
             "accuracy": self.accuracy,
@@ -154,6 +156,7 @@ class Project:
         p.z_mode = d.get("z_mode", "max")
         p.export_skip_layers = bool(d.get("export_skip_layers", False))
         p.export_max_depth = int(d.get("export_max_depth", 0))
+        p.export_intensity = bool(d.get("export_intensity", False))
         p.samples = d.get("samples", {})
         p.stats = d.get("stats", {})
         p.grading = d.get("grading", {})

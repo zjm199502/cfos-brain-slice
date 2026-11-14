@@ -140,7 +140,7 @@ def run_behavior_correlation(project, out_dir, params: BehaviorParams, region_se
         skip, depth = project.export_skip_layers, project.export_max_depth
         project.export_skip_layers, project.export_max_depth = False, 0
         try:
-            region_sec = build_tables(project).get("按脑区×脑片")
+            region_sec = build_tables(project, intensity=False).get("按脑区×脑片")
         finally:
             project.export_skip_layers, project.export_max_depth = skip, depth
     if region_sec is None or region_sec.empty:
