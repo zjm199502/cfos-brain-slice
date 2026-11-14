@@ -25,13 +25,22 @@ assert d < base["dice"] - 0.05
 
 # 2. 一半模糊 + 过曝
 orig = sl.read
+FLV = sl.level_for_pixel_size(Q.FOCUS_UM)
+last = len(sl.channels) - 1
+
+
 def blurred(lv, bbox=None, chs=None):
+    """在 1 µm 层上把脑片左半边模糊、最后一个通道最亮的 3% 设为饱和（v0.8.1 起质量检查分块、逐通道读图）。"""
     a = orig(lv, bbox, chs).copy()
-    if bbox == s.bbox0 and a.shape[1] > 1000:
-        h = a.shape[2] // 2
-        for c in range(a.shape[0]):
-            a[c, :, :h] = ndi.gaussian_filter(a[c, :, :h].astype(np.float32), 4).astype(a.dtype)
-        a[-1][a[-1] > np.percentile(a[-1], 97)] = 255
+    if bbox is not None and lv == FLV:
+        ds = sl.downsample(lv)
+        h = int((s.bbox0[0] + s.bbox0[2] / 2 - bbox[0]) / ds)
+        chans = chs if chs is not None else list(range(a.shape[0]))
+        for k, c in enumerate(chans):
+            if h > 0:
+                a[k, :, :h] = ndi.gaussian_filter(a[k, :, :h].astype(np.float32), 4).astype(a.dtype)
+            if c == last:
+                a[k][a[k] > np.percentile(a[k], 97)] = 255
     return a
 sl.read = blurred
 b, sh, sat = Q.image_metrics(p, sl, s, nuc); print("半边模糊:", b, "过曝:", sat)
@@ -59,4 +68,13 @@ assert g2 < g - 5
 R.section_thumbnail = th
 print(Q.grade({"dice": d, "blur": b, "damage": g, "saturation": sat}))
 df = Q.quality_table(p); print(df[["图片", "脑片", "质量", "质量分", "需要检查的问题"]]); print(Q.cached_levels(p))
+# 5. 阳性细胞落在白质 / 脑室（v0.8.1）：AP 位置错开 2.5 mm 时轮廓重合度还行，但这一项能标出来
+lv8 = sl.level_for_pixel_size(R.THUMB_UM); ds8 = sl.downsample(lv8); sh8 = sl.read(lv8, s.bbox0, [0]).shape[1:]
+cells = Q._load_marker_cells(p, im)
+s3 = copy.deepcopy(s); r = R.Registration.from_dict(s3.registration); r.ap_shift -= 100; r.nonlinear = False
+s3.registration = r.to_dict()
+m0 = Q.marker_misplaced(p, im, s, cells, nuc, sh8, ds8); m3 = Q.marker_misplaced(p, im, s3, cells, nuc, sh8, ds8)
+print("落在白质/脑室 %：正常", m0, "AP 错开 2.5 mm", m3)
+assert max(m0.values()) < Q.MISPLACED_WARN and max(m3.values()) >= Q.MISPLACED_BAD
+print(Q.grade({"misplaced": m3}))
 print("OK")

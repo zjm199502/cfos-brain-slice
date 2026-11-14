@@ -48,11 +48,11 @@ def behavior_table(project) -> pd.DataFrame:
 def spearman_ci(r: float, n: int, conf: float = 0.95) -> tuple[float, float]:
     if n <= 3 or not np.isfinite(r):
         return np.nan, np.nan
-    r = float(np.clip(r, -0.9999, 0.9999))
-    z = np.arctanh(r)
-    se = np.sqrt((1 + r * r / 2) / (n - 3))
+    rc = float(np.clip(r, -0.9999, 0.9999))          # r = ±1 时 arctanh 无穷大
+    z = np.arctanh(rc)
+    se = np.sqrt((1 + rc * rc / 2) / (n - 3))
     k = st.norm.ppf(0.5 + conf / 2)
-    return float(np.tanh(z - k * se)), float(np.tanh(z + k * se))
+    return min(float(np.tanh(z - k * se)), float(r)), max(float(np.tanh(z + k * se)), float(r))
 
 
 def correlate(animal: pd.DataFrame, behavior: dict, params: BehaviorParams) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -92,7 +92,8 @@ def rank_plot(res: pd.DataFrame, params: BehaviorParams, path, n=20):
     fig, ax = plt.subplots(figsize=(7, max(3.0, 0.32 * len(top) + 1.2)))
     yy = np.arange(len(top))
     col = np.where(top["显著"] == "是", "#d62728", "#7f7f7f")
-    ax.errorbar(top["Spearman r"], yy, xerr=[top["Spearman r"] - top["95% CI 下限"], top["95% CI 上限"] - top["Spearman r"]],
+    ax.errorbar(top["Spearman r"], yy, xerr=[np.clip(top["Spearman r"] - top["95% CI 下限"], 0, None),
+                                              np.clip(top["95% CI 上限"] - top["Spearman r"], 0, None)],
                 fmt="none", ecolor="#bbbbbb", elinewidth=1.5, capsize=2)
     ax.scatter(top["Spearman r"], yy, c=col, s=36, zorder=3)
     ax.axvline(0, color="k", lw=0.8)

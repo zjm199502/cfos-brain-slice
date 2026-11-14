@@ -157,7 +157,20 @@ def _load_deepslice_weights(model, path):
 
 
 def deepslice_predict(images: list[np.ndarray], workdir) -> list[Plane]:
-    """对若干张缩略图预测切片平面。"""
+    """对若干张缩略图预测切片平面。
+
+    v0.8.1 起默认用 ONNX 版本（core/deepslice_onnx.py，不需要 TensorFlow；与 TensorFlow 结果最大差
+    0.0001 体素）。找不到 ONNX 文件或设置了 CFOS_NET=tf 时用原来的 DeepSlice（需要 TensorFlow）。"""
+    from . import accel, deepslice_onnx as DO
+    d = resources_dir() / "deepslice"
+    if accel.net_backend() == "onnx" and DO.available(d):
+        return [Plane.from_list(v) for v in DO.predict(images, d)]
+    from .components import require_tensorflow
+    require_tensorflow("脑图谱自动定位（DeepSlice）")
+    return _deepslice_predict_tf(images, workdir)
+
+
+def _deepslice_predict_tf(images: list[np.ndarray], workdir) -> list[Plane]:
     from PIL import Image
     import tempfile
     m = _deepslice()

@@ -80,6 +80,7 @@ class UpdateMixin:
         self.auto_update_act.setChecked(updater.auto_check_enabled())
         self.auto_update_act.toggled.connect(updater.set_auto_check)
         m.addAction(self.auto_update_act)
+        a = QAction("安装微调组件（离线包）…", self); a.triggered.connect(self.install_component_file); m.addAction(a)
         a = QAction("在 GitHub 上查看更新公告和补丁", self)
         a.triggered.connect(lambda: QDesktopServices.openUrl(QUrl(updater.DOWNLOAD_PAGE))); m.addAction(a)
 
@@ -175,6 +176,22 @@ class UpdateMixin:
         if r != QMessageBox.Yes:
             return
         self.run_task(lambda task: updater.install_patch(f), self._patch_installed, label="正在安装补丁…")
+
+    def install_component_file(self):
+        """没联网的电脑：选拷过来的微调组件包（TensorFlow 等，训练模型时才需要）。"""
+        from ..core import components as C
+        if C.tensorflow_available():
+            self.info("这台电脑已经可以训练模型（微调组件已安装），不需要再装。")
+            return
+        f, _ = QFileDialog.getOpenFileName(self, f"选择微调组件包（{C.platform_tag()}，从 GitHub 下载的 .zip）", "",
+                                           "组件包 (*.zip)")
+        if not f:
+            return
+
+        def done(info):
+            self.info(f"微调组件已安装并自检通过（{info.get('version')}）：{info.get('selftest', '')}\n"
+                      "现在可以在“④ 细胞识别 → 微调模型”里训练了。")
+        self.run_task(lambda task: C.install_pack(f, progress=task.report), done, label="正在安装微调组件…")
 
     def _patch_installed(self, info):
         r = QMessageBox.question(self, "补丁已安装",

@@ -30,6 +30,17 @@ for f in sorted(pathlib.Path(sys.argv[2]).glob("*.whl")):
 print(f"共去掉 {total / 2**20:.0f} MB 的组件包")
 PYEOF
 
+# v0.8.1：TensorFlow 等只有“训练模型”才需要的组件不进安装包，做成“微调组件”按需下载（packaging/make_components.py）
+"$PY" "$APP/packaging/make_components.py" --list --platform mac-arm64 2>/dev/null > comp_list.txt
+$PY - comp_list.txt wheels <<'PYEOF'
+import pathlib, re, sys
+names = {re.sub(r"[-_.]+", "-", n.strip().lower()) for n in open(sys.argv[1], encoding="utf-8") if n.strip()}
+total = 0
+for f in sorted(pathlib.Path(sys.argv[2]).glob("*.whl")):
+    if re.sub(r"[-_.]+", "-", f.name.split("-")[0].lower()) in names:
+        total += f.stat().st_size; print("放进微调组件", f.name); f.unlink()
+print(f"共 {total / 2**20:.0f} MB 的组件改为训练时再下载")
+PYEOF
 # 同一组件既有通用版又有 Mac 专用版时，只留 Mac 专用版
 $PY - <<'PYEOF'
 import collections, pathlib, re
@@ -72,7 +83,9 @@ B="stage/$NAME.app/Contents"
 mkdir -p "$B/MacOS" "$B/Resources/app/resources"
 mv stage/python "$B/Resources/python"
 cp -r "$APP"/cfos "$APP"/main.py "$APP"/README.md "$APP"/THIRD_PARTY.md "$APP"/requirements.txt "$B/Resources/app/"
-cp -r "$APP"/resources/{atlas,deepslice,models,demo,teaching} "$B/Resources/app/resources/"
+cp -r "$APP"/resources/{atlas,models,demo,teaching} "$B/Resources/app/resources/"
+# DeepSlice 只带 ONNX 版本（v0.8.1 起不用 TensorFlow 定位；原来的 h5 权重只有设置 CFOS_NET=tf 时才用）
+mkdir -p "$B/Resources/app/resources/deepslice" && cp "$APP"/resources/deepslice/deepslice_*.{onnx,sig} "$B/Resources/app/resources/deepslice/"
 cp "$APP"/packaging/mac/Info.plist "$B/"
 cp "$APP"/packaging/mac/cfos.icns "$B/Resources/"
 cp "$APP"/packaging/mac/launcher.sh "$B/MacOS/cfos"

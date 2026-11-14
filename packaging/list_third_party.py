@@ -1,6 +1,6 @@
 """生成 THIRD_PARTY.md（第三方组件与致谢）：软件用到的所有公开软件包、模型、数据和代码的名称、版本和来源。
 按开发环境（与安装包相同的版本）自动列出所有 Python 包；模型和数据手工列在 KEY 里。
-用法：python packaging/list_third_party.py   （打包前运行，更新仓库里的 THIRD_PARTY_LICENSES.md）"""
+用法：python packaging/list_third_party.py   （打包前运行，更新仓库里的 THIRD_PARTY.md）"""
 import importlib.metadata as md
 import re
 from pathlib import Path
@@ -27,7 +27,8 @@ KEY = [
      "BSD-3-Clause", "https://github.com/stardist/stardist-models", "同上"),
     ("DeepSlice", _v("DeepSlice"), "切片在图谱中的自动定位",
      "GPL-3.0", "https://github.com/PolarBean/DeepSlice", "Carey et al., Nature Communications 2023"),
-    ("DeepSlice 小鼠模型权重（Allen_Mixed_Best、Synthetic_data_final）", "—", "DeepSlice 的预训练模型（两个模型取平均）",
+    ("DeepSlice 小鼠模型权重（Allen_Mixed_Best、Synthetic_data_final）", "—",
+     "DeepSlice 的预训练模型（两个模型取平均；v0.8.1 起转换为 ONNX 格式随安装包附带）",
      "GPL-3.0", "https://github.com/PolarBean/DeepSliceWeightsMQ", "同上"),
     ("Xception ImageNet 预训练权重", "v0.4", "DeepSlice 网络的顶层（只带其中 ImageNet 分类层的权重）", "MIT",
      "https://github.com/fchollet/deep-learning-models/releases/tag/v0.4", "Chollet, CVPR 2017"),
@@ -83,7 +84,11 @@ def _url(d):
 
 
 def main():
-    rows = []
+    import sys
+    sys.path.insert(0, str(APP / "packaging"))
+    from packaging_comp import component_set
+    comp = component_set()
+    rows, crow = [], []
     seen = set()
     for d in md.distributions():
         n = d.metadata["Name"]
@@ -91,11 +96,12 @@ def main():
         if key in seen or key in EXCL or key in DEV_ONLY or key.startswith(DEV_PREFIX):
             continue
         seen.add(key)
-        rows.append((n, d.version, _license(d), _url(d)))
+        (crow if key in comp else rows).append((n, d.version, _license(d), _url(d)))
     rows.sort(key=lambda r: r[0].lower())
+    crow.sort(key=lambda r: r[0].lower())
     L = ["# 第三方组件与致谢 / Third-party components and acknowledgements", "",
          "下面列出 FosMap 脑片活动图谱用到的所有公开软件包、模型、数据和代码，以及它们的版本和来源；"
-         "版本即安装包中实际使用的版本。",
+         "版本即安装包中实际使用的版本。", "",
          "## 模型、数据和主要算法", "",
          "| 名称 | 版本 | 用途 | 来源 | 引用 |", "|---|---|---|---|---|"]
     for r in KEY:
@@ -105,12 +111,19 @@ def main():
           "| 软件包 | 版本 | 来源 |", "|---|---|---|"]
     for n, v, lic, u in rows:
         L.append(f"| {n} | {v} | {u} |")
+    if crow:
+        L += ["", f"## 微调组件中的 Python 软件包（{len(crow)} 个）", "",
+              "只有在软件里训练（微调）识别模型时才会下载安装（见 `packaging/make_components.py`），"
+              "细胞识别和图谱配准不需要它们。", "",
+              "| 软件包 | 版本 | 来源 |", "|---|---|---|"]
+        for n, v, lic, u in crow:
+            L.append(f"| {n} | {v} | {u} |")
     L += ["", "## 本软件自己的代码", "",
           "`cfos/` 文件夹中的全部代码、`packaging/` 中的打包脚本和 `resources/teaching/` 中的教学示意图由本项目编写。"
           "`resources/demo/` 中的示例脑片由本项目提供，仅供学习本软件使用。", "",
           "联系：zjm199502@163.com，https://github.com/zjm199502/cfos-brain-slice", ""]
     (APP / "THIRD_PARTY.md").write_text("\n".join(L), encoding="utf-8")
-    print("已写出 THIRD_PARTY.md：", len(KEY), "项模型/数据/算法，", len(rows), "个 Python 包")
+    print("已写出 THIRD_PARTY.md：", len(KEY), "项模型/数据/算法，", len(rows), "个 Python 包 +", len(crow), "个微调组件包")
 
 
 if __name__ == "__main__":

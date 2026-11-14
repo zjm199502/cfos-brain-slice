@@ -1,8 +1,22 @@
-# cFos 脑片分析（开发中）
+<img src="cfos/gui/assets/fosmap_128.png" width="96" align="right">
+
+# FosMap 脑片活动图谱（开发中）
+
+原名“cFos 脑片分析”。版本号规则：小更新 0.8.1、0.8.2……每迭代 10 个小版本升一次上一级版本号。
 
 **使用说明书（研一新生版）**：[在线阅读](docs/使用说明书/使用说明书.md) · [Word](docs/使用说明书/cFos脑片分析_使用说明书_v0.7.docx) · [PDF](docs/使用说明书/cFos脑片分析_使用说明书_v0.7.pdf)
 
 面向小鼠脑切片荧光图像的一体化分析软件：脑片拆分 → 亮度/对比度 → 逐通道细胞识别 → 共标统计 → CCFv3 配准 → 分组统计 / 功能网络 → 导出 Excel。
+
+## v0.8.1（小更新）：改名 FosMap、配准质控、行为相关、不再依赖 TensorFlow
+- **改名**“FosMap 脑片活动图谱”，新图标（`cfos/gui/assets/`，源文件 `fosmap_logo.svg`）。`cfos.APP_NAME` 是显示名称；安装目录（`%LOCALAPPDATA%\cFos脑片分析`）、用户数据目录（`cfos脑片分析`）和项目格式都不变，旧版本的自动更新照常识别。
+- **配准质控**（`core/quality.py`）：标记物通道阳性细胞落在白质（fiber tracts）或脑室的比例 > 5% 提示“注意”，≥ 10% 提示“可疑”。示例脑片 1.4%；人为把 AP 位置错开 2.5 mm 时轮廓重合度仍有 0.87（不报警），但这一项升到 16%，能标出来。
+- **脑区活动与行为相关**（`core/behavior.py`）：每只动物一个行为分数（项目文件 `behavior`），逐脑区 Spearman 相关 + Bonett–Wright 95% CI + BH-FDR，输出 xlsx、相关系数图、散点图。测试 `tests/behavior_smoke.py`。
+- **细胞轮廓紧凑存储**（`core/contours.py`）：轮廓存成一个 float32 数组 + 偏移量，结果文件改名 `*_cells.v2.pkl`、`parts/*/<脑片>.v2.pkl`（旧版本软件看到的是“未识别”，不会出错）；旧格式照常读取，保存时转换。共标判断每个轮廓只建一次 Path。
+- **质量检查分块读图**：逐通道、按行分块（上下重叠 16 行，覆盖高通滤波和景深合成的邻域），结果与整张读入逐位相同（示例脑片和合成 z-stack 都核对过）。
+- **不再依赖 TensorFlow**：细胞识别直接读 `model.onnx`（`core/sdnet.py`，与 StarDist2D.predict_sparse / predict_instances 逐行对应，结果完全相同）；DeepSlice 两个模型转换为 ONNX（`core/deepslice_onnx.py`，打包时由 `packaging/make_onnx.py` 生成；预处理与 Keras 逐位相同，切面参数最大差 0.0001 体素）。核对脚本 `tests/v081_onnx_check.py`。
+- **微调组件按需下载**（`core/components.py`）：TensorFlow、tf2onnx 等只有训练才需要，做成组件包（`packaging/make_components.py`，版本锁定为开发环境的版本，90 MB 分卷 + MD5，清单 `updates/components.json`）；第一次训练时自动下载（断点续传、校验、解压到用户目录、子进程自检），离线包用“帮助 → 安装微调组件（离线包）”。训练完立即转换 ONNX，以后识别不需要 TensorFlow。打包脚本已把这些组件从安装包里去掉。测试 `tests/components_e2e.py`（用 `tests/no_tf` 模拟没有 TensorFlow 的环境）。
+- 界面测试：`tests/v081_smoke.py`。
 
 ## v0.8：补丁更新、厚切片去卷积、脑区平均荧光强度
 - **补丁更新**：以后的更新只需下载约 0.2 MB 的补丁包（只含程序代码），不用重新下载完整安装包。

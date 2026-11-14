@@ -100,11 +100,14 @@ def f1_score(model, X, Y, prob_thresh=None) -> float:
 
 def finetune(project, ch: int, epochs: int = 40, steps_per_epoch: int = 30, progress=None, cancel=None) -> dict:
     """返回 {"name": 新模型名, "f1_before": , "f1_after": , "n_train": , "n_val": }。"""
-    import tensorflow as tf
-    from stardist.models import StarDist2D
     paths = list_patches(project, ch)
     if len(paths) < 3:
         raise ValueError(f"至少需要 3 个标注块（现在有 {len(paths)} 个），建议 5–10 个，覆盖亮的、暗的、密集的区域。")
+    # v0.8.1：安装包以后可能不带 TensorFlow，第一次训练时自动下载“微调组件”（core/components.py）
+    from .components import ensure_tensorflow
+    ensure_tensorflow(progress, cancel)
+    import tensorflow as tf
+    from stardist.models import StarDist2D
     X, Y = _load(paths)
     rng = np.random.default_rng(0)
     idx = rng.permutation(len(X))
@@ -153,6 +156,13 @@ def finetune(project, ch: int, epochs: int = 40, steps_per_epoch: int = 30, prog
             "f1_after": round(f1_after, 3), "n_train": len(Xt), "n_val": len(Xv), "epochs": epochs,
             "base": p.model or "通用模型 2D_versatile_fluo", "time": f"{_dt.datetime.now():%Y-%m-%d %H:%M}",
             "prob_thresh": float(model.thresholds.prob)}
+    # 训练完马上转换成 ONNX：以后识别直接用它，不再需要 TensorFlow
+    from . import accel
+    onnx = accel.ensure_onnx(model, dst)
+    if onnx is not None:
+        ref = model.keras_model.predict(Xv[0][np.newaxis, ..., np.newaxis], verbose=0)
+        got = accel.OrtNet(onnx, "CPUExecutionProvider").predict(Xv[0][np.newaxis, ..., np.newaxis])
+        info["onnx_max_diff"] = round(max(float(np.abs(ref[0] - got[0]).max()), float(np.abs(ref[1] - got[1]).max())), 6)
     (dst / "训练记录.json").write_text(json.dumps(info, ensure_ascii=False, indent=1), encoding="utf-8")
     det.forget_model(name)
     return info

@@ -32,35 +32,52 @@ def _set_tf_threads():
         pass
 
 
-def get_model(name: str = ""):
-    """name 为空 = 软件自带的通用模型；否则为项目 models 文件夹里微调过的模型。"""
+def _model_dir(key: str):
     from pathlib import Path
+    if key:
+        d = Path(MODEL_ROOT or ".") / key
+        if not (d / "weights_best.h5").exists() and not (d / "weights_last.h5").exists() \
+                and not (d / "model.onnx").exists():
+            raise FileNotFoundError(f"找不到微调模型“{key}”（{d}）。请在“④ 细胞识别”中改回通用模型，或重新训练。")
+        return d
+    from .resources import stardist_model_dir
+    return stardist_model_dir()
+
+
+def get_model(name: str = ""):
+    """name 为空 = 软件自带的通用模型；否则为项目 models 文件夹里微调过的模型。
+
+    v0.8.1 起默认直接用模型文件夹里的 ONNX 文件（core/sdnet.py），不加载 TensorFlow；
+    只有找不到对应的 ONNX 文件（比如 v0.8 以前训练、还没转换过的微调模型）或设置了 CFOS_NET=tf 时，
+    才用 TensorFlow（需要已安装“微调组件”）。"""
+    import logging
+    from . import accel
     key = name or ""
     if key not in _MODELS:
+        d = _model_dir(key)
+        if accel.net_backend() == "onnx" and d is not None:
+            from .sdnet import OnnxStarDist, onnx_for
+            f = onnx_for(d)
+            if f is not None:
+                _MODELS[key] = OnnxStarDist(d, f, key)
+                accel._status.update(device="CPU（ONNX Runtime）", failed="")
+                logging.getLogger("cfos").info("细胞识别神经网络：ONNX Runtime（%s，不用 TensorFlow）", f.name)
+                return _MODELS[key]
+        from .components import require_tensorflow
+        require_tensorflow(f"使用微调模型“{key}”" if key else "细胞识别")
         _set_tf_threads()
         from stardist.models import StarDist2D
-        if key:
-            d = Path(MODEL_ROOT or ".") / key
-            if not (d / "weights_best.h5").exists() and not (d / "weights_last.h5").exists():
-                raise FileNotFoundError(f"找不到微调模型“{key}”（{d}）。请在“④ 细胞识别”中改回通用模型，或重新训练。")
-            _MODELS[key] = StarDist2D(None, name=d.name, basedir=str(d.parent))
-        else:
-            from .resources import stardist_model_dir
-            d = stardist_model_dir()
-            _MODELS[key] = StarDist2D(None, name=d.name, basedir=str(d.parent)) if d is not None \
-                else StarDist2D.from_pretrained("2D_versatile_fluo")
+        _MODELS[key] = StarDist2D(None, name=d.name, basedir=str(d.parent)) if d is not None \
+            else StarDist2D.from_pretrained("2D_versatile_fluo")
     m = _MODELS[key]
-    if not getattr(m, "_cfos_net_done", False):
+    if not getattr(m, "_cfos_net_done", False) and hasattr(m, "_predict_setup"):    # TensorFlow 模型
         m._cfos_net_done = True
-        from . import accel
         if accel.net_backend() == "onnx":
             try:
-                ok = accel.use_onnx_cpu(m, getattr(m, "logdir", None), key)
+                ok = accel.use_onnx_cpu(m, getattr(m, "logdir", None), key)   # 顺便转换成 ONNX，以后不再需要 TensorFlow
             except Exception as e:  # noqa: BLE001
                 ok = False
-                import logging
                 logging.getLogger("cfos").warning("ONNX Runtime 不可用，改用 TensorFlow：%s", e)
-            import logging
             logging.getLogger("cfos").info("细胞识别神经网络：%s", "ONNX Runtime" if ok else "TensorFlow")
     return m
 
