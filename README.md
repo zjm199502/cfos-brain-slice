@@ -11,6 +11,11 @@
 - **重新安装完整安装包**（下面）。
 
 ## 完整安装包（第一次安装用）
+**推荐：到 [Release v0.8](https://github.com/zjm199502/cfos-brain-slice/releases/tag/v0.8) 直接下载单个文件**（不用合并）：
+- Mac：[cFos-v0.8-Mac-AppleSilicon.zip](https://github.com/zjm199502/cfos-brain-slice/releases/download/v0.8/cFos-v0.8-Mac-AppleSilicon.zip)（901 MB），下载后从下面 Mac 步骤的第 3 步开始。
+- Windows：上传后会出现在同一个 Release 页面（文件名 `cFos-v0.8-Windows-setup.exe`）。
+
+下载 Release 不方便时，也可以用下面的分卷：
 GitHub 仓库里单个文件不能超过 100 MB，所以安装包分成了若干个 90 MB 的分卷。**不用下载整个分支**：点下面的链接逐个下载（每个链接直接下载一个分卷），放到同一个文件夹里再合并。
 
 ### Windows（8 个分卷 + 合并.bat，合并后 710 MB）
