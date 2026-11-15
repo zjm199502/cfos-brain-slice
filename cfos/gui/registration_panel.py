@@ -42,13 +42,23 @@ class RegistrationMixin:
         w = QWidget(); L = QVBoxLayout(w)
         L.addWidget(hint("把每张脑片对齐到 Allen 小鼠脑图谱（CCFv3）。\n"
                          "1. 点“自动配准”，软件会自动判断切片的前后位置、角度和是否倒放，并贴合轮廓。\n"
-                         "2. 在下拉框中逐张检查：黄色线是脑区边界，应与组织结构对齐。\n"
+                         "2. 在下拉框中逐张检查：黄色线是脑区边界，应与组织结构对齐。带 ⚠ 的脑片请重点检查。\n"
                          "3. 不准时：先用滑块调整整体位置/角度/大小。\n"
                          "4. 局部不准时：点“拖动边界修正”，然后在图上按住黄色边界线，拖到组织中真正对应的位置后松开；"
                          "附近的边界会弹性跟随，“影响范围”以外的部分不动。可以拖多次，不满意可“撤销上一个修正”。"))
         self.reg_nonlinear_default = QCheckBox("自动配准后做非线性贴合（推荐）")
         self.reg_nonlinear_default.setChecked(True)
         L.addWidget(self.reg_nonlinear_default)
+        self.reg_refine_ap = QCheckBox("自动校正前后位置（推荐，每张脑片多花约 10 秒）")
+        self.reg_refine_ap.setChecked(True)
+        self.reg_refine_ap.setToolTip("自动定位给出的前后位置（Bregma）常有几百微米的误差。勾选后，软件会把切面前后各挪动最多 600 µm，"
+                                      "取图谱与 DAPI 图像最像的位置。挪动了多少会写在脑片的状态里；不满意可以用“前后位置”滑块再调。")
+        L.addWidget(self.reg_refine_ap)
+        self.reg_unify = QCheckBox("同一只动物的脑片自动统一切面角度（推荐，3 张以上才生效）")
+        self.reg_unify.setChecked(True)
+        self.reg_unify.setToolTip("同一个脑子的切片是用同一个角度切的。勾选后，自动配准时把同一只动物（“⑦ 分组与统计”里填的动物编号；"
+                                  "没填的按图片）的脑片角度统一成中位数。可以在下面“同一动物的连续切片”里撤销。")
+        L.addWidget(self.reg_unify)
         b1 = big_button("自动配准当前图片的全部脑片"); b1.clicked.connect(lambda: self.auto_register(False))
         b2 = big_button("自动配准项目中所有图片"); b2.clicked.connect(lambda: self.auto_register(True))
         L.addWidget(b1); L.addWidget(b2)
@@ -57,6 +67,8 @@ class RegistrationMixin:
         self.reg_sec_combo = QComboBox(); self.reg_sec_combo.currentIndexChanged.connect(self._reg_section_changed)
         row.addWidget(self.reg_sec_combo, 1); L.addLayout(row)
         self.reg_status = QLabel(""); self.reg_status.setWordWrap(True); L.addWidget(self.reg_status)
+        self.reg_ok_btn = QPushButton("已检查，这张没问题（去掉 ⚠）"); self.reg_ok_btn.setVisible(False)
+        self.reg_ok_btn.clicked.connect(self._reg_mark_checked); L.addWidget(self.reg_ok_btn)
 
         box = QGroupBox("整体调整"); f = QFormLayout(box)
         self.reg_orient = QComboBox(); self.reg_orient.addItems(["正放（背侧朝上）", "倒放（旋转 180°）"])
@@ -114,6 +126,9 @@ class RegistrationMixin:
 
         self._reg_timer = QTimer(self); self._reg_timer.setSingleShot(True)
         self._reg_timer.timeout.connect(self._reg_redraw)
+        self._reg_fine_timer = QTimer(self); self._reg_fine_timer.setSingleShot(True)
+        self._reg_fine_timer.timeout.connect(self._reg_redraw)
+        self._reg_fast = False
         self._reg_cache = {}
         self._ctrl_src = []
         self._reg_lab = None
@@ -133,28 +148,12 @@ class RegistrationMixin:
         do_nl = self.reg_nonlinear_default.isChecked()
         project = self.project
 
+        refine, unify = self.reg_refine_ap.isChecked(), self.reg_unify.isChecked()
+
         def job(task):
-            out = {}
-            for i, im in enumerate(targets):
-                task.report(i * 10, len(targets) * 10, f"正在配准 {im.key}…")
-                sl = open_slide(im.path)
-                secs = [s for s in im.sections if s.enabled]
-                regs = R.auto_register(sl, secs, nuc, str(project.results_dir),
-                                       progress=lambda d, t, txt, i=i: task.report(i * 10 + d, len(targets) * 10, txt))
-                if do_nl:
-                    for k, s in enumerate(secs):
-                        if task.is_cancelled():
-                            raise InterruptedError
-                        task.report(i * 10 + 4 + int(5 * k / max(len(secs), 1)), len(targets) * 10,
-                                    f"正在非线性贴合 {im.key} 的 {s.name}…")
-                        img, mask, ds = R.section_thumbnail(sl, s, nuc)
-                        reg = regs[s.name]
-                        w = R.nonlinear_fit(reg, R.orient(mask, reg.orientation), R.orient(img, reg.orientation))
-                        np.save(R.warp_path(project.results_dir, im.key, s.name), np.stack(w))
-                        reg.nonlinear = True
-                out[im.path] = regs
-                sl.close()
-            return out
+            from ..core import autoreg
+            return autoreg.run(project, targets, nuc, nonlinear=do_nl, refine=refine, unify=unify,
+                               progress=task.report, cancelled=task.is_cancelled)
 
         def done(res):
             for im in targets:
@@ -166,18 +165,43 @@ class RegistrationMixin:
             self.project.save(); self._refresh_images()
             self._reg_cache.clear()
             self._sync_registration_panel()
-            self.statusBar().showMessage("配准完成，请逐张检查。", 8000)
+            n_warn = sum(1 for regs in res.values() for r in regs.values() if r.warnings)
+            self.statusBar().showMessage(
+                f"配准完成，请逐张检查。其中 {n_warn} 张带 ⚠ 的脑片请重点检查。" if n_warn else "配准完成，请逐张检查。", 12000)
 
         self.run_task(job, done, label="正在配准…")
 
     # ------------------------------------------------------------ 面板同步
+    @staticmethod
+    def _reg_combo_text(s, reg):
+        if reg.done and reg.warnings:
+            return f"⚠ {s.name}（已配准，请重点检查）"
+        return f"{s.name}（{'已配准' if reg.done else '未配准'}）"
+
+    def _reg_reviewed(self, reg):
+        """手动调整过 = 已经看过这张脑片：去掉 ⚠。"""
+        if reg.warnings:
+            reg.warnings = []
+            i = self.reg_sec_combo.currentIndex()
+            if self.image is not None and 0 <= i < len(self.image.sections):
+                self.reg_sec_combo.setItemText(i, self._reg_combo_text(self.image.sections[i], reg))
+
+    def _reg_mark_checked(self):
+        s, reg = self._reg_current()
+        if s is None:
+            return
+        self._reg_reviewed(reg)
+        s.registration = reg.to_dict(); self.project.save()
+        self._reg_redraw()
+
     def _sync_registration_panel(self):
+        R.preload_elastix()    # 后台提前加载非线性贴合组件（首次约 10 秒），点“自动配准”时不用再等
         self.reg_sec_combo.blockSignals(True)
         self.reg_sec_combo.clear()
         secs = self.image.sections if self.image else []
         for s in secs:
             reg = R.Registration.from_dict(s.registration)
-            self.reg_sec_combo.addItem(f"{s.name}（{'已配准' if reg.done else '未配准'}）")
+            self.reg_sec_combo.addItem(self._reg_combo_text(s, reg))
         self.reg_sec_combo.blockSignals(False)
         if secs:
             self.reg_sec_combo.setCurrentIndex(0)
@@ -256,18 +280,23 @@ class RegistrationMixin:
             self.reg_use_nl.blockSignals(True); self.reg_use_nl.setChecked(False); self.reg_use_nl.blockSignals(False)
             self._reg_draw_points(s, reg)
         reg.status = "已手动调整"
+        self._reg_reviewed(reg)
         s.registration = reg.to_dict()
         self._save_later()
-        self._reg_timer.start(120)
+        # 拖动时先画快速预览（不做边界平滑），停手 0.4 秒后再画精细的
+        self._reg_fast = True
+        self._reg_timer.start(30)
+        self._reg_fine_timer.start(400)
 
     # ------------------------------------------------------------ 显示
     def _reg_redraw(self):
+        fast, self._reg_fast = self._reg_fast, False
         s, reg = self._reg_current()
-        for nm in ("脑区轮廓",):
-            if nm in self.viewer.layers:
-                self.viewer.layers.remove(nm)
         if s is None or not reg.done:
+            if "脑区轮廓" in self.viewer.layers:
+                self.viewer.layers.remove("脑区轮廓")
             self.reg_status.setText("这张脑片还没有配准。")
+            self.reg_status.setStyleSheet(""); self.reg_ok_btn.setVisible(False)
             self._reg_lab = None
             return
         ds, H, W, warp = self._reg_geometry(s)
@@ -276,8 +305,10 @@ class RegistrationMixin:
         self._reg_lab = (s, ds, lab_t, hemi_t)
         b = region_boundaries(lab_t)
         # 显示用：把标签图平滑放大 K 倍再找边界，边界线变细、变顺滑（统计仍按配准分辨率，不受影响）
-        K = REG_DISPLAY_UPSCALE
+        K = 1 if fast else REG_DISPLAY_UPSCALE
         try:
+            if fast:
+                raise RuntimeError("快速预览")
             from ..core.figure import _smooth_upscale
             lab_hi = _smooth_upscale(lab_t, (lab_t.shape[0] * K, lab_t.shape[1] * K), cap=max(lab_t.shape) * K)
         except Exception:  # noqa: BLE001
@@ -288,15 +319,26 @@ class RegistrationMixin:
         rgba[..., 3] = np.where(lab_hi > 0, 40, 0)
         rgba[b_hi] = [255, 230, 0, 255]
         bx, by = s.bbox0[0], s.bbox0[1]
-        self.viewer.add_image(rgba, rgb=True, name="脑区轮廓", scale=(ds / K, ds / K),
-                              translate=(by + ds / K / 2, bx + ds / K / 2), opacity=0.9)
+        sc, tr = (ds / K, ds / K), (by + ds / K / 2, bx + ds / K / 2)
+        if "脑区轮廓" in self.viewer.layers:
+            # 已有图层时直接换数据（比删掉再新建快得多，拖滑块时不卡）
+            ly = self.viewer.layers["脑区轮廓"]
+            ly.scale, ly.translate = sc, tr
+            ly.data = rgba
+        else:
+            self.viewer.add_image(rgba, rgb=True, name="脑区轮廓", scale=sc, translate=tr, opacity=0.9)
         self._reg_bnd = b
         for nm in ("修正箭头", "修正点"):
             if nm in self.viewer.layers:
                 self.viewer.layers.move(self.viewer.layers.index(nm), len(self.viewer.layers) - 1)
         ap = R.adjusted_plane(reg).ap_mm()
-        self.reg_status.setText(f"{reg.status}；切片中心约在 Bregma {ap:+.2f} mm。"
-                                f"{' 已使用非线性贴合。' if reg.nonlinear and warp is not None else ''}")
+        txt = (f"{reg.status}；切片中心约在 Bregma {ap:+.2f} mm。"
+               f"{' 已使用非线性贴合。' if reg.nonlinear and warp is not None else ''}")
+        if reg.warnings:
+            txt += "\n⚠ 请重点检查这张脑片：" + "；".join(reg.warnings) + "。手动调整后 ⚠ 会自动消失；确认没问题可以点下面的“已检查”。"
+        self.reg_status.setText(txt)
+        self.reg_status.setStyleSheet("color: #c05a00;" if reg.warnings else "")
+        self.reg_ok_btn.setVisible(bool(reg.warnings))
 
     def _reg_export_figure(self):
         if self.image is None:
@@ -461,6 +503,7 @@ class RegistrationMixin:
         u, v = self._to_norm(s, reg, x, y)
         reg.control_points = list(reg.control_points) + [[float(ss), float(tt), float(u), float(v), float(self._reg_radius_norm(s))]]
         reg.status = "已手动调整"
+        self._reg_reviewed(reg)
         s.registration = reg.to_dict()
         self._save_later()
         self._reg_draw_points(s, reg)
@@ -529,6 +572,7 @@ class RegistrationMixin:
                 pass
         reg.control_points = cps
         reg.status = "已手动调整"
+        self._reg_reviewed(reg)
         s.registration = reg.to_dict()
         self._save_later()
         self._reg_timer.start(200)

@@ -205,6 +205,7 @@ def _registration_rows(project: Project) -> list:
     from .registration import Registration
     n = {"lin": 0, "tex": 0, "cont": 0, "old": 0}
     fixes, fixed_secs, total = 0, 0, 0
+    ap_n, ap_um, unified = 0, [], 0
     for im in project.images:
         for s in im.sections:
             r = Registration.from_dict(s.registration)
@@ -221,6 +222,10 @@ def _registration_rows(project: Project) -> list:
                 n["old"] += 1
             if r.control_points:
                 fixes += len(r.control_points); fixed_secs += 1
+            if r.ap_auto:
+                ap_n += 1; ap_um.append(abs(r.ap_auto) * 25)
+            if r.plane_raw:
+                unified += 1
     if not total:
         return []
     parts = [f"{k} {v} 张" for k, v in (("DeepSlice 定位 + 非线性贴合（轮廓 + DAPI 纹理）", n["tex"]),
@@ -229,6 +234,9 @@ def _registration_rows(project: Project) -> list:
                                        ("DeepSlice 定位，未做非线性贴合", n["lin"])) if v]
     return [("图谱", "Allen 小鼠脑图谱 CCFv3（25 µm）"),
             (f"配准方法（共 {total} 张脑片）", "；".join(parts)),
+            ("前后位置自动校正（图谱模板与 DAPI 互信息最大）",
+             f"{ap_n} 张脑片校正过，挪动 {min(ap_um):.0f}–{max(ap_um):.0f} µm" if ap_n else "无"),
+            ("同一动物统一切面角度", f"{unified} 张脑片" if unified else "无"),
             ("手动修正", f"{fixed_secs} 张脑片，共 {fixes} 个修正点" if fixes else "无")]
 
 

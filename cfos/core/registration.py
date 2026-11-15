@@ -3,13 +3,15 @@
 流程：
 1. 每张脑片生成一张约 8 µm/像素 的缩略图（DAPI），交给 DeepSlice 估计它在图谱中的切片平面。
    切片在玻片上可能是倒放的，所以同时试 0° 和 180° 两个方向，选与图谱轮廓重合最好的方向。
-2. 可选：用 elastix 做非线性贴合（以组织轮廓为准），修正切片变形。
-3. 用户可以手动调整：前后位置、两个倾斜角、缩放、旋转、平移，以及在图上拖动“修正点”做局部修正。
-4. 最终得到一张与缩略图对齐的脑区标签图，用来给每个细胞分配脑区和左右半脑。
+2. 自动校正前后位置（v0.8.5）：前后挪动切面，取图谱模板与 DAPI 最像的位置（refine_ap）。
+3. 可选：用 elastix 做非线性贴合（组织轮廓 + DAPI 纹理），修正切片变形。
+4. 用户可以手动调整：前后位置、两个倾斜角、缩放、旋转、平移，以及在图上拖动“修正点”做局部修正。
+5. 最终得到一张与缩略图对齐的脑区标签图，用来给每个细胞分配脑区和左右半脑。
 """
 from __future__ import annotations
 
 import os
+import threading
 from dataclasses import dataclass, field, asdict
 
 import numpy as np
@@ -30,6 +32,7 @@ class Registration:
     plane: list = field(default_factory=list)   # DeepSlice 给出的 9 个数（联合校正后为校正后的值）
     plane_raw: list = field(default_factory=list)  # 联合校正前 DeepSlice 的原始结果（用于撤销）
     ap_shift: float = 0.0                  # 前后平移（体素，25 µm）
+    ap_auto: float = 0.0                   # 自动校正的前后平移（体素，v0.8.5）；与 ap_shift 相加，滑块只显示手动部分
     tilt_dv: float = 0.0                   # 背腹方向倾斜（度）
     tilt_ml: float = 0.0                   # 左右方向倾斜（度）
     scale_x: float = 1.0
@@ -40,6 +43,7 @@ class Registration:
     control_points: list = field(default_factory=list)  # [[src_s, src_t, dst_s, dst_t], ...] 归一化坐标
     nonlinear: bool = False                # 是否使用 elastix 非线性贴合
     nl_method: str = ""                    # 非线性贴合实际用的方法（"轮廓 + DAPI 纹理" / "只用轮廓"；v0.7 前为空）
+    warnings: list = field(default_factory=list)  # 自动配准后需要人工重点检查的原因（v0.8.5）；手动调整后清空
     status: str = "未配准"
 
     def to_dict(self):
@@ -195,8 +199,10 @@ def dice(a: np.ndarray, b: np.ndarray) -> float:
     return 2.0 * np.logical_and(a, b).sum() / s if s else 0.0
 
 
-def auto_register(slide: Slide, sections: list[Section], nucleus_ch, workdir, progress=None) -> dict:
-    """返回 {section.name: Registration}。"""
+def auto_register(slide: Slide, sections: list[Section], nucleus_ch, workdir, progress=None,
+                  return_thumbs: bool = False):
+    """返回 {section.name: Registration}；return_thumbs=True 时再返回 {section.name: (缩略图, 掩膜)}，
+    后面的前后位置校正和非线性贴合直接用，不用再读一遍图。"""
     thumbs = {}
     imgs = []
     keys = []
@@ -222,6 +228,8 @@ def auto_register(slide: Slide, sections: list[Section], nucleus_ch, workdir, pr
         d, o, pl = best[s.name]
         r = Registration(orientation=o, plane=pl.to_list(), status=f"自动配准（轮廓重合度 {d:.2f}）")
         out[s.name] = r
+    if return_thumbs:
+        return out, thumbs
     return out
 
 
@@ -242,7 +250,7 @@ def adjusted_plane(reg: Registration) -> Plane:
     # 前后平移：沿平面法向（让 y 增大的方向为“向前”）
     if n[1] < 0:
         n = -n
-    c = c + n * reg.ap_shift
+    c = c + n * (reg.ap_shift + reg.ap_auto)
     # 倾斜：绕 u 轴（背腹倾斜）、绕 v 轴（左右倾斜）
     R = _rot(v, reg.tilt_ml) @ _rot(u, reg.tilt_dv)
     u, v = R @ u, R @ v
@@ -296,26 +304,72 @@ def tps_warp(points: list, W: int, H: int):
     return full[0], full[1]
 
 
+_TPS_CACHE: dict = {}
+
+
+def tps_warp_cached(points: list, W: int, H: int):
+    """tps_warp 的结果按修正点缓存一份：拖滑块时修正点不变，不用每次重算（v0.8.5）。返回的数组不要原地修改。"""
+    if not points:
+        return None
+    key = (tuple(tuple(float(v) for v in q) for q in points), W, H)
+    if _TPS_CACHE.get("key") != key:
+        _TPS_CACHE["key"], _TPS_CACHE["val"] = key, tps_warp(points, W, H)
+    return _TPS_CACHE["val"]
+
+
 def warp_path(results_dir, image_key, section_name):
     d = results_dir / "registration"
     d.mkdir(parents=True, exist_ok=True)
     return d / f"{image_key}_{section_name}_warp.npy"
 
 
-NL_GRID = 20.0        # B 样条控制点间距（缩略图像素）。20 比原来的 60 更能贴合内部结构，示例脑片上无折叠
-NL_TEXTURE_W = 0.5    # DAPI 纹理在贴合中的权重（其余为组织轮廓）
+NL_GRIDS = (40.0, 60.0)   # B 样条控制点间距（缩略图像素），依次尝试：先 40，出现折叠再放宽到 60。
+NL_GRID = NL_GRIDS[0]     # v0.8.5 前是 20：示例图的第 2 张脑片在 20 下发生折叠、整个纹理贴合被放弃；
+                          # 40 在两张脑片上都不折叠，独立检验（NeuN 灰质/白质亮度比）也不比 20 差
+NL_TEXTURE_W = 0.5        # DAPI 纹理在贴合中的权重（其余为组织轮廓）
+
+_ITK_LOCK = threading.Lock()
+_ITK = {}
 
 
-def _elastix(fixed, moving, fixed2=None, moving2=None, grid=NL_GRID, w2=NL_TEXTURE_W):
-    import itk
+def _itk():
+    """加载 elastix。第一次要约 10 秒（ITK 按需加载大量模块），所以进入配准页面时会在后台线程里先加载
+    （preload_elastix）；这里加锁，保证后台和正式使用同时发生时只加载一次。"""
+    with _ITK_LOCK:
+        if "itk" not in _ITK:
+            import itk
+            itk.ElastixRegistrationMethod[itk.Image[itk.F, 2], itk.Image[itk.F, 2]]
+            try:    # 只用允许的核数（软件最多用一半的核）
+                from .cpu import budget
+                itk.MultiThreaderBase.SetGlobalDefaultNumberOfThreads(budget())
+            except Exception:  # noqa: BLE001
+                pass
+            _ITK["itk"] = itk
+    return _ITK["itk"]
+
+
+def preload_elastix():
+    """在后台线程里提前加载 elastix；失败不报错（真正用到时再报）。"""
+    def run():
+        try:
+            _itk()
+        except Exception:  # noqa: BLE001
+            pass
+    if "itk" not in _ITK:
+        threading.Thread(target=run, name="preload-elastix", daemon=True).start()
+
+
+def _elastix(fixed, moving, fixed2=None, moving2=None, grid=NL_GRID, w2=NL_TEXTURE_W, bspline=True, iters=300):
+    """bspline=False：只做仿射（用于前后位置搜索，快）。"""
+    itk = _itk()
     m = itk.ElastixRegistrationMethod[itk.Image[itk.F, 2], itk.Image[itk.F, 2]].New()
     m.SetFixedImage(itk.image_view_from_array(np.ascontiguousarray(fixed)))
     m.SetMovingImage(itk.image_view_from_array(np.ascontiguousarray(moving)))
     po = itk.ParameterObject.New()
     aff = po.GetDefaultParameterMap("affine", 3)
-    aff["MaximumNumberOfIterations"] = ["300"]
+    aff["MaximumNumberOfIterations"] = [str(iters)]
     bs = po.GetDefaultParameterMap("bspline", 3, 40.0)
-    bs["MaximumNumberOfIterations"] = ["300"]
+    bs["MaximumNumberOfIterations"] = [str(iters)]
     bs["FinalGridSpacingInPhysicalUnits"] = [str(grid)]
     if fixed2 is not None:
         m.AddFixedImage(itk.image_view_from_array(np.ascontiguousarray(fixed2)))
@@ -330,7 +384,8 @@ def _elastix(fixed, moving, fixed2=None, moving2=None, grid=NL_GRID, w2=NL_TEXTU
                          ("Interpolator", "BSplineInterpolator"), ("ImageSampler", "RandomCoordinate")):
                 pm[k] = [v, v]
     po.AddParameterMap(aff)
-    po.AddParameterMap(bs)
+    if bspline:
+        po.AddParameterMap(bs)
     m.SetParameterObject(po); m.SetLogToConsole(False)
     m.UpdateLargestPossibleRegion()
     field_ = itk.transformix_deformation_field(itk.image_view_from_array(np.ascontiguousarray(moving)),
@@ -358,46 +413,116 @@ def nonlinear_fit(reg: Registration, mask_oriented: np.ndarray, img_oriented: np
 def _nonlinear_fit(reg: Registration, mask_oriented: np.ndarray, img_oriented: np.ndarray | None = None):
     """用 elastix 把图谱切片贴到组织上，返回 (dx, dy) 像素位移场。
     有 DAPI 缩略图时，同时用组织轮廓和 DAPI 纹理（图谱平均模板 ↔ DAPI，互信息）：胼胝体、前连合、脑室、海马等
-    内部结构也会对齐，而不只是外圈。示例脑片实测（NeuN 细胞不参与配准，作为独立检验）：
-    落在脑室里的 NeuN 细胞密度降低约 70%，灰质 / 纤维束密度比从 3.6 提高到 4.7，外轮廓重合度不变（0.99）。
-    变形出现折叠、或轮廓重合度明显下降时，自动退回只用轮廓。"""
+    内部结构也会对齐，而不只是外圈。
+    变形出现折叠时先把网格放宽再试（NL_GRIDS：40 → 60），都不行、或轮廓重合度明显下降时，才退回只用轮廓。"""
+    from .log import log
     H, W = mask_oriented.shape
     pl = adjusted_plane(reg)
     smp = sample_plane(pl, W, H, ("annotation", "reference"))
     lab, ref = smp["annotation"], smp["reference"].astype(np.float32)
     fixed = ndi.gaussian_filter(mask_oriented.astype(np.float32), 2)
     moving = ndi.gaussian_filter((lab > 0).astype(np.float32), 2)
+    w0 = d0 = None
     if img_oriented is not None and ref.max() > 0:
-        try:
-            f2 = ndi.gaussian_filter(img_oriented.astype(np.float32), 1) / 255.0
-            m2 = ndi.gaussian_filter(ref, 1) / float(ref.max())
-            w = _elastix(fixed, moving, f2, m2)
-            if min_jacobian(w) > 0.05:
-                lab2 = sample_plane(pl, W, H, warp=w)["annotation"]
-                d2 = dice(lab2 > 0, mask_oriented)
-                if d2 >= 0.95:          # 外轮廓贴得好，直接用（通常情况，不用再算一遍）
-                    return w, TEXTURE
+        f2 = ndi.gaussian_filter(img_oriented.astype(np.float32), 1) / 255.0
+        m2 = ndi.gaussian_filter(ref, 1) / float(ref.max())
+        for grid in NL_GRIDS:
+            try:
+                w = _elastix(fixed, moving, f2, m2, grid=grid)
+            except Exception:  # noqa: BLE001
+                import traceback
+                log.warning("DAPI 纹理贴合失败，改用只用轮廓\n%s", traceback.format_exc())
+                break
+            mj = min_jacobian(w)
+            if mj <= 0.05:
+                log.info("DAPI 纹理贴合出现折叠（网格 %.0f，最小雅可比 %.2f），放宽网格再试", grid, mj)
+                continue
+            d2 = dice(sample_plane(pl, W, H, warp=w)["annotation"] > 0, mask_oriented)
+            if d2 >= 0.95:          # 外轮廓贴得好，直接用（通常情况，不用再算一遍）
+                return w, TEXTURE
+            if w0 is None:
                 w0 = _elastix(fixed, moving, grid=60.0)
-                lab0 = sample_plane(pl, W, H, warp=w0)["annotation"]
-                if d2 >= dice(lab0 > 0, mask_oriented) - 0.02:
-                    return w, TEXTURE
-                from .log import log
-                log.info("DAPI 纹理贴合后轮廓重合度下降，改用只用轮廓的结果")
-                return w0, CONTOUR
-            from .log import log
-            log.info("DAPI 纹理贴合出现折叠（最小雅可比 %.2f），改用只用轮廓", min_jacobian(w))
-        except Exception:  # noqa: BLE001
-            from .log import log
-            import traceback
-            log.warning("DAPI 纹理贴合失败，改用只用轮廓\n%s", traceback.format_exc())
-    return _elastix(fixed, moving, grid=60.0), CONTOUR
+                d0 = dice(sample_plane(pl, W, H, warp=w0)["annotation"] > 0, mask_oriented)
+            if d2 >= d0 - 0.02:
+                return w, TEXTURE
+            log.info("DAPI 纹理贴合后轮廓重合度下降（网格 %.0f），放宽网格再试", grid)
+    if w0 is None:
+        w0 = _elastix(fixed, moving, grid=60.0)
+    return w0, CONTOUR
+
+
+# ------------------------------------------------------------------ 自动校正前后位置（v0.8.5）
+AP_RANGE_UM = 600.0     # 最多前后各挪这么多
+AP_COARSE_UM = 200.0    # 粗找的步长
+AP_FINE_UM = 100.0      # 在最好的位置两侧再细找一步
+AP_MIN_GAIN = 1.05      # 相似度至少比原位置高 5% 才挪动（否则认为 DeepSlice 的位置已经够好）
+AP_BIG_UM = 500.0       # 挪动量达到这个值时提示人工检查
+
+
+def similarity(ref: np.ndarray, img: np.ndarray, mask: np.ndarray) -> float:
+    """图谱平均模板与 DAPI 缩略图在组织范围内的互信息（越大越像）。"""
+    a = ndi.gaussian_filter(ref.astype(np.float32), 2)
+    b = ndi.gaussian_filter(img.astype(np.float32), 2)
+    m = mask.astype(bool)
+    if m.sum() < 100:
+        return 0.0
+    h = np.histogram2d(a[m], b[m], bins=48)[0]
+    p = h / max(h.sum(), 1.0)
+    q = p.sum(1, keepdims=True) * p.sum(0, keepdims=True)
+    nz = p > 0
+    return float((p[nz] * np.log(p[nz] / q[nz])).sum())
+
+
+def refine_ap(reg: Registration, mask_oriented: np.ndarray, img_oriented: np.ndarray, cancelled=None) -> dict:
+    """DeepSlice 给的前后位置（Bregma）常有几百微米的误差。这里把切面前后挪动试几个位置，
+    每个位置先做一次快速的仿射对齐（只用轮廓），再比较图谱模板与 DAPI 的相似度，取最像的位置，写进 reg.ap_auto。
+
+    示例图（两张相邻脑片）实测：DeepSlice 给 +0.77 和 +0.11 mm，本方法给 +0.37 和 +0.41 mm；
+    不参与配准的 NeuN 通道“灰质/白质亮度比”从 2.0 左右提高到 2.6 左右。
+    返回 {"shift_um": 挪动量, "scores": {挪动量: 相似度}, "edge": 最好的位置是否在搜索范围边上}。"""
+    H, W = mask_oriented.shape
+    fixed = ndi.gaussian_filter(mask_oriented.astype(np.float32), 2)
+    f2 = ndi.gaussian_filter(img_oriented.astype(np.float32), 1) / 255.0
+    r2 = Registration.from_dict(reg.to_dict())
+    scores: dict[float, float] = {}
+
+    def score(um: float) -> float:
+        if um not in scores:
+            if cancelled is not None and cancelled():
+                raise InterruptedError
+            r2.ap_auto = um / 25.0
+            pl = adjusted_plane(r2)
+            smp = sample_plane(pl, W, H, ("annotation", "reference"))
+            lab, ref = smp["annotation"], smp["reference"].astype(np.float32)
+            if ref.max() <= 0 or (lab > 0).mean() < 0.02:    # 挪出了脑子
+                scores[um] = 0.0
+            else:
+                moving = ndi.gaussian_filter((lab > 0).astype(np.float32), 2)
+                w = _elastix(fixed, moving, f2, ndi.gaussian_filter(ref, 1) / float(ref.max()),
+                             bspline=False, iters=100)
+                scores[um] = similarity(sample_plane(pl, W, H, ("reference",), warp=w)["reference"],
+                                        img_oriented, mask_oriented)
+        return scores[um]
+
+    n = int(round(AP_RANGE_UM / AP_COARSE_UM))
+    for k in range(-n, n + 1):
+        score(k * AP_COARSE_UM)
+    best = max(scores, key=scores.get)
+    for um in (best - AP_FINE_UM, best + AP_FINE_UM):
+        if abs(um) <= AP_RANGE_UM:
+            score(um)
+    best = max(scores, key=scores.get)
+    if best != 0.0 and scores[best] < scores[0.0] * AP_MIN_GAIN:
+        best = 0.0
+    reg.ap_auto = best / 25.0
+    return {"shift_um": best, "scores": dict(sorted(scores.items())), "edge": abs(best) >= AP_RANGE_UM}
 
 
 def label_maps(reg: Registration, W: int, H: int, warp=None):
     """在“方向已校正”的缩略图坐标下，生成脑区标签图和半脑图。"""
     pl = adjusted_plane(reg)
     total = None
-    t = tps_warp(reg.control_points, W, H)
+    t = tps_warp_cached(reg.control_points, W, H)
     if t is not None:
         total = (t[0], t[1])
     if warp is not None and reg.nonlinear:

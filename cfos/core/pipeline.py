@@ -194,21 +194,15 @@ def run_batch(project: Project, files, do_register=True, do_nonlinear=True, redo
                 todo = [s for s in secs if redo or not s.registration.get("plane")]
                 if todo:
                     say(base + 78, total, f"{name}：配准")
-                    regs = R.auto_register(sl, todo, nuc, str(project.results_dir))
-                    for k, s in enumerate(todo):
-                        check_cancel()
-                        reg = regs[s.name]
-                        if do_nonlinear:
-                            say(base + 80 + int(15 * k / len(todo)), total, f"{name}：非线性贴合 {s.name}")
-                            try:
-                                img, mask, ds = R.section_thumbnail(sl, s, nuc)
-                                w = R.nonlinear_fit(reg, R.orient(mask, reg.orientation), R.orient(img, reg.orientation))
-                                np.save(R.warp_path(project.results_dir, im.key, s.name), np.stack(w))
-                                reg.nonlinear = True
-                            except Exception:  # noqa: BLE001  非线性贴合失败时保留线性配准
-                                log.warning("非线性贴合失败 %s %s\n%s", name, s.name, traceback.format_exc())
-                        s.registration = reg.to_dict()
-                        project.save()
+                    from . import autoreg
+                    regs = autoreg.run(project, [im], nuc, nonlinear=do_nonlinear, cancelled=cancel,
+                                       only={im.key: {s.name for s in todo}}, slides={im.path: sl},
+                                       progress=lambda d, t, txt: say(base + 78 + int(17 * d / max(t, 1)), total,
+                                                                      f"{name}：{txt}")).get(im.path, {})
+                    for s in todo:
+                        if s.name in regs:
+                            s.registration = regs[s.name].to_dict()
+                    project.save()
                 im.status = "已配准"
         except InterruptedError:
             project.save(); sl.close()
@@ -234,6 +228,7 @@ def run_batch(project: Project, files, do_register=True, do_nonlinear=True, redo
                 note += why
             if do_register and not reg.done:
                 note.append("未配准")
+            note += [f"配准：{w}" for w in reg.warnings]
             checklist.append({"图片": name, "脑片": s.name, "配准": st,
                               "质量": Q.grade(qm[s.name])[1] if s.name in qm else "",
                               "需要检查": "；".join(note) if note else "", "约 Bregma (mm)":

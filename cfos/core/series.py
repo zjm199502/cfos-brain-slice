@@ -53,7 +53,8 @@ def harmonize(regs: list[Registration], spacing_um: float = 0.0, fix_angle: bool
            for p in base]
     if spacing_um and spacing_um > 0:
         step = spacing_um / 25.0  # 体素
-        pos = np.array([float(np.dot(p.center(), n_med)) for p in new])
+        # 自动校正的前后平移（ap_auto）仍然叠加在平面上，这里把它算进当前位置，校正后的最终位置才是等间距的
+        pos = np.array([float(np.dot(p.center(), n_med)) + r.ap_auto for p, r in zip(new, regs)])
         order = np.argsort(pos)
         idx = np.empty(len(pos)); idx[order] = np.arange(len(pos))
         b = np.median(pos - idx * step)
@@ -68,6 +69,27 @@ def harmonize(regs: list[Registration], spacing_um: float = 0.0, fix_angle: bool
              "校正前 左右倾斜 (°)": round(b_[1], 1), "校正后 左右倾斜 (°)": round(a_[1], 1),
              "校正前 背腹倾斜 (°)": round(b_[2], 1), "校正后 背腹倾斜 (°)": round(a_[2], 1)}
             for b_, a_ in zip(before, after)]
+
+
+AUTO_MIN_SECTIONS = 3    # 同一只动物至少有这么多张脑片才自动统一角度（2 张时中位数没有意义）
+
+
+def unify_new(new_regs: list[Registration], context_regs: list[Registration] = ()) -> bool:
+    """自动配准时用（v0.8.5）：把同一只动物新配准的脑片的切面角度统一成中位数（前后位置不变）。
+    context_regs 是这只动物以前已经配准好的脑片：只参与求中位数，本身不改。
+    新旧加起来不足 AUTO_MIN_SECTIONS 张时什么也不做，返回 False。"""
+    new_regs = [r for r in new_regs if r.done]
+    ctx = [r for r in context_regs if r.done]
+    if not new_regs or len(new_regs) + len(ctx) < AUTO_MIN_SECTIONS:
+        return False
+    base = [Plane.from_list(r.plane_raw or r.plane) for r in new_regs]
+    normals = [_normal(p) for p in base] + [_normal(Plane.from_list(r.plane_raw or r.plane)) for r in ctx]
+    n_med = np.median(np.array(normals), axis=0); n_med /= np.linalg.norm(n_med)
+    for r, p in zip(new_regs, base):
+        if not r.plane_raw:
+            r.plane_raw = list(r.plane)
+        r.plane = _rotate_plane(p, _normal(p), n_med).to_list()
+    return True
 
 
 def undo(reg: Registration) -> bool:
