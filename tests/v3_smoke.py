@@ -54,7 +54,7 @@ shot("v2_thick")
 w.refilter(); wait_task(); print(w.det_summary.text())
 w.steps.setCurrentRow(4); pump(1); shot("v3_coloc")
 w.steps.setCurrentRow(6); pump(1); shot("v4a_export_panel")
-w.exp_skip_layers.setChecked(True); w.exp_depth.setValue(8)
+w.exp_scope.set_values("depth", 8, True)
 from qtpy.QtWidgets import QFileDialog
 xl = str(w.project.folder / "v3结果.xlsx")
 QFileDialog.getSaveFileName = staticmethod(lambda *a, **k: (xl, ""))

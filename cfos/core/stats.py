@@ -12,6 +12,8 @@ from dataclasses import dataclass, asdict
 
 import numpy as np
 import pandas as pd
+
+from . import region_sets as _RS
 from scipy import stats as st
 
 KEY_COLS = ["脑区缩写", "脑区名称", "层级", "半脑"]
@@ -25,6 +27,7 @@ class StatsParams:
     hemisphere: str = "左右合计"     # 左右合计 / 左 / 右
     min_area_mm2: float = 0.05      # 每只动物在这个脑区至少有多少面积才纳入统计（太小的区域密度不可靠）
     max_depth: int = 0              # 只比较不超过第几级的脑区（0 = 全部）
+    region_set: str = ""             # 比较哪些脑区：见 core/region_sets.py（空 = 旧设置，按 max_depth）
     alpha: float = 0.05             # 校正后 q 值小于它算显著
 
     def to_dict(self):
@@ -183,8 +186,7 @@ def compare_groups(animal: pd.DataFrame, params: StatsParams) -> tuple[pd.DataFr
     if m not in animal.columns:
         raise ValueError(f"没有这个指标：{m}")
     a = animal[animal["半脑"] == params.hemisphere]
-    if params.max_depth > 0:
-        a = a[a["层级"] <= params.max_depth]
+    a = _RS.filter_table(a, params.region_set, params.max_depth)
     a = a[a["面积 (mm²)"] >= params.min_area_mm2]
     groups = sorted(a["组别"].unique().tolist())
     ctrl = params.control if params.control in groups else (groups[0] if groups else "")
@@ -321,12 +323,12 @@ def run_group_stats(project, out_dir, params: StatsParams, region_sec: pd.DataFr
     if region_sec is None:
         if progress:
             progress(0, 3, "正在统计每张脑片的脑区结果…")
-        skip, depth = project.export_skip_layers, project.export_max_depth
-        project.export_skip_layers, project.export_max_depth = False, 0
+        skip, depth, rset = project.export_skip_layers, project.export_max_depth, project.export_region_set
+        project.export_skip_layers, project.export_max_depth, project.export_region_set = False, 0, "all"
         try:
             region_sec = build_tables(project, intensity=False).get("按脑区×脑片")
         finally:
-            project.export_skip_layers, project.export_max_depth = skip, depth
+            project.export_skip_layers, project.export_max_depth, project.export_region_set = skip, depth, rset
     if region_sec is None or region_sec.empty:
         raise ValueError("还没有按脑区的结果。请先完成细胞识别和“⑥ 脑图谱配准”。")
     used = set(region_sec["图片"].astype(str) + "/" + region_sec["脑片"].astype(str))
@@ -355,7 +357,7 @@ def run_group_stats(project, out_dir, params: StatsParams, region_sec: pd.DataFr
         ("统计单位", "动物（同一动物的多张脑片先合并：细胞数相加、面积相加，再算密度）"),
         ("对照组", params.control or groups[0]), ("半脑", params.hemisphere),
         ("纳入条件", f"该动物在该脑区面积 ≥ {params.min_area_mm2} mm²"),
-        ("脑区层级", "全部" if not params.max_depth else f"≤ 第 {params.max_depth} 级"),
+        ("脑区范围", _RS.describe(params.region_set, params.max_depth)),
         ("显著标准", f"q < {params.alpha}"),
     ] + [(f"组 {g} 动物数", int(n)) for g, n in n_by_group.items()], columns=["项目", "内容"])
     xlsx = out_dir / "组间统计.xlsx"

@@ -92,7 +92,7 @@ dens = an[(an["脑区缩写"] == "ACA") & (an["半脑"] == "左右合计")].set_
 w.project.behavior = {a: float(np.log1p(v) * 10) for a, v in dens.items()}
 w._sync_groups_panel(); pump(0.5)
 assert len(w.project.behavior) == 8
-w.st_metric.setCurrentText(metric); w.st_depth.setValue(8)
+w.st_metric.setCurrentText(metric); w.st_scope.set_values("depth", 8)
 w.bh_name.setText("冻结时间 %"); w.bh_group.setCurrentText("全部动物")
 w.run_behavior(region_sec=rs); wait_task()
 print(w.bh_summary.text())

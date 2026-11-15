@@ -175,8 +175,8 @@ class MainWindow(UpdateMixin, TeachingMixin, FigureMixin, AccuracyMixin, Relocat
         if i == 6:
             self._sync_groups_panel()
         if i == 7 and self.project:
-            self.exp_skip_layers.setChecked(self.project.export_skip_layers)
-            self.exp_depth.setValue(self.project.export_max_depth)
+            self.exp_scope.set_values(self.project.export_region_set, self.project.export_max_depth,
+                                      self.project.export_skip_layers)
             self.exp_intensity.setChecked(self.project.export_intensity)
         if i == 8:
             self._sync_figure_panel()
@@ -1834,11 +1834,11 @@ class MainWindow(UpdateMixin, TeachingMixin, FigureMixin, AccuracyMixin, Relocat
                          "• 分析参数：方便以后复现\n"
                          "如果在“② 脑片拆分”中画了自定义区域，会多一张“按自定义区域”表。"))
         ob = QGroupBox("导出选项"); of = QVBoxLayout(ob)
-        self.exp_skip_layers = QCheckBox("按脑区表不列出皮层各层（layer 1、2/3…）")
-        self.exp_depth = QDoubleSpinBox(); self.exp_depth.setDecimals(0); self.exp_depth.setRange(0, 12)
-        self.exp_depth.setSpecialValueText("不限（全部脑区）"); self.exp_depth.setSuffix(" 级")
-        self.exp_depth.setToolTip("脑区按层级排列：例如 5 级大约到“Isocortex / 海马 / 丘脑”这一层，"
-                                  "7–8 级到具体脑区。细胞数已经包含所有下级脑区，所以少列几级不会漏数。")
+        from .region_scope import RegionScopeBox
+        rb = QGroupBox("“按脑区×脑片”表里列出哪些脑区"); rl = QVBoxLayout(rb)
+        self.exp_scope = RegionScopeBox(with_layers=True); rl.addWidget(self.exp_scope)
+        rl.addWidget(hint("没列出的细分脑区不会漏数：它们的细胞已经计入所属的脑区和大脑区。\n"
+                          "表里另有“脑区中文名”“所属大脑区”“脑区类别”三列，可以在 Excel 里按它们筛选。"))
         self.exp_masks = QCheckBox("同时保存细胞 mask（1/3 分辨率）"); self.exp_masks.setChecked(True)
         self.exp_qc = QCheckBox("同时生成每张脑片的质控图（PNG，方便快速检查）"); self.exp_qc.setChecked(True)
         self.exp_intensity = QCheckBox("统计每个脑区的平均荧光强度（较慢）")
@@ -1847,12 +1847,10 @@ class MainWindow(UpdateMixin, TeachingMixin, FigureMixin, AccuracyMixin, Relocat
                                       "算过一次后会保存下来，配准和排除区域没改时再次导出不用重新算。\n"
                                       "组间统计、行为相关、功能网络不需要这一项。\n"
                                       "“④ 细胞识别”里开启了去除通道串色时，按去除串色后的图计算，与细胞识别口径一致。")
-        self.exp_depth.setPrefix("第 ")
-        dr = QHBoxLayout(); dr.addWidget(QLabel("按脑区表最多列到：")); dr.addWidget(self.exp_depth, 1)
-        of.addWidget(self.exp_skip_layers); of.addLayout(dr)
         for wdg in (self.exp_masks, self.exp_qc, self.exp_intensity):
             of.addWidget(wdg)
         of.addWidget(hint("勾选“平均荧光强度”会增加导出时间（需要读原图），但可以比较各脑区的整体荧光亮度。"))
+        L.addWidget(rb)
         L.addWidget(ob)
         b = big_button("导出 Excel…"); b.clicked.connect(self.export)
         L.addWidget(b)
@@ -1867,8 +1865,9 @@ class MainWindow(UpdateMixin, TeachingMixin, FigureMixin, AccuracyMixin, Relocat
         if not f:
             return
         project = self.project
-        project.export_skip_layers = self.exp_skip_layers.isChecked()
-        project.export_max_depth = int(self.exp_depth.value())
+        project.export_region_set = self.exp_scope.mode()
+        project.export_skip_layers = self.exp_scope.skip_layers()
+        project.export_max_depth = self.exp_scope.max_depth()
         project.export_intensity = self.exp_intensity.isChecked()
         project.save()
         masks, qc = self.exp_masks.isChecked(), self.exp_qc.isChecked()

@@ -12,6 +12,8 @@ from dataclasses import dataclass, asdict
 
 import numpy as np
 import pandas as pd
+
+from . import region_sets as _RS
 from scipy import stats as st
 
 from .stats import bh_fdr, per_animal, check_samples, metric_options, _plt, GROUP_COLORS
@@ -27,6 +29,7 @@ class BehaviorParams:
     hemisphere: str = "左右合计"
     min_area_mm2: float = 0.05
     max_depth: int = 0
+    region_set: str = ""             # 比较哪些脑区：见 core/region_sets.py（空 = 旧设置，按 max_depth）
     behavior_name: str = "行为分数"   # 例如“冻结时间 %”
     group: str = ALL_ANIMALS         # 用哪些动物：全部动物，或某一个组
     alpha: float = 0.05
@@ -60,8 +63,7 @@ def correlate(animal: pd.DataFrame, behavior: dict, params: BehaviorParams) -> t
     df = animal[animal["半脑"] == params.hemisphere].copy()
     if params.group != ALL_ANIMALS:
         df = df[df["组别"] == params.group]
-    if params.max_depth:
-        df = df[df["层级"] <= params.max_depth]
+    df = _RS.filter_table(df, params.region_set, params.max_depth)
     df = df[df["面积 (mm²)"] >= params.min_area_mm2]
     df["行为分数"] = df["动物"].map(behavior)
     df = df[df["行为分数"].notna() & df[params.metric].notna()]
@@ -137,12 +139,12 @@ def run_behavior_correlation(project, out_dir, params: BehaviorParams, region_se
     if region_sec is None:
         if progress:
             progress(0, 3, "正在统计每张脑片的脑区结果…")
-        skip, depth = project.export_skip_layers, project.export_max_depth
-        project.export_skip_layers, project.export_max_depth = False, 0
+        skip, depth, rset = project.export_skip_layers, project.export_max_depth, project.export_region_set
+        project.export_skip_layers, project.export_max_depth, project.export_region_set = False, 0, "all"
         try:
             region_sec = build_tables(project, intensity=False).get("按脑区×脑片")
         finally:
-            project.export_skip_layers, project.export_max_depth = skip, depth
+            project.export_skip_layers, project.export_max_depth, project.export_region_set = skip, depth, rset
     if region_sec is None or region_sec.empty:
         raise ValueError("还没有按脑区的结果。请先完成细胞识别和“⑥ 脑图谱配准”。")
     used = set(region_sec["图片"].astype(str) + "/" + region_sec["脑片"].astype(str))
@@ -181,7 +183,7 @@ def run_behavior_correlation(project, out_dir, params: BehaviorParams, region_se
         ("统计单位", "动物（同一动物的多张脑片先合并：细胞数相加、面积相加，再算密度）"),
         ("半脑", params.hemisphere), ("纳入条件", f"该动物在该脑区面积 ≥ {params.min_area_mm2} mm²；"
                                           f"至少 {MIN_ANIMALS} 只动物有数据的脑区才计算"),
-        ("脑区层级", "全部" if not params.max_depth else f"≤ 第 {params.max_depth} 级"),
+        ("脑区范围", _RS.describe(params.region_set, params.max_depth)),
         ("显著标准", f"q < {params.alpha}"), ("动物数", len(have)),
         ("提醒", "相关不等于因果；把不同组的动物放在一起算时，相关可能只是反映了组间差异，"
                  "建议同时看每个组内的相关。"),

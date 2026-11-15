@@ -89,7 +89,8 @@ class Project:
     thickness: str = "thin"            # 切片厚度预设：thin（≤20 µm）/ thick（30–50 µm）
     z_mode: str = "max"                # z-stack 合成方式，见 slide_io.Z_MODE_NAMES
     export_skip_layers: bool = False   # 导出按脑区表时不列出皮层各层（layer 1、2/3…）
-    export_max_depth: int = 0          # 导出按脑区表时最多列到第几级（0 = 不限）
+    export_max_depth: int = 0          # 导出按脑区表时最多列到第几级（0 = 不限）；只在“按图谱层级”时用
+    export_region_set: str = ""        # 导出哪些脑区：见 core/region_sets.py（空 = 旧项目，按上面两项）
     export_intensity: bool = False     # 导出时统计脑区平均荧光强度（要读原图，较慢；v0.8.2 起默认不算）
     samples: dict = field(default_factory=dict)   # 实验分组：{"图片/脑片": {"animal": 动物编号, "group": 组别}}
     stats: dict = field(default_factory=dict)     # 组间统计参数（stats.StatsParams 的字典）
@@ -139,6 +140,7 @@ class Project:
             "coloc": self.coloc.to_dict(),
             "thickness": self.thickness, "z_mode": self.z_mode,
             "export_skip_layers": self.export_skip_layers, "export_max_depth": self.export_max_depth,
+            "export_region_set": self.export_region_set,
             "export_intensity": self.export_intensity,
             "samples": self.samples, "stats": self.stats, "grading": self.grading, "network": self.network,
             "figure": self.figure,
@@ -186,6 +188,7 @@ class Project:
         p.z_mode = d.get("z_mode", "max")
         p.export_skip_layers = bool(d.get("export_skip_layers", False))
         p.export_max_depth = int(d.get("export_max_depth", 0))
+        p.export_region_set = str(d.get("export_region_set", "") or "")
         p.export_intensity = bool(d.get("export_intensity", False))
         p.samples = d.get("samples", {})
         p.stats = d.get("stats", {})
