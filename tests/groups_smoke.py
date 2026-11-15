@@ -43,7 +43,7 @@ w._grp_import(); print("after import", w.project.samples)
 shot("g1_table")
 # 用假数据（8 只动物）测试统计
 w.project.samples = json.load(open(samples, encoding="utf-8")); w._sync_groups_panel(); pump(1)
-w.st_ctrl.setCurrentText("对照"); w.st_depth.setValue(8)
+w.st_ctrl.setCurrentText("对照"); w.st_scope.set_values("depth", 8)
 w.run_stats(region_sec=pd.read_pickle(fake)); wait_task()
 print(w.st_summary.text())
 shot("g2_stats")

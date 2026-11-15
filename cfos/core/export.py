@@ -115,10 +115,8 @@ def build_tables(project: Project, intensity: bool | None = None) -> dict[str, p
         out["按脑片汇总"] = t.reset_index(drop=True)
         if region_sec:
             t = pd.concat(region_sec, ignore_index=True).rename(columns={"section": "脑片"})
-            if project.export_skip_layers:
-                t = t[~t["脑区名称"].astype(str).str.contains(r"[Ll]ayer|/Layer", regex=True)]
-            if project.export_max_depth > 0:
-                t = t[t["层级"] <= project.export_max_depth]
+            from .region_sets import filter_table
+            t = filter_table(t, project.export_region_set, project.export_max_depth, project.export_skip_layers)
             out["按脑区×脑片"] = t
         if roi_rows:  # 只有画了自定义区域时才有这张表
             out["按自定义区域"] = pd.concat(roi_rows, ignore_index=True)
@@ -261,6 +259,9 @@ def params_table(project: Project) -> pd.DataFrame:
         m = model_from_settings(project.unmix, project.channel_names)
         on = m is not None and not np.allclose(m.matrix, np.eye(len(m.matrix)))
         rows.append(("脑区平均荧光强度", "按去除串色后的图测量（与细胞识别一致）" if on else "按原图测量"))
+    from . import region_sets as RS
+    rows.append(("导出的脑区范围", RS.describe(project.export_region_set, project.export_max_depth, project.export_skip_layers)))
+    rows.append(("脑区类别说明", RS.CATEGORY_HELP))
     tc = project.tissue_channels()
     rows.append(("拆分脑片用的通道", "全部通道" if tc is None else "、".join(project.channel_names[c] for c in tc)))
     if project.unused_channels:
@@ -329,6 +330,9 @@ def export_excel(project: Project, path: str | Path, masks: bool = True, progres
             tables["按脑片汇总"] = add_quality(tables["按脑片汇总"], quality_table(project, progress=progress))
         except Exception:  # noqa: BLE001  质量检查出错不影响导出
             logging.getLogger("cfos").exception("质量检查失败")
+    if "按脑区×脑片" in tables:   # 只在导出的 Excel 里加（组间统计等内部计算不需要）
+        from .region_sets import annotate
+        tables["按脑区×脑片"] = annotate(tables["按脑区×脑片"])
     tables["分析参数"] = params_table(project)
     try:
         _write_xlsx(tables, path)

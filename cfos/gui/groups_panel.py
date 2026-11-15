@@ -58,11 +58,12 @@ class GroupsMixin:
         self.st_area = QDoubleSpinBox(); self.st_area.setRange(0, 10); self.st_area.setDecimals(3)
         self.st_area.setSingleStep(0.01); self.st_area.setSuffix(" mm²")
         self.st_area.setToolTip("某只动物在某个脑区的总面积小于这个值时，这只动物不纳入该脑区的比较（面积太小密度不稳定）。")
-        self.st_depth = QDoubleSpinBox(); self.st_depth.setDecimals(0); self.st_depth.setRange(0, 12)
-        self.st_depth.setSpecialValueText("全部脑区"); self.st_depth.setPrefix("第 "); self.st_depth.setSuffix(" 级以内")
-        self.st_depth.setToolTip("脑区越细，比较次数越多，多重比较校正越严格。只关心大脑区时可以设 6–8。")
+        from .region_scope import RegionScopeBox
+        self.st_scope = RegionScopeBox(with_layers=False)
+        self.st_scope.setToolTip("比较的脑区越多，多重比较校正越严格，越难得到显著结果。\n"
+                                 "“常用脑区”互不重叠、粗细适中，是文献里最常用的做法。")
         f.addRow("比较的指标", self.st_metric); f.addRow("统计方法", self.st_test); f.addRow("对照组", self.st_ctrl)
-        f.addRow("半脑", self.st_hemi); f.addRow("最小面积", self.st_area); f.addRow("脑区范围", self.st_depth)
+        f.addRow("半脑", self.st_hemi); f.addRow("最小面积", self.st_area); f.addRow("比较哪些脑区", self.st_scope)
         L.addWidget(box)
         b = big_button("计算组间统计并画图"); b.clicked.connect(lambda: self.run_stats()); L.addWidget(b)
         self.st_summary = QLabel(""); self.st_summary.setWordWrap(True); L.addWidget(self.st_summary)
@@ -108,7 +109,7 @@ class GroupsMixin:
         from ..core.behavior import BehaviorParams, run_behavior_correlation
         sp = self._stats_params()
         bp = BehaviorParams(metric=sp.metric, hemisphere=sp.hemisphere, min_area_mm2=sp.min_area_mm2,
-                            max_depth=sp.max_depth, behavior_name=self.bh_name.text().strip() or "行为分数",
+                            max_depth=sp.max_depth, region_set=sp.region_set, behavior_name=self.bh_name.text().strip() or "行为分数",
                             group=self.bh_group.currentText() or "全部动物")
         self.project.behavior_params = bp.to_dict(); self.project.save()
         project = self.project
@@ -212,7 +213,7 @@ class GroupsMixin:
         if sp.control in groups:
             self.st_ctrl.setCurrentText(sp.control)
         self.st_hemi.setCurrentText(sp.hemisphere)
-        self.st_area.setValue(sp.min_area_mm2); self.st_depth.setValue(sp.max_depth)
+        self.st_area.setValue(sp.min_area_mm2); self.st_scope.set_values(sp.region_set, sp.max_depth)
         self._sync_network_box()
         self._sync_behavior_box(groups)
 
@@ -324,7 +325,8 @@ class GroupsMixin:
     def _stats_params(self) -> StatsParams:
         sp = StatsParams(metric=self.st_metric.currentText(), test=self.st_test.currentData(),
                          control=self.st_ctrl.currentText(), hemisphere=self.st_hemi.currentText(),
-                         min_area_mm2=self.st_area.value(), max_depth=int(self.st_depth.value()))
+                         min_area_mm2=self.st_area.value(), max_depth=self.st_scope.max_depth(),
+                         region_set=self.st_scope.mode())
         self.project.stats = sp.to_dict(); self.project.save()
         return sp
 
