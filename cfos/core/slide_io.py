@@ -1,6 +1,7 @@
 """读取多通道荧光全片图像（qptiff / ome.tif / tif / 江丰 .kfbf），支持金字塔分辨率按需读取。"""
 from __future__ import annotations
 
+import os
 import re
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
@@ -23,6 +24,7 @@ class ChannelInfo:
     index: int
     name: str
     color: tuple[int, int, int]
+    file_color: tuple[int, int, int] | None = None   # 文件里存的显示颜色（显微镜软件里的颜色；没有时为 None）（v0.8.3）
 
 
 @dataclass
@@ -37,6 +39,10 @@ class Slide:
     n_z: int = 1                      # z-stack 层数，1 表示单层扫描 / 已做景深合成
     z_mode: str = "max"               # z-stack 的合成方式：max=最大投影，edf=景深合成（取最清晰的层），或 "z3" 表示只用第 3 层
     _kf: object = field(repr=False, default=None)   # 江丰 .kfbf 文件（v0.8.2），不是 TIFF 时用它读
+    _fast: dict = field(repr=False, default_factory=dict)   # 每层的多线程图块读取器（v0.8.3，见 tileread.py）；None = 用 zarr
+    _cache: object = field(repr=False, default=None)        # 已解码图块缓存（v0.8.3）
+    _fh: object = field(repr=False, default=None)
+    _fh_lock: object = field(repr=False, default=None)
 
     @property
     def n_levels(self) -> int:
@@ -64,10 +70,36 @@ class Slide:
             self._levels[level] = raw if self.axes in ("CYX", "YX") else ZProjected(raw, self.axes, self.z_mode)
         return self._levels[level]
 
+    def _fast_level(self, level: int):
+        """图块存储的单层多通道 TIFF（qptiff / ome.tif 常见）：多线程解码、带缓存的读取器（v0.8.3）。
+        其他情况（z-stack、条带存储、RGB 等）返回 None，仍按原来的方式读。"""
+        if level in self._fast:
+            return self._fast[level]
+        r = None
+        if (self._tif is not None and self.axes in ("CYX", "YX")
+                and os.environ.get("CFOS_FAST_READ", "1") != "0"):
+            try:
+                from . import tileread
+                pages = list(self._tif.series[0].levels[level].pages)
+                if pages and tileread.TiledTiffLevel.supported(pages):
+                    if self._cache is None:
+                        import threading
+                        self._cache = tileread.TileCache()
+                        self._fh = open(self.path, "rb")
+                        self._fh_lock = threading.Lock()
+                    r = tileread.TiledTiffLevel(self.path, pages, level, self._cache, self._fh_lock, self._fh)
+                    if (r.H, r.W) != tuple(self.level_shapes[level]) and level < len(self.level_shapes):
+                        r = None
+            except Exception:  # noqa: BLE001  任何意外都退回原来的读法
+                r = None
+        self._fast[level] = r
+        return r
+
     def read(self, level: int, bbox0: tuple[int, int, int, int] | None = None,
              channels: list[int] | None = None) -> np.ndarray:
         """读取一块区域，返回 (C, H, W)。bbox0 是第 0 层坐标 (x, y, w, h)。"""
-        a = self._arr(level)
+        fast = self._fast_level(level)
+        a = None if fast is not None else self._arr(level)
         ds = self.downsample(level)
         H, W = self.level_shapes[level]
         if bbox0 is None:
@@ -78,12 +110,25 @@ class Slide:
             x1, y1 = min(W, int(np.ceil((x + w) / ds))), min(H, int(np.ceil((y + h) / ds)))
             ys, xs = slice(y0, y1), slice(x0, x1)
         chs = channels if channels is not None else list(range(len(self.channels)))
+        if fast is not None:
+            if self.axes == "YX":
+                chs = [0]
+            return fast.read(list(chs), ys.start, ys.stop, xs.start, xs.stop)
         if a.ndim == 2:
             return np.asarray(a[ys, xs])[None]
         out = np.stack([np.asarray(a[c, ys, xs]) for c in chs])
         return out
 
     def close(self):
+        if self._cache is not None:
+            self._cache.clear()
+        if self._fh is not None:
+            try:
+                self._fh.close()
+            except OSError:
+                pass
+            self._fh = None
+        self._fast.clear()
         if self._tif is not None:
             self._tif.close()
         if self._kf is not None:
@@ -149,6 +194,15 @@ class ZProjected:
         return self.shape[0]
 
 
+def _ome_color(v) -> tuple[int, int, int] | None:
+    """OME 的 Color 属性：有符号 32 位整数 RGBA。"""
+    try:
+        x = int(v) & 0xFFFFFFFF
+        return ((x >> 24) & 255, (x >> 16) & 255, (x >> 8) & 255)
+    except (TypeError, ValueError):
+        return None
+
+
 def _parse_qptiff_page(desc: str):
     try:
         txt = desc.encode("utf-8", "ignore").decode("utf-8")
@@ -161,6 +215,59 @@ def _parse_qptiff_page(desc: str):
         return itype, name, rgb
     except Exception:
         return None, None, None
+
+
+# ---------------------------------------------------------------- 通道染色判断（v0.8.3）
+# 先看通道名里的染料或波长，文件里存的显示颜色只作最后参考（有的显微镜把 Far Red 存成黄色）。
+ROLE_COLORS = {"DAPI": (0, 0, 255), "Green": (0, 255, 0), "Red": (255, 0, 0), "Far red": (255, 0, 255)}
+_ROLE_WORDS = [   # 按顺序匹配（长词在前，避免“FAR RED”被当成“RED”）
+    ("DAPI", ("DAPI", "HOECHST", "BV421", "AF405", "ALEXA 405", "ALEXA FLUOR 405", "BFP", "蓝")),
+    ("Far red", ("FAR RED", "FAR-RED", "FARRED", "FAR_RED", "CY5", "CY 5", "APC", "ALEXA 647", "DY647",
+                 "远红", "CY7", "IRDYE")),
+    ("Green", ("FITC", "EGFP", "GFP", "YFP", "CY2", "OPAL 520", "ALEXA 488", "GREEN", "绿")),
+    ("Red", ("TRITC", "TXRED", "TEXAS RED", "TEXASRED", "CY3", "CY 3", "MCHERRY", "TDTOMATO", "RFP", "PE",
+             "RHODAMINE", "RED", "红")),
+]
+
+
+def _wavelength_role(name: str) -> str | None:
+    """通道名里的三位数波长（染料名如 AF488、Alexa 594，或滤光片 / 发射波长如 520、620、670）。"""
+    for m in re.finditer(r"(?<!\d)(\d{3})(?!\d)", name):
+        wl = int(m.group(1))
+        if 380 <= wl < 480:
+            return "DAPI"
+        if 480 <= wl < 560:
+            return "Green"
+        if 560 <= wl < 640:
+            return "Red"
+        if 640 <= wl <= 800:
+            return "Far red"
+    return None
+
+
+def _color_role(rgb) -> str | None:
+    """最后参考：文件里存的显示颜色。只认纯蓝 / 纯绿 / 纯红 / 品红，其他颜色（如黄色）不猜。"""
+    if rgb is None:
+        return None
+    rgb = tuple(int(v) for v in rgb)
+    for role, col in ROLE_COLORS.items():
+        if rgb == col:
+            return role
+    return None
+
+
+def guess_role(name: str, file_color=None) -> str | None:
+    """判断通道是 DAPI / Green / Red / Far red：先看名字里的染料词，再看波长，最后才看文件里的显示颜色。
+    都判断不出时返回 None（保留扫描仪写的名字，在“② 脑片拆分”里手动选）。"""
+    n = " ".join(str(name or "").upper().replace("_", " ").split())
+    for role, words in _ROLE_WORDS:
+        for w in words:
+            if w in ("PE", "APC"):   # 短词只匹配整个词
+                if re.search(rf"(?<![A-Z]){w}(?![A-Z])", n):
+                    return role
+            elif w in n:
+                return role
+    return _wavelength_role(n) or _color_role(file_color)
 
 
 def _guess_color(name: str, idx: int):
@@ -212,13 +319,19 @@ def open_slide(path: str | Path, z_mode: str | None = None) -> Slide:
         if itype == "FullResolution" and name:
             names.append((name, rgb))
     if not names and tif.is_ome:
-        names = [(m, None) for m in re.findall(r'<Channel[^>]*?Name="([^"]*)"', tif.ome_metadata or "")]
+        for tag in re.findall(r"<Channel\b[^>]*>", tif.ome_metadata or ""):
+            m = re.search(r'\bName="([^"]*)"', tag)
+            cm = re.search(r'\bColor="(-?\d+)"', tag)
+            names.append((m.group(1) if m else "", _ome_color(cm.group(1)) if cm else None))
     for i in range(n_ch):
         if i < len(names):
             nm, rgb = names[i]
         else:
-            nm, rgb = f"通道{i + 1}", None
-        channels.append(ChannelInfo(i, nm, rgb or _guess_color(nm, i)))
+            nm, rgb = "", None
+        nm = nm or f"通道{i + 1}"
+        if rgb is not None and tuple(rgb) == (255, 255, 255) and tif.is_ome:
+            rgb = None        # OME 默认的白色（-1）不是显微镜设置的颜色
+        channels.append(ChannelInfo(i, nm, rgb or _guess_color(nm, i), file_color=tuple(rgb) if rgb else None))
 
     # 像素尺寸
     px = None

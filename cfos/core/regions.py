@@ -40,9 +40,21 @@ INTENSITY_UM = 0.0     # 测量脑区平均荧光强度时读图的分辨率（�
 # 金字塔低分辨率层不是严格的平均值（示例图片上 2 µm 层的均值比原图差 2–4%），所以用原图。
 
 
+def _usable_unmix(slide: Slide, model):
+    """解混模型与图片通道数一致、且确实有串色系数时才用。"""
+    if model is None or len(slide.channels) < 2:
+        return None
+    M = np.asarray(model.matrix)
+    if M.shape != (len(slide.channels), len(slide.channels)) or np.allclose(M, np.eye(M.shape[0])):
+        return None
+    return model
+
+
 def region_intensity_sums(slide: Slide, section: Section, lab_u: np.ndarray, hemi_u: np.ndarray, ds_lab: float,
-                          target_um: float = INTENSITY_UM) -> dict:
+                          target_um: float = INTENSITY_UM, unmix_model=None) -> dict:
     """按 (脑区, 半脑) 累加每个通道的原始灰度值和像素数（不是识别用的去卷积 / 减背景后的图）。
+    unmix_model：项目开启了“识别前去除通道串色”时传入（v0.8.3）。每块图读出后先逐像素去除串色，
+    再累加，和细胞识别、细胞亮度用的是同一张校正后的图（不是汇总后再近似校正）。
     lab_u / hemi_u：未旋转方向（与原图一致）的标签图，每个像素对应第 0 层 ds_lab 个像素；
     排除区域和组织外已经是 0。按行分块读图，大图也不会占太多内存。
     返回 {(region, hemi): (像素数, [各通道灰度和])}。"""
@@ -57,12 +69,17 @@ def region_intensity_sums(slide: Slide, section: Section, lab_u: np.ndarray, hem
     sums = np.zeros((n_ch, K), np.float64)
     # 按标签图的行分块：每块对应原图的若干行
     rows_per = max(1, int(np.ceil(1024 * ds / ds_lab)))
+    um = _usable_unmix(slide, unmix_model)
+    if um is not None:
+        from .unmix import apply as _unmix
     for r0 in range(0, Hl, rows_per):
         r1 = min(Hl, r0 + rows_per)
         bb = (x0, y0 + r0 * ds_lab, w, (r1 - r0) * ds_lab)
         a = slide.read(lv, bb)
         if a.size == 0:
             continue
+        if um is not None:
+            a = _unmix(a, um)
         _, Ha, Wa = a.shape
         # 读出的每个像素 → 标签图像素（读取的起点按 int(y/ds) 取整，误差 < 1 个像素）
         oy = int((y0 + r0 * ds_lab) / ds) * ds
@@ -81,7 +98,7 @@ def region_intensity_sums(slide: Slide, section: Section, lab_u: np.ndarray, hem
     return out
 
 
-def _intensity_signature(slide: Slide, section: Section, reg, warp_file, exclusions) -> str:
+def _intensity_signature(slide: Slide, section: Section, reg, warp_file, exclusions, unmix_model=None) -> str:
     """决定脑区平均荧光强度结果的所有输入：原图文件、脑片方框、配准（含非线性贴合文件）、排除区域、z-stack 合成方式。
     任何一项改了，缓存就作废、重新计算。"""
     import hashlib, json, os
@@ -97,16 +114,19 @@ def _intensity_signature(slide: Slide, section: Section, reg, warp_file, exclusi
          "reg": reg.to_dict(), "warp": stat(warp_file) if reg.nonlinear else None,
          "exclusions": [np.asarray(e, float).round(1).tolist() for e in (exclusions or [])],
          "z": getattr(slide_io, "Z_MODE", ""), "um": INTENSITY_UM, "n_ch": len(slide.channels)}
+    um = _usable_unmix(slide, unmix_model)
+    if um is not None:   # v0.8.3：去除串色的比例也决定结果；没开启时签名与 v0.8.2 相同，旧缓存照样能用
+        d["unmix"] = [np.asarray(um.matrix, float).round(5).tolist(), np.asarray(um.offsets, float).round(3).tolist()]
     return hashlib.sha1(json.dumps(d, sort_keys=True, default=str).encode()).hexdigest()
 
 
 def cached_intensity_sums(slide: Slide, section: Section, lab, hemi, ds, reg, results_dir, image_key,
-                          exclusions, warp_file) -> dict:
+                          exclusions, warp_file, unmix_model=None) -> dict:
     """region_intensity_sums 的结果按脑片缓存在 results/intensity/<图片>/<脑片>.pkl（v0.8.2）。
     配准、排除区域、方框都没改时直接用上次的结果，不再读原图；结果与重新计算完全相同。"""
     import pickle
     from pathlib import Path
-    sig = _intensity_signature(slide, section, reg, warp_file, exclusions)
+    sig = _intensity_signature(slide, section, reg, warp_file, exclusions, unmix_model)
     f = Path(results_dir) / "intensity" / str(image_key) / f"{section.name}.pkl"
     try:
         with open(f, "rb") as fh:
@@ -115,7 +135,8 @@ def cached_intensity_sums(slide: Slide, section: Section, lab, hemi, ds, reg, re
             return d["sums"]
     except Exception:  # noqa: BLE001  没有缓存或缓存损坏时重新计算
         pass
-    out = region_intensity_sums(slide, section, R.orient(lab, reg.orientation), R.orient(hemi, reg.orientation), ds)
+    out = region_intensity_sums(slide, section, R.orient(lab, reg.orientation), R.orient(hemi, reg.orientation), ds,
+                                unmix_model=unmix_model)
     try:
         f.parent.mkdir(parents=True, exist_ok=True)
         tmp = f.with_suffix(".tmp")
@@ -128,7 +149,7 @@ def cached_intensity_sums(slide: Slide, section: Section, lab, hemi, ds, reg, re
 
 
 def assign_regions(cells: pd.DataFrame, slide: Slide, sections: list[Section], results_dir, image_key,
-                   exclusions=None, intensity: bool = False):
+                   exclusions=None, intensity: bool = False, unmix_model=None):
     """cells: merged_cells 的输出（x, y 为第 0 层像素）。增加 region_index, hemisphere, 以及每张脑片的脑区面积表。
     intensity=True 时面积表还带每个通道的灰度和（sum_ch0…）与像素数（n_px），用于算脑区平均荧光强度。"""
     cells = cells.copy()
@@ -162,7 +183,8 @@ def assign_regions(cells: pd.DataFrame, slide: Slide, sections: list[Section], r
             cells.loc[sel, "region_index"] = lab[iy, ix]
             cells.loc[sel, "hemisphere"] = hemi[iy, ix]
         pix_mm2 = (ds * px0 / 1000.0) ** 2
-        inten = cached_intensity_sums(slide, s, lab, hemi, ds, reg, results_dir, image_key, exclusions, wp) \
+        inten = cached_intensity_sums(slide, s, lab, hemi, ds, reg, results_dir, image_key, exclusions, wp,
+                                      unmix_model) \
             if intensity else {}
         idx, cnt = np.unique(np.stack([lab.ravel(), hemi.ravel()], 1), axis=0, return_counts=True)
         for (ri, hm), n in zip(idx, cnt):
@@ -188,6 +210,22 @@ def _ancestors():
         path = [int(x) for x in str(r["path"]).split("/") if x]
         anc[int(r["index"])] = [id2idx[i] for i in path if i in id2idx]
     return anc
+
+
+# 细胞极密的脑区：细胞核挤在一起，DAPI 容易少识别，“X+ 占 DAPI+ 的比例”会偏高（v0.8.3）
+DENSE_REGIONS = ("DG", "DG-sg", "CA1", "CA1sp", "CA2", "CA2sp", "CA3", "CA3sp", "MOBgr", "AOBgr", "IGL")
+DENSE_TREES = ("CBX",)          # 小脑皮层（颗粒层为主）及其所有下级
+
+
+def dense_regions() -> set:
+    st = load_atlas().structures
+    out = set(DENSE_REGIONS)
+    ids = set(st.loc[st["acronym"].isin(DENSE_TREES), "id"].astype(int))
+    for _, r in st.iterrows():
+        path = {int(x) for x in str(r["path"]).split("/") if x}
+        if path & ids:
+            out.add(r["acronym"])
+    return out
 
 
 def region_summary(cells: pd.DataFrame, areas: pd.DataFrame, channel_names, group_cols, require_nucleus=True):
@@ -252,4 +290,5 @@ def region_summary(cells: pd.DataFrame, areas: pd.DataFrame, channel_names, grou
                     base = t.set_index(gcols).index.map(ref)
                     t[f"{nm} 平均荧光强度（相对整张脑片）"] = (mean.to_numpy() / np.asarray(base, float)).round(3)
     t = t.sort_values(list(group_cols) + ["region", "半脑"]).drop(columns=["region"])
-    return t
+    from .coloc import add_nucleus_ratios
+    return add_nucleus_ratios(t, channel_names, dense_regions())

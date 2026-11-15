@@ -8,6 +8,14 @@
 
 面向小鼠脑切片荧光图像的一体化分析软件：脑片拆分 → 亮度/对比度 → 逐通道细胞识别 → 共标统计 → CCFv3 配准 → 分组统计 / 功能网络 → 导出 Excel。
 
+## v0.8.3（小更新）：DAPI 比例主指标、自定义显示颜色、强度去串色、多线程读图
+- **X+ 占 DAPI+ 的比例**（`core/coloc.add_nucleus_ratios`）：导出三张计数表都加“X+ 占 DAPI+ 的比例 %”（分子 = DAPI+X 共标，分母 = DAPI+）和“比例提示”列（DAPI+ < 200，或 `regions.DENSE_REGIONS` / 小脑皮层）；`stats.metric_options` 把它放在首位，`stats.add_metrics` 按动物合计计数后再算；组间比较表也带提示列。
+- **显示颜色**：`DisplayChannel.color`（项目文件 `display`），`Project.custom_color()`；看图（napari 自定义色表）、质控图、截图制图、配准图都用它。新项目默认沿用文件里存的颜色（`ChannelInfo.file_color`，qptiff 页描述 / OME Channel Color）。
+- **通道判断**：`slide_io.guess_role` 先看染料词，再看三位数波长，最后才看文件颜色（只认纯蓝/绿/红/品红）。
+- **脑区平均荧光强度去串色**：`regions.region_intensity_sums(..., unmix_model)` 每块逐像素解混后累加；缓存签名包含解混矩阵（未开启时签名不变）。自定义区域同样处理。
+- **多线程读图**（`core/tileread.py`）：图块存储的单层 TIFF 由 `TiledTiffLevel` 直接按图块解码（`TiffPage.decode`），.kfbf 同样并行；线程数 = min(4, `cpu.main_threads()`)，`CFOS_DECODE_THREADS` 可改，`CFOS_FAST_READ=0` 退回 zarr。每张图片 128 MB 已解码图块 LRU 缓存。结果与原读法逐像素一致。
+- 测试：`tests/v083_core.py`、`tests/v083_gui.py`、`tests/upgrade_direct.sh`（v0.7 手动 / v0.8 / v0.8+0.8.1 / v0.8+0.8.2 → 最新）。
+
 ## v0.8.1（小更新）：改名 FosMap、配准质控、行为相关、不再依赖 TensorFlow
 - **改名**“FosMap 脑片活动图谱”，新图标（`cfos/gui/assets/`，源文件 `fosmap_logo.svg`）。`cfos.APP_NAME` 是显示名称；安装目录（`%LOCALAPPDATA%\cFos脑片分析`）、用户数据目录（`cfos脑片分析`）和项目格式都不变，旧版本的自动更新照常识别。
 - **配准质控**（`core/quality.py`）：标记物通道阳性细胞落在白质（fiber tracts）或脑室的比例 > 5% 提示“注意”，≥ 10% 提示“可疑”。示例脑片 1.4%；人为把 AP 位置错开 2.5 mm 时轮廓重合度仍有 0.87（不报警），但这一项升到 16%，能标出来。

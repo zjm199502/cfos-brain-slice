@@ -59,6 +59,8 @@ class KfbfFile:
         self.path = Path(path)
         self._fh = open(self.path, "rb")
         self._mm = mmap.mmap(self._fh.fileno(), 0, access=mmap.ACCESS_READ)
+        from .tileread import TileCache
+        self.cache = TileCache()          # 已解码图块（v0.8.3）
         mm = self._mm
         if mm[4:8] != b"KFBF":
             raise ValueError("不是 KFBF 文件")
@@ -131,12 +133,16 @@ class KfbfFile:
     # ------------------------------------------------------------------ 读取
     def read(self, level: int, x0: int, y0: int, w: int, h: int,
              channels: list[int] | None = None) -> np.ndarray:
-        """读取第 level 层（0 = 最高倍率）里的一块，坐标是该层的像素坐标，返回 (C, h, w) uint8。"""
+        """读取第 level 层（0 = 最高倍率）里的一块，坐标是该层的像素坐标，返回 (C, h, w) uint8。
+        v0.8.3：所需图块用多个线程同时解码，最近解码过的图块留在缓存里（识别分块的重叠区不再重复解码），
+        结果与逐块串行解码完全相同。"""
+        from .tileread import pmap
         lv = self.levels[level]
         chs = list(range(self.n_channels)) if channels is None else list(channels)
         out = np.zeros((len(chs), h, w), np.uint8)
         T = lv.tile
         tx0, ty0 = (x0 // T) * T, (y0 // T) * T
+        jobs = []
         for ty in range(ty0, y0 + h, T):
             for tx in range(tx0, x0 + w, T):
                 t = lv.tiles.get((tx, ty))
@@ -148,13 +154,25 @@ class KfbfFile:
                 if sx1 <= sx0 or sy1 <= sy0:
                     continue
                 for k, c in enumerate(chs):
-                    a = _decode_jpeg(self._mm[offs[c]:offs[c] + szs[c]])
-                    if a.ndim == 3:
-                        a = a[..., 0]
-                    out[k, sy0 - y0:sy1 - y0, sx0 - x0:sx1 - x0] = a[sy0 - ty:sy1 - ty, sx0 - tx:sx1 - tx]
+                    jobs.append((k, c, tx, ty, offs[c], szs[c], sx0, sy0, sx1, sy1))
+        tiles = pmap(lambda j: self._tile(level, j[1], j[2], j[3], j[4], j[5]), jobs)
+        for (k, c, tx, ty, _o, _s, sx0, sy0, sx1, sy1), a in zip(jobs, tiles):
+            out[k, sy0 - y0:sy1 - y0, sx0 - x0:sx1 - x0] = a[sy0 - ty:sy1 - ty, sx0 - tx:sx1 - tx]
         return out
 
+    def _tile(self, level, c, tx, ty, off, size):
+        key = (level, c, tx, ty)
+        a = self.cache.get(key)
+        if a is None:
+            a = _decode_jpeg(self._mm[off:off + size])
+            if a.ndim == 3:
+                a = a[..., 0]
+            a = np.ascontiguousarray(a)
+            self.cache.put(key, a)
+        return a
+
     def close(self):
+        self.cache.clear()
         try:
             self._mm.close()
         finally:
