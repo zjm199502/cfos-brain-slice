@@ -1,4 +1,4 @@
-"""读取多通道荧光全片图像（qptiff / ome.tif / tif / 江丰 .kfbf），支持金字塔分辨率按需读取。"""
+"""读取多通道荧光全片图像（qptiff / ome.tif / tif / 江丰 .kfbf / 奥林巴斯 .vsi），支持金字塔分辨率按需读取。"""
 from __future__ import annotations
 
 import os
@@ -38,7 +38,8 @@ class Slide:
     axes: str = "CYX"                 # 原始文件的轴顺序（可能含 Z）
     n_z: int = 1                      # z-stack 层数，1 表示单层扫描 / 已做景深合成
     z_mode: str = "max"               # z-stack 的合成方式：max=最大投影，edf=景深合成（取最清晰的层），或 "z3" 表示只用第 3 层
-    _kf: object = field(repr=False, default=None)   # 江丰 .kfbf 文件（v0.8.2），不是 TIFF 时用它读
+    _kf: object = field(repr=False, default=None)   # 江丰 .kfbf（v0.8.2）或奥林巴斯 .vsi（v0.8.4）文件，不是 TIFF 时用它读
+    notes: list = field(default_factory=list)       # 打开时给用户的提示（如 .vsi 里有多幅图、用了哪一幅）
     _fast: dict = field(repr=False, default_factory=dict)   # 每层的多线程图块读取器（v0.8.3，见 tileread.py）；None = 用 zarr
     _cache: object = field(repr=False, default=None)        # 已解码图块缓存（v0.8.3）
     _fh: object = field(repr=False, default=None)
@@ -297,6 +298,10 @@ def open_slide(path: str | Path, z_mode: str | None = None) -> Slide:
         raise FileNotFoundError(f"找不到图片文件：{path}（可能被移动、改名，或移动硬盘没有插上）")
     if path.suffix.lower() == ".kfbf":
         return _open_kfbf(path, z_mode)
+    if path.suffix.lower() == ".vsi":
+        return _open_vsi(path, z_mode)
+    if path.suffix.lower() == ".ets":
+        raise ValueError("请选择 .vsi 文件，不要直接选 .ets。（.ets 是 .vsi 配套的像素文件，放在“_名字_”文件夹里。）")
     tif = tifffile.TiffFile(path)
     s = tif.series[0]
     axes = s.axes.replace("Q", "Z").replace("I", "Z")
@@ -383,4 +388,34 @@ def _open_kfbf(path: Path, z_mode: str) -> Slide:
         if int(a.max()) - int(a.min()) > 2:
             break
         slide.level_shapes.pop()
+    return slide
+
+
+def _open_vsi(path: Path, z_mode: str) -> Slide:
+    """奥林巴斯 / Evident（cellSens、VS120、VS200）的 .vsi（v0.8.4 起直接读取，不需要 Java）。
+    像素在同名的“_名字_”文件夹的 .ets 里；z-stack 读取时按 z_mode 合成为一层。"""
+    from .vsi import VsiFile, VsiReadError
+    try:
+        vf = VsiFile(path, z_mode)
+    except VsiReadError as e:
+        raise ValueError(f"无法读取奥林巴斯 .vsi 文件（{path.name}）：{e}") from e
+    except Exception as e:  # noqa: BLE001
+        raise ValueError(f"无法读取奥林巴斯 .vsi 文件（{path.name}）：{e}。"
+                         "可以在 cellSens / OlyVIA 里另存为 OME-TIFF 再导入。") from e
+    channels = []
+    for i, nm in enumerate(vf.channel_names):
+        em = vf.emission_nm[i]
+        if em and guess_role(nm) is None:      # 名字里看不出染料（如“通道 1”）时，把发射波长写进名字，便于自动识别
+            nm = f"{nm} {int(round(em))}nm"
+        channels.append(ChannelInfo(i, nm, ROLE_COLORS.get(guess_role(nm)) or _guess_color(nm, i)))
+    slide = Slide(path=path, channels=channels, pixel_size_um=float(vf.pixel_size_um or 0.25),
+                  level_shapes=[tuple(lv.shape) for lv in vf.levels], axes="CYX", n_z=vf.n_z, z_mode=z_mode,
+                  _kf=vf, notes=list(vf.notes))
+    while slide.n_levels > 1 and max(slide.level_shapes[-1]) <= 4096:   # 和其他格式一样，去掉全空白的最粗几层
+        a = slide.read(slide.n_levels - 1)
+        if int(a.max()) - int(a.min()) > 2:
+            break
+        slide.level_shapes.pop()
+    if not vf.pixel_size_um:
+        slide.notes.append("文件里没有读到像素尺寸，暂按 0.25 µm/像素，请在“① 项目与图片”里核对。")
     return slide

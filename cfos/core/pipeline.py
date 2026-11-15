@@ -17,7 +17,7 @@ from .project import Project, ImageEntry
 from .sections import find_sections
 from .slide_io import open_slide
 
-IMAGE_EXTS = (".qptiff", ".tif", ".tiff", ".kfbf")
+IMAGE_EXTS = (".qptiff", ".tif", ".tiff", ".kfbf", ".vsi")
 
 
 def list_images(folder) -> list[Path]:

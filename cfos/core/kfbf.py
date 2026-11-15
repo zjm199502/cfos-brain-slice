@@ -187,7 +187,7 @@ class _KfbfLevelArray:
         H, W = kf.levels[level].shape
         self.shape = (kf.n_channels, H, W)
         self.ndim = 3
-        self.dtype = np.dtype(np.uint8)
+        self.dtype = np.dtype(getattr(kf, "dtype", np.uint8))   # .vsi 可能是 16 位
 
     def __getitem__(self, key):
         if not isinstance(key, tuple):

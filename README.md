@@ -8,6 +8,12 @@
 
 面向小鼠脑切片荧光图像的一体化分析软件：脑片拆分 → 亮度/对比度 → 逐通道细胞识别 → 共标统计 → CCFv3 配准 → 分组统计 / 功能网络 → 导出 Excel。
 
+## v0.8.4（小更新）：直接读取奥林巴斯 .vsi
+- **.vsi 读取**（`core/vsi.py` + `core/vsi_meta/`）：纯 Python，不需要 Java / Bio-Formats。像素在同名“_名字_”文件夹的 `stackN/frame_t*.ets` 里，`vsi.read_ets_index` 读图块表，图块支持不压缩 / JPEG / JPEG 2000（imagecodecs）；金字塔、拼接扫描的原点偏移、缺失图块（按 0）都处理。`VsiFile` 与 `KfbfFile` 接口相同，接在 `Slide._kf` 上。
+- **元数据**：`core/vsi_meta` 取自 bioio-vsi（BSD-3），解析通道名、发射波长、像素尺寸、维度顺序（Z / T / 通道的顺序每个文件都可能不同）。通道名看不出染料时把发射波长写进名字，`guess_role` 就能认出来。文件里有多幅图（标签、预览图、主扫描图）时用最大的主扫描图；说明信息读不懂时只靠 .ets 读图并提示。
+- **z-stack**：按项目的合成方式（最大投影 / 景深合成 / 平均 / 指定层）读取时合成；8 位和 16 位都支持。明场 RGB 扫描会提示不支持。
+- 测试：`tests/v084_vsi.py`（真实样本 `tests/data/vsi`，来自 zenodo 6094961，CC BY 4.0；加合成 .ets）。
+
 ## v0.8.3（小更新）：DAPI 比例主指标、自定义显示颜色、强度去串色、多线程读图
 - **X+ 占 DAPI+ 的比例**（`core/coloc.add_nucleus_ratios`）：导出三张计数表都加“X+ 占 DAPI+ 的比例 %”（分子 = DAPI+X 共标，分母 = DAPI+）和“比例提示”列（DAPI+ < 200，或 `regions.DENSE_REGIONS` / 小脑皮层）；`stats.metric_options` 把它放在首位，`stats.add_metrics` 按动物合计计数后再算；组间比较表也带提示列。
 - **显示颜色**：`DisplayChannel.color`（项目文件 `display`），`Project.custom_color()`；看图（napari 自定义色表）、质控图、截图制图、配准图都用它。新项目默认沿用文件里存的颜色（`ChannelInfo.file_color`，qptiff 页描述 / OME Channel Color）。

@@ -14,6 +14,7 @@
 | Allen Mouse Brain Common Coordinate Framework v3（CCFv3） | 2017，25 µm | 脑图谱（注释、平均模板、脑区结构表），经 BrainGlobe（allen_mouse_25um）获取 | https://atlas.brain-map.org/ ； https://brainglobe.info/ | Wang et al., Cell 2020 |
 | elastix（itk-elastix） | 0.25.4 | 非线性配准 | https://github.com/InsightSoftwareConsortium/ITKElastix | Klein et al., IEEE TMI 2010; Shamonin et al., Front. Neuroinform. 2014 |
 | QuickNII 坐标约定 | — | 图谱切面参数（与 DeepSlice 输出一致），只参考了公开的格式说明，没有使用其代码 | https://www.nitrc.org/projects/quicknii | Puchades et al., PLoS ONE 2019 |
+| bioio-vsi | 2dd575b（2026-10-16） | 奥林巴斯 .vsi 文件的元数据解析（通道名、像素尺寸、维度顺序），代码收在 cfos/core/vsi_meta | https://github.com/szarma/bioio-vsi |  |
 | TensorFlow / Keras | 2.21.0 / 3.15.1 | 神经网络运行（StarDist、DeepSlice） | https://www.tensorflow.org/ |  |
 | ONNX Runtime | 1.31.1 | 细胞识别神经网络的 CPU 计算 | https://onnxruntime.ai/ |  |
 | napari | 0.10.0 | 看图界面 | https://napari.org/ | napari contributors, Zenodo |

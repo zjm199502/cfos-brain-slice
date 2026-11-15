@@ -37,7 +37,7 @@ from .update_panel import UpdateMixin
 
 DECONV_SLOWDOWN = "多用 30–45% 的时间"   # 示例脑片实测（2 通道，4 核）：378 → 488 秒（v0.8）、403 → 581 秒（v0.8.1）
 from .. import APP_NAME  # noqa: E402
-IMAGE_FILTER = "荧光全片图像 (*.qptiff *.tif *.tiff *.ome.tif *.ome.tiff *.kfbf);;所有文件 (*)"
+IMAGE_FILTER = "荧光全片图像 (*.qptiff *.tif *.tiff *.ome.tif *.ome.tiff *.kfbf *.vsi);;所有文件 (*)"
 COLORMAP = {"DAPI": "blue", "Green": "green", "Red": "red", "Far red": "magenta"}
 POINT_COLOR = {"DAPI": "#4f8cff", "Green": "#3ddc4a", "Red": "#ff4040", "Far red": "#ff40ff"}
 
@@ -412,7 +412,7 @@ class MainWindow(UpdateMixin, TeachingMixin, FigureMixin, AccuracyMixin, Relocat
         files, _ = QFileDialog.getOpenFileNames(self, "选择图片（可多选）", "", IMAGE_FILTER)
         if not files:
             return
-        bad = []
+        bad, notes = [], []
         existing = {im.path for im in self.project.images}
         for f in files:
             if f in existing:
@@ -423,6 +423,7 @@ class MainWindow(UpdateMixin, TeachingMixin, FigureMixin, AccuracyMixin, Relocat
                     bad.append(f"{Path(f).name}：通道数（{len(sl.channels)}）与项目中其他图片不同")
                     sl.close(); continue
                 self.project.ensure_channels(sl.channels)
+                notes += [f"{Path(f).name}：{n}" for n in getattr(sl, "notes", [])]
                 sl.close()
                 self.project.images.append(ImageEntry(path=f))
             except Exception as e:  # noqa: BLE001
@@ -431,6 +432,8 @@ class MainWindow(UpdateMixin, TeachingMixin, FigureMixin, AccuracyMixin, Relocat
         self._refresh_images(); self._refresh_channels_form(); self._refresh_enabled()
         if bad:
             self.error("以下图片无法加入：\n" + "\n".join(bad))
+        if notes:
+            self.info("请留意：\n" + "\n".join(notes))
         if self.project.images and self.image is None:
             self.image_combo.setCurrentIndex(0)
 
@@ -448,7 +451,7 @@ class MainWindow(UpdateMixin, TeachingMixin, FigureMixin, AccuracyMixin, Relocat
         from ..core.pipeline import list_images
         dlg = QDialog(self); dlg.setWindowTitle("一键批量处理")
         L = QVBoxLayout(dlg)
-        L.addWidget(hint("选择放图片的文件夹，软件会依次处理其中所有 .qptiff / .tif / .kfbf 图片，"
+        L.addWidget(hint("选择放图片的文件夹，软件会依次处理其中所有 .qptiff / .tif / .kfbf / .vsi 图片，"
                          "全部使用当前项目里的识别参数（建议先用一张图片调好参数）。\n"
                          "完成后会在项目文件夹里生成 Excel，并列出需要人工检查配准的脑片。"))
         row = QHBoxLayout(); path = QLineEdit(); pick = QPushButton("选择文件夹…")
@@ -480,7 +483,7 @@ class MainWindow(UpdateMixin, TeachingMixin, FigureMixin, AccuracyMixin, Relocat
         from ..core.pipeline import list_images, run_batch
         files = list_images(folder)
         if not files:
-            self.error("这个文件夹里没有找到 .qptiff / .tif / .kfbf 图片。")
+            self.error("这个文件夹里没有找到 .qptiff / .tif / .kfbf / .vsi 图片。")
             return
         if self.project is None:
             pf = Path(folder) / "cFos分析项目"
