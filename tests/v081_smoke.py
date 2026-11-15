@@ -47,7 +47,8 @@ def grab_dialog(name):
 
 w._load_project(Project.load(proj)); pump(2)
 print("title", w.windowTitle())
-assert w.windowTitle().startswith("FosMap 脑片活动图谱 v0.8.1"), w.windowTitle()
+from cfos import __version__
+assert w.windowTitle().startswith(f"FosMap 脑片活动图谱 v{__version__}"), w.windowTitle()
 assert not w.windowIcon().isNull() and w.windowIcon().availableSizes(), "没有程序图标"
 for i, nm in enumerate(STEPS):
     w.steps.setCurrentRow(i); pump(0.3)

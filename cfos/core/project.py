@@ -28,6 +28,19 @@ class DisplayChannel:
     low: float = 0.0
     high: float = 255.0
     gamma: float = 1.0
+    color: list | None = None    # 显示颜色 [R, G, B]（v0.8.3）；None = 按通道染色的默认颜色（v0.8.2 以前的项目）
+
+
+def _display_dict(v: DisplayChannel) -> dict:
+    """保存进项目文件的显示设置（不含颜色，颜色另存在 display_colors）。"""
+    d = asdict(v)
+    d.pop("color", None)
+    return d
+
+
+# “③ 亮度 / 对比度”里的常用显示颜色（v0.8.3）
+COLOR_PRESETS = {"蓝": (0, 0, 255), "绿": (0, 255, 0), "红": (255, 0, 0), "品红": (255, 0, 255),
+                 "黄": (255, 255, 0), "青": (0, 255, 255), "白": (255, 255, 255)}
 
 
 @dataclass
@@ -114,7 +127,9 @@ class Project:
             "version": 1,
             "images": [im.to_dict() for im in self.images],
             "channel_names": self.channel_names,
-            "display": {str(k): asdict(v) for k, v in self.display.items()},
+            "display": {str(k): _display_dict(v) for k, v in self.display.items()},
+            # 显示颜色单独存（v0.8.3）：放进 display 里的话，“恢复到安装时的版本”后旧版本软件会打不开项目
+            "display_colors": {str(k): list(v.color) for k, v in self.display.items() if v.color},
             "detection": {
                 "pixel_um": self.detection.pixel_um,
                 "tile": self.detection.tile,
@@ -158,7 +173,10 @@ class Project:
         p = Project(folder=folder)
         p.images = [ImageEntry.from_dict(x) for x in d.get("images", [])]
         p.channel_names = d.get("channel_names", [])
-        p.display = {int(k): DisplayChannel(**v) for k, v in d.get("display", {}).items()}
+        p.display = {int(k): DisplayChannel(**{kk: vv for kk, vv in v.items() if kk in DisplayChannel.__dataclass_fields__})
+                     for k, v in d.get("display", {}).items()}
+        for k, col in (d.get("display_colors") or {}).items():
+            p.display.setdefault(int(k), DisplayChannel()).color = [int(x) for x in col][:3]
         det = d.get("detection", {})
         p.detection = DetectionSettings(
             pixel_um=det.get("pixel_um", 0.5), tile=det.get("tile", 2048), overlap=det.get("overlap", 96),
@@ -249,7 +267,8 @@ class Project:
                 "grading": self.grading, "unused_channels": self.unused_channels,
                 "section_channels": self.section_channels,
                 "unmix": {k: v for k, v in self.unmix.items() if k in ("enabled", "scale")},
-                "display": {str(k): asdict(v) for k, v in self.display.items()}}
+                "display": {str(k): _display_dict(v) for k, v in self.display.items()},
+                "display_colors": {str(k): list(v.color) for k, v in self.display.items() if v.color}}
 
     def save_template(self, path):
         Path(path).write_text(json.dumps(self.template_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
@@ -275,7 +294,11 @@ class Project:
                 continue
             self.detection.channels[i] = ChannelParams(**{k: v for k, v in chs[str(j)].items() if k in ChannelParams.__dataclass_fields__})
             if str(j) in d.get("display", {}):
-                self.display[i] = DisplayChannel(**d["display"][str(j)])
+                self.display[i] = DisplayChannel(**{k: v for k, v in d["display"][str(j)].items()
+                                                    if k in DisplayChannel.__dataclass_fields__})
+                col = (d.get("display_colors") or {}).get(str(j))
+                if col:
+                    self.display[i].color = [int(x) for x in col][:3]
         if not self.channel_names:
             self.channel_names = list(names)
         self.coloc = ColocParams(**{k: v for k, v in d.get("coloc", {}).items() if k in ColocParams.__dataclass_fields__})
@@ -289,6 +312,18 @@ class Project:
             self.unmix = {**self.unmix, **d["unmix"]}
         self.save()
         return notes
+
+    # ---------- 显示颜色（v0.8.3） ----------
+    def custom_color(self, c: int) -> tuple[int, int, int] | None:
+        """用户选的（或沿用显微镜的）显示颜色；没有设置时返回 None，由调用处按通道名用默认颜色。"""
+        d = self.display.get(c)
+        if d is None or not d.color or len(d.color) < 3:
+            return None
+        return tuple(int(max(0, min(255, v))) for v in d.color[:3])
+
+    def set_color(self, c: int, rgb) -> None:
+        self.display.setdefault(c, DisplayChannel()).color = None if rgb is None else [int(v) for v in rgb[:3]]
+        self.save()
 
     # ---------- 通道（v0.8.2） ----------
     def used_channels(self) -> list[int]:
@@ -361,20 +396,18 @@ class Project:
         """第一次加入图片时，按图片里的通道初始化名称和参数。"""
         if not self.channel_names:
             self.unmix = {"enabled": True}      # 新项目默认识别前去除串色（v0.8.2）
+            # v0.8.3：先看通道名里的染料 / 波长，文件里存的显示颜色只作最后参考（见 slide_io.guess_role）
+            from .slide_io import guess_role
             names = []
             for ch in slide_channels:
-                n = ch.name.upper()
-                if "DAPI" in n:
-                    names.append("DAPI")
-                elif ch.color == (0, 255, 0):
-                    names.append("Green")
-                elif ch.color == (255, 0, 255):
-                    names.append("Far red")
-                elif ch.color == (255, 0, 0):
-                    names.append("Red")
-                else:
-                    names.append(ch.name)
+                role = guess_role(ch.name, getattr(ch, "file_color", None))
+                names.append(role if role and role not in names else ch.name)
             self.channel_names = names
+            # 显示颜色默认沿用显微镜软件里的颜色（文件里存的，如 Far Red 存成黄色就显示黄色）
+            for i, ch in enumerate(slide_channels):
+                fc = getattr(ch, "file_color", None)
+                if fc is not None:
+                    self.display.setdefault(i, DisplayChannel()).color = [int(v) for v in fc]
         for i, nm in enumerate(self.channel_names):
             self.display.setdefault(i, DisplayChannel())
             if i not in self.detection.channels:

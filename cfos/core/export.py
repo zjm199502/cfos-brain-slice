@@ -20,6 +20,8 @@ def build_tables(project: Project, intensity: bool | None = None) -> dict[str, p
     if intensity is None:
         intensity = bool(getattr(project, "export_intensity", False))
     names = project.channel_names
+    from .unmix import model_from_settings
+    um = model_from_settings(project.unmix, names) if intensity else None   # v0.8.3：强度也用去除串色后的图
     per_section, per_image, details = [], [], []
     region_img, region_sec, roi_rows = [], [], []
     for im in project.images:
@@ -40,6 +42,8 @@ def build_tables(project: Project, intensity: bool | None = None) -> dict[str, p
         cells = add_grades(cells, names, project.grading)
         cells.insert(0, "图片", im.key)
         s = summarize(cells, names, group_cols=("图片", "section"), require_nucleus=project.coloc.require_nucleus)
+        from .coloc import add_nucleus_ratios
+        s = add_nucleus_ratios(s, names)     # v0.8.3：X+ 占 DAPI+ 的比例 %（推荐主指标）
         # 动物、组别、前后位置（按动物和 Bregma 排序，方便看连续切片）
         from . import registration as _R
         secmap = {x.name: x for x in im.sections}
@@ -70,7 +74,7 @@ def build_tables(project: Project, intensity: bool | None = None) -> dict[str, p
             from .regions import assign_regions, region_summary
             from .atlas import load_atlas
             cells, areas = assign_regions(cells, _sl, reg_secs, project.results_dir, im.key, im.exclusions,
-                                          intensity=intensity)
+                                          intensity=intensity, unmix_model=um)
             rcells = cells[cells["section"].isin({s_.name for s_ in reg_secs})]
             region_sec.append(region_summary(rcells, areas, names, ("图片", "section"), project.coloc.require_nucleus))
             st = load_atlas().structures.set_index("index")
@@ -88,12 +92,13 @@ def build_tables(project: Project, intensity: bool | None = None) -> dict[str, p
                 area = _roi_area_mm2(r["polygon"], im.exclusions, px)
                 t["面积 (mm²)"] = round(area, 4)
                 if intensity:
-                    for nm, v in zip(names, roi_mean_intensity(_sl, r["polygon"], im.exclusions)):
+                    for nm, v in zip(names, roi_mean_intensity(_sl, r["polygon"], im.exclusions, unmix_model=um)):
                         t[f"{nm} 平均荧光强度"] = round(v, 1) if v == v else None
                 for nm in names:
                     if f"{nm}+" in t.columns and area > 0:
                         t[f"{nm}+ 密度 (个/mm²)"] = (t[f"{nm}+"] / area).round(1)
-                roi_rows.append(t)
+                from .coloc import add_nucleus_ratios
+                roi_rows.append(add_nucleus_ratios(t, names))
         _sl.close()
         cells["x"] = (cells["x"] * px).round(1)
         cells["y"] = (cells["y"] * px).round(1)
@@ -131,8 +136,11 @@ def _drop_unused(tables: dict, project: Project) -> dict:
     return {k: v.loc[:, [c for c in v.columns if not unused(c)]] for k, v in tables.items()}
 
 
-def roi_mean_intensity(slide, polygon, exclusions, target_um: float = 0.0) -> list[float]:
-    """自定义区域内（去掉排除区域）每个通道的平均荧光强度，原始灰度值。"""
+def roi_mean_intensity(slide, polygon, exclusions, target_um: float = 0.0, unmix_model=None) -> list[float]:
+    """自定义区域内（去掉排除区域）每个通道的平均荧光强度，原始灰度值。
+    开启了串色校正时（unmix_model），先逐像素去除串色再求平均（v0.8.3）。"""
+    from .regions import _usable_unmix
+    um = _usable_unmix(slide, unmix_model)
     from skimage.draw import polygon as skpoly
     a = np.asarray(polygon, float)
     n_ch = len(slide.channels)
@@ -144,8 +152,12 @@ def roi_mean_intensity(slide, polygon, exclusions, target_um: float = 0.0) -> li
     bb = (int(x0), int(y0), int(np.ceil(a[:, 0].max() - x0)) + 1, int(np.ceil(a[:, 1].max() - y0)) + 1)
     sums, n = np.zeros(n_ch), 0
     ox, oy = int(bb[0] / ds) * ds, int(bb[1] / ds) * ds
+    full = None
+    if um is not None:
+        from .unmix import apply as _unmix
+        full = _unmix(slide.read(lv, bb), um)
     for c in range(n_ch):
-        img = slide.read(lv, bb, [c])[0]
+        img = full[c] if full is not None else slide.read(lv, bb, [c])[0]
         if c == 0:
             H, W = img.shape
             m = np.zeros((H, W), bool)
@@ -237,6 +249,18 @@ def params_table(project: Project) -> pd.DataFrame:
             ("排除区域数", sum(len(im.exclusions) for im in project.images))]
     from .unmix import describe_settings
     rows.append(("通道串色校正", describe_settings(project.unmix, project.channel_names)))
+    from .coloc import nucleus_channel, MIN_NUCLEI
+    nuc = nucleus_channel(project.channel_names)
+    if nuc is not None:
+        nn = project.channel_names[nuc]
+        rows.append(("推荐主指标", f"X+ 占 {nn}+ 的比例 %：分子为有核（{nn}+）的 X+ 细胞，分母为同一脑片 / 脑区的 {nn}+ 细胞；"
+                                   f"{nn}+ 不足 {MIN_NUCLEI} 个的区域和细胞极密的脑区（齿状回、CA1–CA3、小脑皮层等）"
+                                   f"在“比例提示”列标出。密度（个/mm²）作为补充"))
+    if getattr(project, "export_intensity", False):
+        from .unmix import model_from_settings
+        m = model_from_settings(project.unmix, project.channel_names)
+        on = m is not None and not np.allclose(m.matrix, np.eye(len(m.matrix)))
+        rows.append(("脑区平均荧光强度", "按去除串色后的图测量（与细胞识别一致）" if on else "按原图测量"))
     tc = project.tissue_channels()
     rows.append(("拆分脑片用的通道", "全部通道" if tc is None else "、".join(project.channel_names[c] for c in tc)))
     if project.unused_channels:

@@ -43,7 +43,8 @@ def section_qc_image(project: Project, im, sl, s, df) -> Image.Image:
         d = project.display.get(c)
         lo, hi = (d.low, d.high) if d is not None and d.high > d.low else np.percentile(a[c], [1, 99.7])
         x = np.clip((a[c] - lo) / max(hi - lo, 1e-6), 0, 1)
-        col = np.array(COLORS.get(names[c] if c < len(names) else "", FALLBACK[c % 5]), np.float32) / 255
+        col = np.array(project.custom_color(c) or COLORS.get(names[c] if c < len(names) else "", FALLBACK[c % 5]),
+                       np.float32) / 255
         rgb += x[..., None] * col * 0.8
     img = Image.fromarray((np.clip(rgb, 0, 1) * 255).astype(np.uint8))
     dr = ImageDraw.Draw(img)
@@ -78,7 +79,7 @@ def section_qc_image(project: Project, im, sl, s, df) -> Image.Image:
         for c, nm in enumerate(names):
             if c == nuc and len(names) > 1:
                 continue  # DAPI 细胞太密，圈出来会盖住图像；DAPI 本身在图上可见
-            col = COLORS.get(nm, FALLBACK[c % 5])
+            col = project.custom_color(c) or COLORS.get(nm, FALLBACK[c % 5])
             gc = g[g["channel"] == c]
             for x, y in zip((gc["x"].to_numpy() - x0) / ds, (gc["y"].to_numpy() - y0) / ds):
                 dr.ellipse([x - r, y - r, x + r, y + r], outline=col)

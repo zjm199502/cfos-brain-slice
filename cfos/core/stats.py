@@ -38,9 +38,14 @@ def count_columns(df: pd.DataFrame) -> list[str]:
 
 
 def metric_options(channel_names, nucleus_name="DAPI", grading=None) -> list[str]:
-    """界面上可选的指标：每个通道和每种共标的密度，以及双标占单标的百分比。"""
+    """界面上可选的指标：每个通道和每种共标的密度，以及双标占单标的百分比。
+    v0.8.3：有 DAPI 通道时，“X+ 占 DAPI+ 的比例 %”放在最前面，作为推荐主指标（不受切片厚度、组织收缩、面积误差影响）。"""
     from itertools import combinations
     opts = []
+    if nucleus_name in channel_names:
+        for nm in channel_names:
+            if nm != nucleus_name:
+                opts.append(f"{nm}+ 占 {nucleus_name}+ 的比例 %")
     for nm in channel_names:
         if nm != nucleus_name:
             opts.append(f"{nm}+ 密度 (个/mm²)")
@@ -77,7 +82,36 @@ def add_metrics(t: pd.DataFrame) -> pd.DataFrame:
                 for p in parts:
                     if f"{p}+" in t.columns:
                         t[f"{c} 占 {p}+ 的比例 %"] = 100.0 * t[c] / t[f"{p}+"].replace(0, np.nan)
+                # v0.8.3 推荐主指标：X+ 占 DAPI+ 的比例 = 有核的 X+（DAPI+X 共标）÷ DAPI+，用合计后的细胞数算
+                if NUC in parts and f"{NUC}+" in t.columns:
+                    x = parts[1] if parts[0] == NUC else parts[0]
+                    t[f"{x}+ 占 {NUC}+ 的比例 %"] = 100.0 * t[c] / t[f"{NUC}+"].replace(0, np.nan)
     return t
+
+
+NUC = "DAPI"
+
+
+def dapi_note(animal: pd.DataFrame, metric: str) -> pd.DataFrame | None:
+    """指标是“X+ 占 DAPI+ 的比例”时，按脑区给出提示：有动物 DAPI+ 不足 200 个，或是细胞极密的脑区。
+    返回 KEY_COLS + “比例提示”；不是这个指标时返回 None。"""
+    if not metric.endswith(f"占 {NUC}+ 的比例 %") or " 共标 " in metric or f"{NUC}+" not in animal.columns:
+        return None
+    from .coloc import MIN_NUCLEI, DAPI_NOTE
+    from .regions import dense_regions
+    dense = dense_regions()
+    rows = []
+    for k, g in animal.groupby(KEY_COLS, dropna=False):
+        k = dict(zip(KEY_COLS, k))
+        low = int((g[f"{NUC}+"].fillna(0) < MIN_NUCLEI).sum())
+        if low:
+            note = f"{DAPI_NOTE}（{low} 只动物 {NUC}+ 不足 {MIN_NUCLEI} 个）"
+        elif k["脑区缩写"] in dense:
+            note = f"{DAPI_NOTE}（细胞密集区，DAPI 容易漏识别）"
+        else:
+            note = ""
+        rows.append({**k, "比例提示": note})
+    return pd.DataFrame(rows)
 
 
 def check_samples(samples: dict) -> tuple[list[str], list[str]]:
@@ -186,6 +220,10 @@ def compare_groups(animal: pd.DataFrame, params: StatsParams) -> tuple[pd.DataFr
         c["显著"] = np.where(c["q 值 (FDR 校正)"] < params.alpha, "是", "")
         comps.append(c.sort_values("p 值"))
     comp = pd.concat(comps, ignore_index=True) if comps else pd.DataFrame()
+    note = dapi_note(a, m)
+    if note is not None:
+        gsum = gsum.merge(note, on=KEY_COLS, how="left") if not gsum.empty else gsum
+        comp = comp.merge(note, on=KEY_COLS, how="left") if not comp.empty else comp
     for t in (gsum, comp):
         for col in t.columns:
             if pd.api.types.is_float_dtype(t[col]):

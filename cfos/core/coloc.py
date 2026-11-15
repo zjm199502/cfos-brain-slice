@@ -158,6 +158,55 @@ def merged_cells(df: pd.DataFrame, n_channels: int) -> pd.DataFrame:
     return out.reset_index()
 
 
+MIN_NUCLEI = 200   # 一个区域里 DAPI+ 少于这个数时，“X+ 占 DAPI+ 的比例”不稳定
+DAPI_NOTE = "DAPI 可能偏少，比例偏高"
+
+
+def ratio_column(marker: str, nucleus: str = "DAPI") -> str:
+    """v0.8.3 推荐主指标的列名：X+ 占 DAPI+ 的比例 %。"""
+    return f"{marker}+ 占 {nucleus}+ 的比例 %"
+
+
+def nucleus_ratio_pairs(columns, channel_names) -> list[tuple[str, str, str]]:
+    """[(比例列名, 分子列 = 有核的 X+（DAPI+X 共标）, 分母列 = DAPI+)]。没有 DAPI 通道时为空。"""
+    nuc = nucleus_channel(channel_names)
+    if nuc is None:
+        return []
+    nn = channel_names[nuc]
+    cols = set(columns)
+    out = []
+    for c, nm in enumerate(channel_names):
+        if c == nuc:
+            continue
+        a, b = sorted((c, nuc))
+        num = f"{channel_names[a]}+{channel_names[b]} 共标"
+        if num in cols and f"{nn}+" in cols:
+            out.append((ratio_column(nm, nn), num, f"{nn}+"))
+    return out
+
+
+def add_nucleus_ratios(t: pd.DataFrame, channel_names, dense: set | None = None) -> pd.DataFrame:
+    """在计数表上加“X+ 占 DAPI+ 的比例 %”（分子只算有核的 X+，分母是同一区域的 DAPI+），
+    放在细胞数后面；再加一列提示：DAPI+ 不足 MIN_NUCLEI 个，或是细胞极密的脑区（dense，按脑区缩写）。"""
+    pairs = nucleus_ratio_pairs(t.columns, channel_names)
+    if not pairs or t.empty:
+        return t
+    t = t.copy()
+    den_col = pairs[0][2]
+    den = pd.to_numeric(t[den_col], errors="coerce")
+    cols = list(t.columns)
+    last = max(i for i, c in enumerate(cols) if c.endswith(" 共标") or c.endswith("+"))
+    for k, (rc, num, _) in enumerate(pairs):
+        v = (100.0 * pd.to_numeric(t[num], errors="coerce") / den.replace(0, np.nan)).round(2)
+        t.insert(last + 1 + k, rc, v)
+    note = np.where(den.fillna(0).to_numpy() < MIN_NUCLEI, f"{DAPI_NOTE}（{den_col} 不足 {MIN_NUCLEI} 个）", "")
+    if dense and "脑区缩写" in t.columns:
+        d = t["脑区缩写"].isin(dense).to_numpy()
+        note = np.where(d & (note == ""), f"{DAPI_NOTE}（细胞密集区，DAPI 容易漏识别）", note)
+    t.insert(last + 1 + len(pairs), "比例提示", note)
+    return t
+
+
 def summarize(cells: pd.DataFrame, channel_names: list[str], group_cols=("section",),
               require_nucleus: bool = False) -> pd.DataFrame:
     """按分组统计：每个通道的阳性细胞数，以及每对、每三个……通道的共标细胞数。

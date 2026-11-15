@@ -82,7 +82,12 @@ def auto_length_um(width_um: float) -> float:
     return float(min(NICE_UM, key=lambda v: abs(np.log(v) - np.log(max(target, 1e-6)))))
 
 
-def channel_color(name: str, idx: int) -> tuple[int, int, int]:
+def channel_color(name: str, idx: int, project: Project | None = None) -> tuple[int, int, int]:
+    """通道显示颜色：项目里选过的颜色（v0.8.3）优先，否则按通道名的默认颜色。"""
+    if project is not None:
+        c = project.custom_color(idx)
+        if c is not None:
+            return c
     return tuple(COLORS.get(name, FALLBACK[idx % len(FALLBACK)]))
 
 
@@ -127,7 +132,7 @@ def render_rgb(project: Project, sl: Slide, bbox0, lv: int, channels: list[int])
         x = np.clip((a[k] - lo) / max(hi - lo, 1e-6), 0, 1)
         if gm != 1.0:
             x = x ** gm
-        col = np.array(channel_color(names[c] if c < len(names) else "", c), np.float32) / 255
+        col = np.array(channel_color(names[c] if c < len(names) else "", c, project), np.float32) / 255
         rgb += x[..., None] * col
     return np.clip(rgb, 0, 1)
 
@@ -388,7 +393,7 @@ def render_roi(project: Project, im: ImageEntry, sl: Slide, roi: dict, st: Figur
         for c in chans:
             if c == nuc and len(chans) > 1:
                 continue
-            col = channel_color(names[c] if c < len(names) else "", c)
+            col = channel_color(names[c] if c < len(names) else "", c, project)
             col = tuple(min(255, int(v * 0.5 + 128)) for v in col)
             gc = g[g["channel"] == c]
             for cx, cy in zip((gc["x"].to_numpy() - x) / ds, (gc["y"].to_numpy() - y) / ds):

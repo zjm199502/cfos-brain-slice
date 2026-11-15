@@ -41,6 +41,13 @@ IMAGE_FILTER = "荧光全片图像 (*.qptiff *.tif *.tiff *.ome.tif *.ome.tiff *
 COLORMAP = {"DAPI": "blue", "Green": "green", "Red": "red", "Far red": "magenta"}
 POINT_COLOR = {"DAPI": "#4f8cff", "Green": "#3ddc4a", "Red": "#ff4040", "Far red": "#ff40ff"}
 
+
+def rgb_colormap(rgb):
+    """把 [R, G, B] 做成 napari 的“黑 → 该颜色”色表（v0.8.3 自定义显示颜色）。"""
+    from napari.utils.colormaps import Colormap
+    r, g, b = (max(0, min(255, int(v))) / 255 for v in rgb[:3])
+    return Colormap([[0, 0, 0, 1], [r, g, b, 1]], name="fosmap-%02x%02x%02x" % tuple(int(v * 255) for v in (r, g, b)))
+
 STEPS = ["① 项目与图片", "② 脑片拆分", "③ 亮度 / 对比度", "④ 细胞识别", "⑤ 共标统计",
          "⑥ 脑图谱配准", "⑦ 分组与统计", "⑧ 导出 Excel", "⑨ 截图制图"]
 
@@ -640,12 +647,32 @@ class MainWindow(UpdateMixin, TeachingMixin, FigureMixin, AccuracyMixin, Relocat
         if self.stack.currentIndex() == 5:
             self._sync_registration_panel()
 
+    # ---------------- 通道显示颜色（v0.8.3）
+    def _ch_index(self, nm) -> int:
+        names = self.project.channel_names if self.project else []
+        return names.index(nm) if nm in names else -1
+
+    def ch_cmap(self, c):
+        """看图时通道 c 的色表：项目里选的颜色优先，否则按通道名（DAPI 蓝、Green 绿……）。"""
+        rgb = self.project.custom_color(c) if self.project and c >= 0 else None
+        if rgb is not None:
+            return rgb_colormap(rgb)
+        nm = self.project.channel_names[c] if self.project and 0 <= c < len(self.project.channel_names) else ""
+        return COLORMAP.get(nm, "gray")
+
+    def ch_point_color(self, c):
+        rgb = self.project.custom_color(c) if self.project and c >= 0 else None
+        if rgb is not None:      # 细胞圈用浅一点的同色，压在同色荧光上也看得清
+            return "#%02x%02x%02x" % tuple(min(255, int(v * 0.5 + 128)) for v in rgb)
+        nm = self.project.channel_names[c] if self.project and 0 <= c < len(self.project.channel_names) else ""
+        return POINT_COLOR.get(nm, "white")
+
     def _show_image(self):
         self.viewer.layers.clear()
         sl = self.slide
         levels = [sl._arr(lv) for lv in range(sl.n_levels)]
         names = [self.ch_name(c) for c in range(len(sl.channels))]
-        cmaps = [COLORMAP.get(n, "gray") for n in names]
+        cmaps = [self.ch_cmap(c) for c in range(len(names))]
         if levels[0].ndim == 2:  # 单通道图像
             layers = [self.viewer.add_image(levels, multiscale=True, name=names[0], colormap=cmaps[0],
                                             blending="additive")]
@@ -930,6 +957,7 @@ class MainWindow(UpdateMixin, TeachingMixin, FigureMixin, AccuracyMixin, Relocat
             r1 = QHBoxLayout(); r1.addWidget(lo, 1); r1.addWidget(lo_lab)
             r2 = QHBoxLayout(); r2.addWidget(hi, 1); r2.addWidget(hi_lab)
             f.addRow(vis, auto); f.addRow("最暗", r1); f.addRow("最亮", r2); f.addRow("伽马", gm)
+            f.addRow("显示颜色", self._color_row(c))
 
             def apply(_=None, c=c, vis=vis, lo=lo, hi=hi, gm=gm, lo_lab=lo_lab, hi_lab=hi_lab):
                 d = self.project.display[c]
@@ -950,6 +978,72 @@ class MainWindow(UpdateMixin, TeachingMixin, FigureMixin, AccuracyMixin, Relocat
             vis.toggled.connect(apply); lo.valueChanged.connect(apply); hi.valueChanged.connect(apply)
             gm.valueChanged.connect(apply); auto.clicked.connect(do_auto)
             self.display_rows.addWidget(box)
+
+    COLOR_DEFAULT = "默认（按染色）"
+    COLOR_CUSTOM = "自定义…"
+
+    def _color_row(self, c):
+        """“③ 亮度 / 对比度”里每个通道的显示颜色（v0.8.3）：常用颜色 + 调色板。
+        看图、质控图、截图制图、配准图导出都用这个颜色；不影响细胞识别。"""
+        from qtpy.QtWidgets import QColorDialog
+        from qtpy.QtGui import QColor
+        from ..core.project import COLOR_PRESETS
+        wd = QWidget(); row = QHBoxLayout(wd); row.setContentsMargins(0, 0, 0, 0)
+        sw = QLabel(); sw.setFixedSize(22, 22)
+        cb = QComboBox(); cb.addItems([self.COLOR_DEFAULT] + list(COLOR_PRESETS) + [self.COLOR_CUSTOM])
+        cb.setToolTip("这个通道在看图窗口、质控图、截图制图和配准图里用什么颜色显示。\n"
+                      "新项目默认沿用显微镜软件里的颜色（例如 Far Red 显示为黄色）；只改显示，不影响识别和统计。")
+        def current_rgb():
+            rgb = self.project.custom_color(c)
+            if rgb is None:
+                cm = COLORMAP.get(self.project.channel_names[c] if c < len(self.project.channel_names) else "", "")
+                rgb = {"blue": (0, 0, 255), "green": (0, 255, 0), "red": (255, 0, 0), "magenta": (255, 0, 255)}.get(cm, (200, 200, 200))
+            return rgb
+        def show():
+            r, g, b = current_rgb()
+            sw.setStyleSheet(f"background: rgb({r},{g},{b}); border: 1px solid #888; border-radius: 3px;")
+            rgb = self.project.custom_color(c)
+            name = next((k for k, v in COLOR_PRESETS.items() if rgb is not None and tuple(v) == tuple(rgb)), None)
+            cb.blockSignals(True)
+            cb.setCurrentText(self.COLOR_DEFAULT if rgb is None else (name or self.COLOR_CUSTOM))
+            cb.blockSignals(False)
+        def pick(text):
+            if text == self.COLOR_CUSTOM:
+                r, g, b = current_rgb()
+                col = QColorDialog.getColor(QColor(r, g, b), self, f"选择“{self.ch_name(c)}”的显示颜色")
+                if not col.isValid():
+                    show(); return
+                rgb = (col.red(), col.green(), col.blue())
+            elif text == self.COLOR_DEFAULT:
+                rgb = None
+            else:
+                rgb = COLOR_PRESETS[text]
+            self.set_channel_color(c, rgb)
+            show()
+        cb.currentTextChanged.connect(pick)
+        row.addWidget(sw); row.addWidget(cb, 1)
+        show()
+        return wd
+
+    def set_channel_color(self, c, rgb):
+        self.project.set_color(c, rgb)
+        if c < len(getattr(self, "image_layers", [])):
+            try:
+                self.image_layers[c].colormap = self.ch_cmap(c)
+            except Exception:  # noqa: BLE001
+                pass
+        for layer in list(self.viewer.layers):
+            nm = self.project.channel_names[c] if c < len(self.project.channel_names) else None
+            if nm and layer.name in (f"细胞-{nm}", f"预览-{nm}"):
+                try:
+                    if hasattr(layer, "border_color"):
+                        layer.border_color = self.ch_point_color(c)
+                    else:
+                        layer.edge_color = self.ch_point_color(c)
+                except Exception:  # noqa: BLE001
+                    pass
+            elif nm and layer.name == f"预处理-{nm}":
+                layer.colormap = self.ch_cmap(c)
 
     def _save_later(self):
         if not hasattr(self, "_save_timer"):
@@ -1029,7 +1123,7 @@ class MainWindow(UpdateMixin, TeachingMixin, FigureMixin, AccuracyMixin, Relocat
         self.um_on = QCheckBox("识别前去除通道串色（推荐）")
         self.um_on.setToolTip("短波长染料的荧光会有一部分“漏”进长波长通道（例如 488 漏进 647），\n"
                               "让那个通道里出现假的阳性细胞、共标数偏高。软件从图片本身自动估算漏进去的比例并扣除，\n"
-                              "不需要单染对照。只影响识别和细胞亮度；脑区平均荧光强度仍按原图测量。")
+                              "不需要单染对照。识别、细胞亮度和脑区平均荧光强度都用去除串色后的图。")
         self.um_on.toggled.connect(self._unmix_toggled)
         v.addWidget(self.um_on)
         self.um_warn = QLabel("⚠ " + self.UNMIX_OFF_WARN); self.um_warn.setWordWrap(True)
@@ -1247,7 +1341,7 @@ class MainWindow(UpdateMixin, TeachingMixin, FigureMixin, AccuracyMixin, Relocat
                 if len(g):
                     polys = [np.asarray(cn)[:, ::-1] for cn in g["contour"] if len(cn) > 2]
                     self.viewer.add_shapes(polys, shape_type="polygon", name=f"预览-{nm}",
-                                           edge_color=POINT_COLOR.get(nm, "white"), face_color="transparent",
+                                           edge_color=self.ch_point_color(c), face_color="transparent",
                                            edge_width=max(w, h) / 800)
             self.det_summary.setText("预览结果：" + "，".join(msg) + "。\n不满意可以调整参数后再预览一次。")
 
@@ -1297,7 +1391,7 @@ class MainWindow(UpdateMixin, TeachingMixin, FigureMixin, AccuracyMixin, Relocat
             for c, im in zip(chans, res):
                 nm = self.ch_name(c)
                 lo, hi = np.percentile(im, [1, 99.7])
-                self.viewer.add_image(im, name=f"预处理-{nm}", colormap=COLORMAP.get(nm, "gray"),
+                self.viewer.add_image(im, name=f"预处理-{nm}", colormap=self.ch_cmap(c),
                                       blending="additive", scale=(ds, ds), translate=(y + ds / 2, x + ds / 2),
                                       contrast_limits=(float(lo), float(max(hi, lo + 1))))
                 if c < len(self.image_layers):
@@ -1401,7 +1495,7 @@ class MainWindow(UpdateMixin, TeachingMixin, FigureMixin, AccuracyMixin, Relocat
                 return None
             size = 10 / self.slide.pixel_size_um
             layer = self.viewer.add_points(np.zeros((0, 2)), name=name, size=size, face_color="transparent",
-                                           border_color=POINT_COLOR.get(nm, "white"), border_width=0.15,
+                                           border_color=self.ch_point_color(self._ch_index(nm)), border_width=0.15,
                                            features={"cid": np.zeros(0, int)})
             layer.feature_defaults = {"cid": -1}
         return self.viewer.layers[name]
@@ -1592,7 +1686,7 @@ class MainWindow(UpdateMixin, TeachingMixin, FigureMixin, AccuracyMixin, Relocat
             if g.empty:
                 continue
             layer = self.viewer.add_points(g[["y", "x"]].to_numpy(), name=f"细胞-{nm}", size=size,
-                                           face_color="transparent", border_color=POINT_COLOR.get(nm, "white"),
+                                           face_color="transparent", border_color=self.ch_point_color(c),
                                            border_width=0.15, visible=True,
                                            features={"cid": g.index.to_numpy()})
             layer.feature_defaults = {"cid": -1}
@@ -1748,7 +1842,8 @@ class MainWindow(UpdateMixin, TeachingMixin, FigureMixin, AccuracyMixin, Relocat
         self.exp_intensity.setToolTip("按原始分辨率读一遍原图，算每个脑区（和自定义区域）各通道的平均灰度值。\n"
                                       "图片越大越慢（每张图片多几十秒）；只看细胞数和密度时不用勾选。\n"
                                       "算过一次后会保存下来，配准和排除区域没改时再次导出不用重新算。\n"
-                                      "组间统计、行为相关、功能网络不需要这一项。")
+                                      "组间统计、行为相关、功能网络不需要这一项。\n"
+                                      "“④ 细胞识别”里开启了去除通道串色时，按去除串色后的图计算，与细胞识别口径一致。")
         self.exp_depth.setPrefix("第 ")
         dr = QHBoxLayout(); dr.addWidget(QLabel("按脑区表最多列到：")); dr.addWidget(self.exp_depth, 1)
         of.addWidget(self.exp_skip_layers); of.addLayout(dr)
