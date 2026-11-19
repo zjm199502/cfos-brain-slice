@@ -351,6 +351,22 @@ def export_excel(project: Project, path: str | Path, masks: bool = True, progres
     if "按脑区×脑片" in tables:   # 只在导出的 Excel 里加（组间统计等内部计算不需要）
         from .region_sets import annotate
         tables["按脑区×脑片"] = annotate(tables["按脑区×脑片"])
+    reviews = []
+    for image in project.images:
+        for r in image.field_reviews:
+            for label in ("当前", "候选"):
+                score = r[label+"计数"]
+                tp, fp, fn = (score[k] for k in ("tp","fp","fn"))
+                den = 2*tp + fp + fn
+                reviews.append({"图片":image.key, "脑片":r["脑片"], "通道":r["通道"],
+                                "视野":str(r["视野"]), "类型":r["类型"], "设置":label,
+                                "局部对比度":r[label]["min_contrast"], "去卷积":r[label]["deconv"],
+                                "TP":tp, "FP":fp, "FN":fn, "F1":2*tp/den if den else None,
+                                "阴性区误检/mm²":fp/r["面积mm2"] if not r["人工点"] else None,
+                                "新增获确认":r["新增获确认"], "新增候选":r["新增"],
+                                "当时采用候选":r["采用候选"]})
+    if reviews:
+        tables["脑片盲评"] = pd.DataFrame(reviews)
     if project.accuracy:
         from .accuracy import summary
         tables["准确率汇总"] = summary(project)

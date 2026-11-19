@@ -1320,7 +1320,12 @@ class MainWindow(UpdateMixin, TeachingMixin, FigureMixin, AccuracyMixin, Relocat
                 if (project.unmix or {}).get("enabled") and "coef" not in project.unmix:
                     task.report(0, 1, "第一次识别：正在估算通道串色比例…")
                 _prepare_unmix(project, s, image)
-                return det.detect_section(s, sec, settings, progress=lambda d, t: task.report(d, t, "正在预览识别…"),
+                from ..core.field_review import effective_settings
+                from ..core.manual import section_of
+                section_name = section_of(image, x+w/2, y+h/2)
+                source = next((part for part in image.sections if part.name == section_name), None)
+                preview_settings = effective_settings(settings, image, source) if source else settings
+                return det.detect_section(s, sec, preview_settings, progress=lambda d, t: task.report(d, t, "正在预览识别…"),
                                           cancel=task.is_cancelled)
             finally:
                 s.close()
@@ -1354,20 +1359,23 @@ class MainWindow(UpdateMixin, TeachingMixin, FigureMixin, AccuracyMixin, Relocat
         sl = self.slide
         H0, W0 = sl.level_shapes[0]
         lv = 0
-        while w / sl.downsample(lv) > 2048 or h / sl.downsample(lv) > 2048:
+        while lv + 1 < sl.n_levels and max(w, h) / sl.downsample(lv) > 2048:
             lv += 1
-            if lv >= sl.n_levels - 1:
-                break
         x, y = max(0, x), max(0, y)
         w, h = min(w, W0 - x), min(h, H0 - y)
         if w <= 0 or h <= 0:
             self.info("当前视野不在图片范围内，请先把图片移到视野中间再预览。")
             return
-        chans = [c for c, p in self.project.detection.channels.items() if p.deconv or p.bg_radius_um > 0]
+        from ..core.field_review import effective_settings
+        from ..core.manual import section_of
+        name = section_of(self.image, x+w/2, y+h/2)
+        sec = next((s for s in self.image.sections if s.name == name), None)
+        settings = effective_settings(self.project.detection, self.image, sec) if sec else self.project.detection
+        chans = [c for c, p in settings.channels.items() if p.deconv or p.bg_radius_um > 0]
         if not chans:
             self.info("还没有任何通道勾选“去卷积”或设置“减背景”。")
             return
-        params = {c: self.project.detection.channels[c] for c in chans}
+        params = {c: settings.channels[c] for c in chans}
         path = self.image.path
         ds = sl.downsample(lv)
         pix = sl.pixel_size_um * ds

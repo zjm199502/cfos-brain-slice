@@ -11,6 +11,7 @@ from matplotlib.path import Path as MplPath
 from . import detection as det
 from . import registration as R
 from . import quality as Q
+from .field_review import effective_settings
 from .coloc import colocalize, nucleus_channel
 from .log import log, friendly
 from .project import Project, ImageEntry
@@ -62,8 +63,10 @@ def rebuild_cells(project: Project, im: ImageEntry, pixel_um0: float) -> pd.Data
 
 
 def _merge_frames(project, im, pixel_um0, frames, names):
-    df = pd.concat(frames, ignore_index=True)
-    df = det.apply_filters(df, project.detection)
+    sections = {sec.name: sec for sec in im.sections}
+    filtered = [det.apply_filters(raw, effective_settings(project.detection, im, sections[name]))
+                for name, raw in zip(names, frames)]
+    df = pd.concat(filtered, ignore_index=True)
     from .manual import apply_manual, load_manual
     df = apply_manual(df, load_manual(project, im), pixel_um0, len(project.channel_names))
     df["cell_id"] = np.arange(len(df))
@@ -120,7 +123,11 @@ def detect_image(project: Project, im: ImageEntry, sl=None, redo=False, report=N
         for k, s in enumerate(secs):
             if cancel is not None and cancel():
                 raise InterruptedError
-            sig = hashlib.sha256(json.dumps([identity, s.bbox0, s.contour0], sort_keys=True).encode()).hexdigest()
+            settings = effective_settings(project.detection, im, s)
+            signature_data = [identity, s.bbox0, s.contour0]
+            if settings is not project.detection:
+                signature_data[0] = [det.raw_signature(settings), *identity[1:]]
+            sig = hashlib.sha256(json.dumps(signature_data, sort_keys=True).encode()).hexdigest()
             cached = None if redo else project.load_part(im, s, sig)
             if cached is not None:
                 frames.append(cached)
@@ -132,7 +139,7 @@ def detect_image(project: Project, im: ImageEntry, sl=None, redo=False, report=N
                     report(a + int((b - a) * (k + d / max(t, 1)) / max(len(secs), 1)), total,
                            f"{name}：识别 {s.name} 的细胞（{d}/{t} 块）")
             log.info("识别 %s %s", name, s.name)
-            raw = det.detect_section(sl, s, project.detection, progress=prog, cancel=cancel, prefilter=False)
+            raw = det.detect_section(sl, s, settings, progress=prog, cancel=cancel, prefilter=False)
             project.save_part(im, s, sig, raw)
             frames.append(raw)
             done += 1

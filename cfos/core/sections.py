@@ -63,13 +63,32 @@ def tissue_mask(img: np.ndarray, pixel_um: float, sensitivity: float = 1.0) -> n
     return mask
 
 
+def _tissue_image(slide, channels):
+    """Build the tissue thumbnail in bands when a large scan has no usable lower level."""
+    lv = slide.level_for_pixel_size(8.0)
+    ds = slide.downsample(lv)
+    pix = slide.pixel_size_um * ds
+    h, w = slide.level_shapes[lv]
+    step = max(1, round(8.0 / pix)) if pix > 0 else 1
+    channels = _valid(slide, channels)
+    if ds != 1 or step < 2 or min(h, w) < 8 * step or h * w < 8_000_000:
+        return slide.read(lv, None, channels), ds
+    rows, cols = h // step, w // step
+    out = np.empty((len(channels), rows, cols), np.float32)
+    # Keep the float32 working band near 16 MiB.
+    band = max(1, (4 * 1024**2) // (len(channels) * w * step))
+    for r in range(0, rows, band):
+        n = min(band, rows - r)
+        a = slide.read(lv, (0, r * step, cols * step, n * step), channels)
+        out[:, r:r+n] = a.astype(np.float32).reshape(len(channels), n, step, cols, step).mean(axis=(2, 4))
+    return out, ds * step
+
+
 def find_sections(slide: Slide, min_area_mm2: float = 3.0, pad_um: float = 200.0,
                   sensitivity: float = 1.0, channels: list[int] | None = None) -> list[Section]:
     """channels：用哪些通道找组织轮廓（None = 全部通道）。某个通道背景太亮时可以不用它（v0.8.2）。"""
-    level = slide.level_for_pixel_size(8.0)
-    ds = slide.downsample(level)
+    img, ds = _tissue_image(slide, channels)
     pix = slide.pixel_size_um * ds
-    img = slide.read(level, None, _valid(slide, channels))
     mask = tissue_mask(img, pix, sensitivity)
     lab = measure.label(mask)
     min_px = min_area_mm2 * 1e6 / pix ** 2

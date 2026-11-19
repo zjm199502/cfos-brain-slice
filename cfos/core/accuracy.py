@@ -112,9 +112,11 @@ def miss_details(project, image, channel, points, px_um):
     sections = {s.name: s for s in image.sections if s.enabled}
     cache = {}
     out = []
-    p = project.detection.channels[channel]
+    from .field_review import effective_settings
     for x, y in points:
         name = section_of(image, x, y)
+        p = (effective_settings(project.detection, image, sections[name]) if name in sections
+             else project.detection).channels[channel]
         if name not in cache:
             raw = project.load_part(image, sections[name]) if name in sections else None
             candidates = raw[raw["channel"] == channel] if raw is not None else None

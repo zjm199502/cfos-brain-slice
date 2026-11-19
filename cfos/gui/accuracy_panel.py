@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import numpy as np
 from qtpy.QtWidgets import (
-    QComboBox, QDoubleSpinBox, QGroupBox, QHBoxLayout, QLabel, QPushButton, QVBoxLayout,
+    QCheckBox, QComboBox, QDoubleSpinBox, QMessageBox, QGroupBox, QHBoxLayout, QLabel, QPushButton, QVBoxLayout,
 )
 
 from ..core import accuracy as A
@@ -44,6 +44,16 @@ class AccuracyMixin:
         b = QPushButton("查看所有检查记录"); b.clicked.connect(self.acc_show_all); r.addWidget(b)
         b = QPushButton("删除最后一条记录"); b.clicked.connect(self.acc_delete_last); r.addWidget(b)
         gl.addLayout(r)
+        gl.addWidget(QLabel("按脑片盲评：放框并点出阳性中心，再锁定人工点比较两种参数。"))
+        row = QHBoxLayout()
+        row.addWidget(QLabel("候选局部对比度"))
+        self.review_contrast = QDoubleSpinBox()
+        self.review_contrast.setRange(0, 10); self.review_contrast.setValue(1.3)
+        self.review_contrast.setSingleStep(.1); row.addWidget(self.review_contrast)
+        self.review_deconv = QCheckBox("候选去卷积"); row.addWidget(self.review_deconv)
+        gl.addLayout(row)
+        b = QPushButton("锁定人工点，比较当前与候选参数"); b.clicked.connect(self.compare_review); gl.addWidget(b)
+        b = QPushButton("本图盲评记录与脑片参数"); b.clicked.connect(self.review_history); gl.addWidget(b)
         self.acc_info = QLabel(""); self.acc_info.setWordWrap(True); gl.addWidget(self.acc_info)
         layout.addWidget(g)
 
@@ -73,9 +83,8 @@ class AccuracyMixin:
     def acc_new_box(self):
         if self.slide is None:
             return
-        if self.cells_for(self.image) is None:
-            self.info("这张图片还没有识别细胞，请先识别。")
-            return
+        self._blind_context = (id(self.project), id(self.image), self.acc_ch.currentIndex())
+        self._blind_locked = False
         for nm in (BOX_LAYER, PTS_LAYER, RES_LAYER):
             if nm in self.viewer.layers:
                 self.viewer.layers.remove(nm)
@@ -90,7 +99,7 @@ class AccuracyMixin:
                                        border_color="white", border_width=0.1)
         # 软件识别的细胞先隐藏，免得影响人工判断
         for l in self.viewer.layers:
-            if l.name.startswith("细胞-"):
+            if l.name.startswith(("细胞-", "预览", "盲评-", "预处理-")):
                 l.visible = False
         self.viewer.layers.selection.active = layer
         layer.mode = "add"
@@ -113,6 +122,9 @@ class AccuracyMixin:
         pts = np.asarray(self.viewer.layers[PTS_LAYER].data)
         c = self.acc_ch.currentIndex()
         df = self.cells_for(self.image)
+        if df is None:
+            self.info("尚无整图结果。可直接使用下方的盲评比较。"); return
+        self._blind_locked = True
         res = A.check(df, c, box, pts[:, ::-1][:, :2] if pts.shape[1] == 2 else pts[:, [-1, -2]],
                       self.slide.pixel_size_um)
         from ..core.manual import section_of
@@ -175,3 +187,128 @@ class AccuracyMixin:
             self.project.accuracy.pop()
             self.project.save()
             self._acc_summary_text()
+
+    def compare_review(self):
+        from dataclasses import asdict
+        from ..core.field_review import compare, effective_settings, pooled_reviews, section_key
+        from ..core.slide_io import open_slide
+        from ..core import unmix
+        from matplotlib.path import Path
+        from matplotlib.transforms import Bbox
+        box = self._acc_box0()
+        project, image, c = self.project, self.image, self.acc_ch.currentIndex()
+        context = getattr(self, "_blind_context", None)
+        if (not box or PTS_LAYER not in self.viewer.layers or not context or
+                context[0] != id(project) or context[1] != id(image) or context[2] != c
+                or getattr(self, "_blind_locked", False)):
+            self.info("请选好通道并重新放一个盲评框。"); return
+        if self.task is not None and self.task.isRunning():
+            self.info("请等待当前任务完成。"); return
+        x, y, w, h = box
+        def contains(sec):
+            sx, sy, sw, sh = sec.bbox0
+            return sec.enabled and sx <= x and sy <= y and x+w <= sx+sw and y+h <= sy+sh
+        sections = [sec for sec in image.sections if contains(sec)]
+        if len(sections) != 1 or w <= 0 or h <= 0:
+            self.info("请先拆分脑片，并把整个检查框放在一张已启用脑片内。"); return
+        sec = sections[0]
+        rect = Bbox.from_bounds(*box)
+        if any(Path(poly).intersects_bbox(rect) for poly in image.exclusions if len(poly)>=3):
+            self.info("检查框与排除区域重叠，请移动检查框。"); return
+        pts = np.asarray(self.viewer.layers[PTS_LAYER].data)[:, [-1,-2]]
+        pts = pts[(pts[:,0]>=x)&(pts[:,0]<x+w)&(pts[:,1]>=y)&(pts[:,1]<y+h)]
+        if len(sec.contour0)>2 and not Path(sec.contour0).contains_points(
+                [[x,y],[x+w,y],[x,y+h],[x+w,y+h],[x+w/2,y+h/2]]).all():
+            self.info("请将检查框移到组织内部，或缩小方框。"); return
+        if not project.detection.channels[c].detect:
+            self.info("所选通道未启用细胞识别。"); return
+        question = ("框内没有人工点。确认视野可判读且没有阳性细胞？" if not len(pts)
+                    else f"锁定框内 {len(pts)} 个人工点并揭示对照结果？")
+        if QMessageBox.question(self, "脑片盲评", question) != QMessageBox.Yes:
+            return
+        self._blind_locked = True
+        self.viewer.layers[PTS_LAYER].editable = False
+        self.viewer.layers[BOX_LAYER].editable = False
+        candidate = dict(min_contrast=self.review_contrast.value(), deconv=self.review_deconv.isChecked())
+        field_type = self.acc_field.currentText()
+        px = self.slide.pixel_size_um
+        def job(task):
+            slide = open_slide(image.path, z_mode=project.z_mode)
+            try:
+                unmix.prepare(project, slide, image)
+                from copy import deepcopy
+                settings = deepcopy(effective_settings(project.detection, image, sec))
+                return compare(slide, sec, settings, c, box, pts, candidate, task.is_cancelled), settings
+            finally:
+                slide.close()
+        def done(payload):
+            if self.project is not project or self.image is not image or self.acc_ch.currentIndex() != c:
+                return
+            (results, lost, gained, confirmed), settings = payload
+            record = {"脑片":sec.name, "通道":project.channel_names[c], "视野":list(box), "类型":field_type,
+                      "人工点":pts.tolist(), "面积mm2":w*h*(px/1000)**2, "当前":asdict(settings.channels[c]),
+                      "候选":{**asdict(settings.channels[c]), **candidate},
+                      "新增":len(gained), "新增获确认":confirmed, "仅当前":len(lost)}
+            lines = [f"{sec.name} · {project.channel_names[c]} · 人工 {len(pts)} 个"]
+            for label, (score, frame) in zip(("当前","候选"), results):
+                record[label+"计数"] = {k:score[k] for k in ("tp","fp","fn")}
+                lines.append(f"{label}：TP {score['tp']}，FP {score['fp']}，FN {score['fn']}，F1 {_score(score['f1'], '.2f')}")
+            lines.append(f"新增 {len(gained)} 个，人工确认 {confirmed} 个；仅当前设置检出 {len(lost)} 个。")
+            for label, data, ids, color in (("仅当前", results[0][1], lost, "cyan"),("仅候选", results[1][1], gained,"orange")):
+                name = "盲评-"+label
+                if name in self.viewer.layers:
+                    self.viewer.layers.remove(name)
+                polygons = [np.asarray(data.iloc[i].contour)[:,::-1] for i in ids if len(data.iloc[i].contour)>2]
+                if polygons:
+                    self.viewer.add_shapes(polygons, shape_type="polygon", name=name, edge_color=color,
+                                           face_color="transparent", edge_width=max(1.,w/400))
+            if not len(pts):
+                area = record["面积mm2"]
+                lines.append(f"阴性区误检/mm²：当前 {results[0][0]['fp']/area:.1f}，候选 {results[1][0]['fp']/area:.1f}")
+            record["采用候选"] = False
+            from ..core.detection import raw_signature
+            record["识别条件"] = [raw_signature(settings), project.z_mode, float(px)]
+            record["位置标识"] = section_key(sec)
+            image.field_reviews.append(record)
+            lines.append(pooled_reviews(image.field_reviews, record))
+            project.save()
+            prompt = QMessageBox(self)
+            prompt.setWindowTitle("脑片盲评结果"); prompt.setText("\n".join(lines))
+            apply_btn = prompt.addButton(f"应用到 {sec.name} 的{project.channel_names[c]}并重新识别", QMessageBox.AcceptRole)
+            keep = prompt.addButton("保留当前设置", QMessageBox.RejectRole)
+            prompt.setDefaultButton(keep); prompt.exec_()
+            if prompt.clickedButton() is apply_btn:
+                image.review_settings.setdefault(section_key(sec), {})[str(c)] = dict(candidate)
+                record["采用候选"] = True
+                image.status = "盲评参数已更新，待重新识别"
+                project.save()
+                self.run_detection(False)
+        self.run_task(job, done, label="正在比较当前与候选参数…")
+
+    def review_history(self):
+        from ..core.field_review import section_key
+        if self.image is None:
+            return
+        im = self.image
+        dlg = QMessageBox(self); dlg.setWindowTitle("本图盲评记录与脑片参数")
+        lines = []
+        for sec in im.sections:
+            for ch, values in im.review_settings.get(section_key(sec), {}).items():
+                lines.append(f"{sec.name} · {self.ch_name(int(ch))}：局部对比度 {values['min_contrast']:g}，"
+                             f"去卷积{'开' if values['deconv'] else '关'}")
+        dlg.setText("\n".join(lines) or "各脑片使用项目参数。")
+        history = []
+        for r in im.field_reviews:
+            a,b = r["当前计数"], r["候选计数"]
+            history.append(f"{r['脑片']} · {r['通道']} · {r['类型']} · 框 {r['视野']}\n"
+                           f"当前 TP/FP/FN {a['tp']}/{a['fp']}/{a['fn']}；候选 {b['tp']}/{b['fp']}/{b['fn']}；"
+                           f"新增确认 {r['新增获确认']}/{r['新增']}")
+        if history:
+            dlg.setDetailedText("\n".join(history))
+        dlg.addButton("关闭",QMessageBox.RejectRole)
+        reset = dlg.addButton("恢复本图所有脑片的项目参数…",QMessageBox.ActionRole) if lines else None
+        dlg.exec_()
+        if reset is not None and dlg.clickedButton() is reset and QMessageBox.question(
+                self,"恢复项目参数","恢复本图所有脑片的识别参数并重新识别？") == QMessageBox.Yes:
+            im.review_settings.clear(); im.status = "参数已恢复，待重新识别"
+            self.project.save(); self.run_detection(False)

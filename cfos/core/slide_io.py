@@ -324,10 +324,13 @@ def open_slide(path: str | Path, z_mode: str | None = None) -> Slide:
         if itype == "FullResolution" and name:
             names.append((name, rgb))
     if not names and tif.is_ome:
-        for tag in re.findall(r"<Channel\b[^>]*>", tif.ome_metadata or ""):
-            m = re.search(r'\bName="([^"]*)"', tag)
-            cm = re.search(r'\bColor="(-?\d+)"', tag)
-            names.append((m.group(1) if m else "", _ome_color(cm.group(1)) if cm else None))
+        try:
+            pixels = ET.fromstring(tif.ome_metadata or "").find("./{*}Image/{*}Pixels")
+        except ET.ParseError:
+            pixels = None
+        if pixels is not None:
+            names = [(ch.get("Name", ""), _ome_color(ch.get("Color")))
+                     for ch in pixels.findall("{*}Channel")]
     for i in range(n_ch):
         if i < len(names):
             nm, rgb = names[i]

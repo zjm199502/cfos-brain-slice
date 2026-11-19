@@ -57,6 +57,8 @@ class ImageEntry:
     size: int | None = None                          # 文件大小（重新定位时确认是同一个文件）
 
     storage_key: str = ""
+    review_settings: dict = field(default_factory=dict)
+    field_reviews: list = field(default_factory=list)
 
     def __post_init__(self):
         if self.storage_key and (self.storage_key in (".", "..") or
@@ -64,7 +66,7 @@ class ImageEntry:
             raise ValueError("项目图片标识无效")
 
     def to_dict(self):
-        return {"path": self.path, "storage_key": self.key, "rel": self.rel, "size": self.size, "status": self.status, "error": self.error,
+        return {"path": self.path, "review_settings": self.review_settings, "field_reviews": self.field_reviews, "storage_key": self.key, "rel": self.rel, "size": self.size, "status": self.status, "error": self.error,
                 "sections": [s.to_dict() for s in self.sections],
                 "exclusions": [[list(map(float, p)) for p in poly] for poly in self.exclusions],
                 "rois": [{"name": r["name"], "polygon": [list(map(float, p)) for p in r["polygon"]]} for r in self.rois],
@@ -73,7 +75,8 @@ class ImageEntry:
 
     @staticmethod
     def from_dict(d):
-        return ImageEntry(path=d["path"], storage_key=d.get("storage_key", ""), rel=d.get("rel"), size=d.get("size"),
+        return ImageEntry(path=d["path"], review_settings=d.get("review_settings", {}),
+                          field_reviews=d.get("field_reviews", []), storage_key=d.get("storage_key", ""), rel=d.get("rel"), size=d.get("size"),
                           status=d.get("status", "未处理"), error=d.get("error", ""),
                           sections=[Section.from_dict(s) for s in d.get("sections", [])],
                           exclusions=[[tuple(p) for p in poly] for poly in d.get("exclusions", [])],

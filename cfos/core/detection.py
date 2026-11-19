@@ -130,11 +130,18 @@ def section_norms(slide, section, channels, model=None):
         return {}
     lv = slide.level_for_pixel_size(2.0)
     indices = list(channels)
-    if model is not None and np.asarray(model.matrix).shape == (len(slide.channels),) * 2:
-        from .unmix import apply
-        planes = apply(slide.read(lv, section.bbox0), model, indices)
-    else:
-        planes = slide.read(lv, section.bbox0, indices)
+    def read_planes(box):
+        if model is not None and np.asarray(model.matrix).shape == (len(slide.channels),) * 2:
+            from .unmix import apply
+            return apply(slide.read(lv, box), model, indices)
+        return slide.read(lv, box, indices)
+
+    x, y, w, h = section.bbox0
+    tif = getattr(slide, "_tif", None)
+    if (tif is not None and slide.downsample(lv) == 1 and w*h > 8_000_000
+            and tif.pages[0].dtype.kind == "u" and tif.pages[0].dtype.itemsize <= 2):
+        return _band_norms(section, channels, read_planes)
+    planes = read_planes(section.bbox0)
     mask = section_mask(section, planes.shape[1:], slide.downsample(lv))
     use_mask = mask.any()
     norms = {}
@@ -143,6 +150,39 @@ def section_norms(slide, section, channels, model=None):
         lo, hi, bg = np.percentile(plane[mask] if use_mask else plane.ravel(),
                                    [params.norm_low, params.norm_high, 50])
         norms[c] = lo, hi, max(float(bg), 1.0)
+    return norms
+
+
+def _band_norms(section, channels, read_planes):
+    """Exact linear percentiles without allocating a full-resolution scan and its mask."""
+    from dataclasses import replace
+    x, y, w, h = section.bbox0
+    hist = np.zeros((len(channels), 65536), np.int64)
+    unmasked = np.zeros_like(hist)
+    tissue_seen = False
+    band = max(1, min(256, 500_000 // max(1, w)))
+    for offset in range(0, h, band):
+        box = (x, y+offset, w, min(h-offset, band))
+        planes = read_planes(box)
+        if not planes.size:
+            continue
+        mask = section_mask(replace(section, bbox0=box), planes.shape[1:], 1)
+        if mask.any():
+            tissue_seen = True
+            for i, plane in enumerate(planes):
+                hist[i] += np.bincount(plane[mask], minlength=65536)
+        elif not tissue_seen:
+            for i, plane in enumerate(planes):
+                unmasked[i] += np.bincount(plane.ravel(), minlength=65536)
+    norms = {}
+    for (c, p), counts in zip(channels.items(), hist if tissue_seen else unmasked):
+        cumulative = counts.cumsum()
+        ranks = (cumulative[-1]-1)*np.array([p.norm_low, p.norm_high, 50])/100
+        left = np.floor(ranks)
+        lo = np.searchsorted(cumulative, left, side="right")
+        hi = np.searchsorted(cumulative, np.ceil(ranks), side="right")
+        lower, upper, bg = lo + (ranks-left)*(hi-lo)
+        norms[c] = lower, upper, max(float(bg), 1.0)
     return norms
 
 
@@ -299,7 +339,7 @@ def _segment_measure(shape, prob, dist, points, nms_thresh, img, c, tile, geo, c
 
 
 def detect_section(slide: Slide, section: Section, settings: DetectionSettings,
-                   progress=None, cancel=None, prefilter: bool = True) -> pd.DataFrame:
+                   progress=None, cancel=None, prefilter: bool = True, norms=None) -> pd.DataFrame:
     """识别一张脑片上所有通道的细胞。返回表格：每行一个细胞，坐标为第 0 层像素。
 
     prefilter=False 时只做最基本的筛选（面积 ≥ 2 µm²），面积 / 强度 / 对比度阈值留给 apply_filters，
@@ -317,7 +357,8 @@ def detect_section(slide: Slide, section: Section, settings: DetectionSettings,
     det_chs = [c for c in range(n_ch) if settings.channels.get(c, ChannelParams()).detect]
     um = getattr(settings, "unmix", None)
     um = um if um is not None and np.asarray(um.matrix).shape == (n_ch, n_ch) else None
-    norms = section_norms(slide, section, {c: settings.channels[c] for c in det_chs}, um)
+    if norms is None:
+        norms = section_norms(slide, section, {c: settings.channels[c] for c in det_chs}, um)
     dark_tiles = []
 
     T, ov = settings.tile, settings.overlap
