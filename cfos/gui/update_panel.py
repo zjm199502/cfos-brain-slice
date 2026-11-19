@@ -38,8 +38,8 @@ def about_html() -> str:
     img = (f"<p><img src='{QUrl.fromLocalFile(logo).toString()}' width='96' height='96'></p>"
            if os.path.exists(logo) else "")
     return (f"{img}<h2>{APP_NAME} {updater.version_text()}</h2>"
-            "<p>面向小鼠脑切片荧光图像的一体化分析软件：从扫描图到按脑区统计的 cFos 阳性细胞数，"
-            "全部步骤在一个中文界面里完成，只用 CPU，离线运行。原名“cFos 脑片分析”。</p>"
+            "<p>多通道脑片配准与细胞定量。从扫描图到按脑区统计的 cFos 阳性细胞数，"
+            "全部步骤在一个中文界面里完成，只用 CPU，离线运行。原名“FosMap 脑片活动图谱”和“cFos 脑片分析”。</p>"
             f"<ul>{rows}</ul>"
             f"<p>{contact_html()}</p>"
             "<p>本软件使用了 StarDist、DeepSlice、elastix、Allen 小鼠脑图谱（CCFv3）、napari 等公开的软件和数据，"

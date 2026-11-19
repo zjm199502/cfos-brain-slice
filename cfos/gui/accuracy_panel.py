@@ -13,6 +13,10 @@ PTS_LAYER = "人工计数"
 RES_LAYER = "准确率结果"
 
 
+def _score(value, fmt):
+    return format(value, fmt) if np.isfinite(value) else "—"
+
+
 class AccuracyMixin:
     def _accuracy_widgets(self, layout):
         g = QGroupBox("检查识别准确率（人工点数对照）"); gl = QVBoxLayout(g)
@@ -26,6 +30,11 @@ class AccuracyMixin:
         r.addWidget(QLabel("框边长"))
         self.acc_size = QDoubleSpinBox(); self.acc_size.setRange(50, 2000); self.acc_size.setValue(250)
         self.acc_size.setDecimals(0); self.acc_size.setSuffix(" µm"); r.addWidget(self.acc_size)
+        gl.addLayout(r)
+        r = QHBoxLayout()
+        self.acc_field = QComboBox()
+        self.acc_field.addItems(["常规", "弱阳性", "密集核", "强背景", "阴性组织", "分块接缝"])
+        r.addWidget(QLabel("视野类型")); r.addWidget(self.acc_field)
         gl.addLayout(r)
         r = QHBoxLayout()
         b = QPushButton("放一个检查框"); b.clicked.connect(self.acc_new_box); r.addWidget(b)
@@ -57,8 +66,8 @@ class AccuracyMixin:
         if s is None or s.empty:
             self.acc_info.setText("还没有检查记录。")
             return
-        lines = [f"{r['通道']}：{int(r['检查方框数'])} 个框，人工 {r['人工计数']} / 软件 {r['软件识别']}，"
-                 f"查准率 {r['查准率']:.0%}，查全率 {r['查全率']:.0%}，F1 {r['F1']:.2f}" for _, r in s.iterrows()]
+        lines = [f"{r['通道']} · {r['视野类型']} · {r['模型']} · {r['参数编号']}：{int(r['检查方框数'])} 个框，人工 {r['人工计数']} / 软件 {r['软件识别']}，"
+                 f"查准率 {_score(r['查准率'], '.0%')}，查全率 {_score(r['查全率'], '.0%')}，F1 {_score(r['F1'], '.2f')}" for _, r in s.iterrows()]
         self.acc_info.setText("累计：\n" + "\n".join(lines))
 
     def acc_new_box(self):
@@ -102,26 +111,27 @@ class AccuracyMixin:
             self.info("请先点“放一个检查框”，并在框里点出细胞。")
             return
         pts = np.asarray(self.viewer.layers[PTS_LAYER].data)
-        if len(pts) == 0:
-            self.info("还没有在框里点细胞。")
-            return
         c = self.acc_ch.currentIndex()
         df = self.cells_for(self.image)
         res = A.check(df, c, box, pts[:, ::-1][:, :2] if pts.shape[1] == 2 else pts[:, [-1, -2]],
                       self.slide.pixel_size_um)
         from ..core.manual import section_of
         sec = section_of(self.image, box[0] + box[2] / 2, box[1] + box[3] / 2)
+        res["miss_details"] = A.miss_details(self.project, self.image, c, res["missed_xy"], self.slide.pixel_size_um)
+        res["field_type"] = self.acc_field.currentText()
+        res["field_area_mm2"] = box[2] * box[3] * (self.slide.pixel_size_um / 1000) ** 2
         A.record(self.project, self.image, sec, c, box, res, self.project.detection.channels[c].model
                  if c in self.project.detection.channels else "")
         self.project.save()
         self._acc_show_result(res)
         self._acc_summary_text()
         p, r, f = res["precision"], res["recall"], res["f1"]
+        from collections import Counter
+        counts = Counter(item["线索"] for item in res["miss_details"])
+        clues = "\n".join(f"{key}：{n} 个" for key, n in counts.items())
         self.info(f"这个框：人工 {res['n_manual']} 个，软件 {res['n_auto']} 个，配对成功 {res['tp']} 个；\n"
                   f"漏检 {res['fn']} 个（红），误检 {res['fp']} 个（黄）。\n"
-                  f"查准率 {p:.0%}（软件找到的里有多少是真的）\n查全率 {r:.0%}（真的细胞里软件找到多少）\nF1 {f:.2f}\n\n"
-                  "一般 F1 ≥ 0.85 算好；查全率低 → 降低置信度阈值或用自己的标注微调模型；"
-                  "查准率低 → 提高阈值或调高面积下限 / 对比度下限。")
+                  f"查准率 {_score(p, '.0%')}，查全率 {_score(r, '.0%')}，F1 {_score(f, '.2f')}\n{clues}")
 
     def _acc_show_result(self, res):
         if RES_LAYER in self.viewer.layers:

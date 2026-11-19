@@ -413,19 +413,10 @@ class MainWindow(UpdateMixin, TeachingMixin, FigureMixin, AccuracyMixin, Relocat
         if not files:
             return
         bad, notes = [], []
-        existing = {im.path for im in self.project.images}
         for f in files:
-            if f in existing:
-                continue
             try:
-                sl = open_slide(f)
-                if self.project.channel_names and len(sl.channels) != len(self.project.channel_names):
-                    bad.append(f"{Path(f).name}：通道数（{len(sl.channels)}）与项目中其他图片不同")
-                    sl.close(); continue
-                self.project.ensure_channels(sl.channels)
-                notes += [f"{Path(f).name}：{n}" for n in getattr(sl, "notes", [])]
-                sl.close()
-                self.project.images.append(ImageEntry(path=f))
+                _, messages = self.project.import_image(f)
+                notes.extend(f"{Path(f).name}：{msg}" for msg in messages)
             except Exception as e:  # noqa: BLE001
                 bad.append(f"{Path(f).name}：{e}")
         self.project.save()
@@ -440,8 +431,7 @@ class MainWindow(UpdateMixin, TeachingMixin, FigureMixin, AccuracyMixin, Relocat
     def add_images_programmatic(self, files):
         """测试和命令行使用。"""
         for f in files:
-            sl = open_slide(f); self.project.ensure_channels(sl.channels); sl.close()
-            self.project.images.append(ImageEntry(path=str(f)))
+            self.project.import_image(f)
         self.project.save()
         self._refresh_images(); self._refresh_channels_form(); self._refresh_enabled()
         self.image_combo.setCurrentIndex(0)
@@ -1251,6 +1241,9 @@ class MainWindow(UpdateMixin, TeachingMixin, FigureMixin, AccuracyMixin, Relocat
             mdl.setCurrentIndex(max(0, mdl.findData(p.model)))
             mdl.setToolTip("“用自己的标注改进识别模型”训练出的模型会出现在这里。换模型后需要重新识别。")
             f.addRow(on); f.addRow("识别模型", mdl); f.addRow("识别灵敏度阈值", prob); f.addRow("最小面积", amin); f.addRow("最大面积", amax)
+            skip_dark = QCheckBox("跳过极暗分块"); skip_dark.setChecked(p.skip_dark_tiles)
+            skip_dark.setToolTip("对照弱阳性漏检时可取消勾选，然后重新识别。")
+            f.addRow(skip_dark)
             f.addRow("最低平均强度", imin)
             gm = QDoubleSpinBox(); gm.setRange(0.2, 2.0); gm.setSingleStep(0.1); gm.setValue(p.gamma)
             gm.setToolTip("识别前把图像提亮的程度：小于 1 时暗的细胞更容易被识别（DAPI 建议 0.5）。只影响识别，不影响显示。")
@@ -1281,8 +1274,9 @@ class MainWindow(UpdateMixin, TeachingMixin, FigureMixin, AccuracyMixin, Relocat
             f.addRow(dcv); f.addRow(dch); f.addRow("去卷积模糊程度", dcb); f.addRow("去卷积迭代次数", dci)
 
             def apply(_=None, c=c, on=on, prob=prob, amin=amin, amax=amax, imin=imin, gm=gm, bgf=bgf,
-                      bgr=bgr, dcv=dcv, dcb=dcb, dci=dci, mct=mct, mdl=mdl):
+                      bgr=bgr, dcv=dcv, dcb=dcb, dci=dci, mct=mct, mdl=mdl, skip_dark=skip_dark):
                 p = self.project.detection.channels[c]
+                p.skip_dark_tiles = skip_dark.isChecked()
                 p.min_contrast = mct.value()
                 p.model = mdl.currentData() or ""
                 p.gamma = gm.value(); p.bg_fold = bgf.value()
@@ -1294,6 +1288,7 @@ class MainWindow(UpdateMixin, TeachingMixin, FigureMixin, AccuracyMixin, Relocat
 
             for wdg in (prob, amin, amax, imin, gm, bgf, bgr, dcb, dci, mct):
                 wdg.valueChanged.connect(apply)
+            skip_dark.toggled.connect(apply)
             on.toggled.connect(apply); dcv.toggled.connect(apply); mdl.currentIndexChanged.connect(apply)
             self.det_rows.addWidget(box)
 

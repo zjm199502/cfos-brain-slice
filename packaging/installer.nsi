@@ -1,14 +1,14 @@
-; FosMap 脑片活动图谱（原名 cFos 脑片分析）Windows 安装程序（NSIS）。由 packaging/build_windows.sh 生成 stage 目录后编译。
+; FosFolio 脑片图册（原名 cFos 脑片分析）Windows 安装程序（NSIS）。由 packaging/build_windows.sh 生成 stage 目录后编译。
 Unicode true
 !define APPNAME "cFos脑片分析"     ; 安装目录和注册表键沿用旧名：旧版升级、补丁手动安装脚本都靠它找到安装位置
-!define DISPNAME "FosMap 脑片活动图谱"
+!define DISPNAME "FosFolio 脑片图册"
 !define OLDDISP "cFos 脑片分析"
-!define VERSION "0.8.1"
+!define VERSION "0.8.6"
 !ifndef STAGE
   !define STAGE "stage"
 !endif
 !ifndef OUTFILE
-  !define OUTFILE "FosMap脑片活动图谱_v0.8.1_Windows安装包.exe"
+  !define OUTFILE "FosFolio脑片图册_v0.8.6_Windows安装包.exe"
 !endif
 
 Name "${DISPNAME} ${VERSION}"

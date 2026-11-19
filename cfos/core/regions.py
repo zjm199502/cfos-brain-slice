@@ -186,8 +186,10 @@ def assign_regions(cells: pd.DataFrame, slide: Slide, sections: list[Section], r
         inten = cached_intensity_sums(slide, s, lab, hemi, ds, reg, results_dir, image_key, exclusions, wp,
                                       unmix_model) \
             if intensity else {}
-        idx, cnt = np.unique(np.stack([lab.ravel(), hemi.ravel()], 1), axis=0, return_counts=True)
-        for (ri, hm), n in zip(idx, cnt):
+        counts = np.bincount((lab.astype(np.int64) * 3 + hemi).ravel())
+        for key in np.flatnonzero(counts):
+            ri, hm = divmod(int(key), 3)
+            n = counts[key]
             if ri:
                 row = {"section": s.name, "region_index": int(ri), "hemisphere": int(hm), "area_mm2": n * pix_mm2}
                 if intensity:
@@ -256,22 +258,18 @@ def region_summary(cells: pd.DataFrame, areas: pd.DataFrame, channel_names, grou
     icols = [c for c in a.columns if c == "n_px" or c.startswith("sum_ch")]
     aa = pd.concat([a_h, a_b]).groupby(gcols + ["region", "半脑"], as_index=False)[["area_mm2"] + icols].sum()
     cnt_cols = [c for c in t.columns if c not in tuple(group_cols) + ("region", "半脑")]
-    t = t.merge(aa, on=gcols + ["region", "半脑"], how="outer" if icols else "left")
-    if icols:   # 没有细胞、但有面积的脑区也列出来（平均荧光强度仍有意义），细胞数为 0
-        for col in cnt_cols:
-            v = t[col].fillna(0)
-            t[col] = v.astype(int) if (v % 1 == 0).all() else v
-        for g in group_cols:
-            if g not in gcols and g in t.columns:
-                t[g] = t[g].ffill().bfill()
+    t = t.merge(aa, on=gcols + ["region", "半脑"], how="outer")
+    for col in cnt_cols:
+        if "比例" not in col:
+            t[col] = t[col].fillna(0).astype(int)
     t.insert(len(group_cols), "脑区缩写", t["region"].map(st["acronym"]))
     t.insert(len(group_cols) + 1, "脑区名称", t["region"].map(st["name"]))
     t.insert(len(group_cols) + 2, "层级", t["region"].map(lambda i: len(anc.get(i, [])) - 1))
-    t["面积 (mm²)"] = t.pop("area_mm2").round(4)
+    t["面积 (mm²)"] = t.pop("area_mm2")
     for nm in channel_names:
         col = f"{nm}+"
         if col in t.columns:
-            t[f"{nm}+ 密度 (个/mm²)"] = (t[col] / t["面积 (mm²)"]).round(1)
+            t[f"{nm}+ 密度 (个/mm²)"] = (t[col] / t["面积 (mm²)"].replace(0, np.nan)).round(1)
     if icols:
         # 平均荧光强度（原始灰度值）；相对值 = 除以同一张脑片整个组织（root，左右合计）的平均值，便于不同脑片比较
         npx = t.pop("n_px").replace(0, np.nan)

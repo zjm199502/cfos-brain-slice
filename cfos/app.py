@@ -8,7 +8,7 @@ ASSETS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "gui", "assets
 
 
 def app_icon():
-    """程序图标（FosMap 活动热图点阵）：小尺寸用点更少的简化版，缩小后不糊。"""
+    """程序图标（FosFolio 冠状脑片）：小尺寸用点更少的简化版，缩小后不糊。"""
     from qtpy.QtGui import QIcon
     ic = QIcon()
     for n in (16, 32, 64, 128, 256):

@@ -6,6 +6,8 @@
 from __future__ import annotations
 
 import datetime as _dt
+import hashlib
+import json
 
 import numpy as np
 import pandas as pd
@@ -45,7 +47,7 @@ def check(cells: pd.DataFrame, channel: int, box0, manual_xy, px_um: float, matc
     tp = len(pairs)
     prec = tp / len(auto) if len(auto) else float("nan")
     rec = tp / len(man) if len(man) else float("nan")
-    f1 = 2 * prec * rec / (prec + rec) if (prec == prec and rec == rec and prec + rec) else float("nan")
+    f1 = 2 * tp / (len(man) + len(auto)) if len(man) + len(auto) else float("nan")
     return {"n_manual": int(len(man)), "n_auto": int(len(auto)), "tp": tp, "fn": len(fn), "fp": len(fp),
             "precision": prec, "recall": rec, "f1": f1,
             "missed_xy": man[fn].tolist(), "false_xy": auto[fp].tolist(), "manual_xy": man.tolist()}
@@ -61,6 +63,18 @@ def record(project, image, section: str, channel: int, box0, res: dict, model: s
          "查全率": round(res["recall"], 4) if res["recall"] == res["recall"] else None,
          "F1": round(res["f1"], 4) if res["f1"] == res["f1"] else None,
          "人工点": [[round(a, 1), round(b, 1)] for a, b in res["manual_xy"]]}
+    from .detection import raw_signature
+    snapshot = {"候选": json.loads(raw_signature(project.detection)),
+                "通道": project.detection.channels[channel].to_dict(), "投影": project.z_mode}
+    encoded = json.dumps(snapshot, sort_keys=True, ensure_ascii=False)
+    r["检查时参数"] = encoded
+    r["参数编号"] = hashlib.sha256(encoded.encode()).hexdigest()[:12]
+    r["原图"] = image.path
+    r["视野类型"] = res.get("field_type", "常规")
+    r["检查面积 mm²"] = res.get("field_area_mm2")
+    r["动物"] = project.samples.get(f"{image.key}/{section}", {}).get("animal", "")
+    r["视野编号"] = json.dumps([image.key, section, list(box0)], ensure_ascii=False)
+    r["漏检线索"] = res.get("miss_details", [])
     project.accuracy.append(r)
     return r
 
@@ -71,10 +85,64 @@ def summary(project) -> pd.DataFrame:
         return pd.DataFrame()
     df = pd.DataFrame(project.accuracy)
     rows = []
-    for ch, g in df.groupby("通道"):
+    for key in ("模型", "参数编号", "视野类型"):
+        if key not in df:
+            df[key] = "历史未记录"
+        df[key] = df[key].fillna("历史未记录")
+    keys = ["通道", "模型", "参数编号", "视野类型"]
+    if "视野编号" in df:
+        identified = df["视野编号"].notna()
+        df = pd.concat([df[~identified], df[identified].drop_duplicates(keys + ["视野编号"], keep="last")])
+    for (ch, model, config, field), g in df.groupby(keys):
         tp, nm, na = g["配对成功"].sum(), g["人工计数"].sum(), g["软件识别"].sum()
         p = tp / na if na else float("nan"); r = tp / nm if nm else float("nan")
-        f = 2 * p * r / (p + r) if (p == p and r == r and p + r) else float("nan")
-        rows.append({"通道": ch, "检查方框数": len(g), "人工计数": int(nm), "软件识别": int(na), "配对成功": int(tp),
+        f = 2 * tp / (nm + na) if nm + na else float("nan")
+        area = g["检查面积 mm²"].sum(min_count=len(g)) if "检查面积 mm²" in g else np.nan
+        rows.append({"通道": ch, "模型": model, "视野类型": field, "计数偏差": int(na - nm),
+                     "误检数/mm²": (na - tp) / area if area > 0 else np.nan, "参数编号": config, "检查方框数": len(g), "人工计数": int(nm), "软件识别": int(na), "配对成功": int(tp),
                      "查准率": p, "查全率": r, "F1": f})
     return pd.DataFrame(rows)
+
+def miss_details(project, image, channel, points, px_um):
+    """在漏检点附近查找候选；阈值按当前项目设置解释。"""
+    from .manual import section_of
+    from scipy.spatial import cKDTree
+    if not len(points):
+        return []
+    sections = {s.name: s for s in image.sections if s.enabled}
+    cache = {}
+    out = []
+    p = project.detection.channels[channel]
+    for x, y in points:
+        name = section_of(image, x, y)
+        if name not in cache:
+            raw = project.load_part(image, sections[name]) if name in sections else None
+            candidates = raw[raw["channel"] == channel] if raw is not None else None
+            tree = cKDTree(candidates[["x", "y"]]) if candidates is not None and len(candidates) else None
+            tiles = raw.attrs.get("dark_tiles") if raw is not None else None
+            cache[name] = candidates, tree, tiles
+        candidates, tree, tiles = cache[name]
+        nearby = tree.query_ball_point([x, y], MATCH_UM / px_um) if tree is not None else []
+        if nearby:
+            reasons = set()
+            for i in nearby:
+                row = candidates.iloc[i]
+                failed = []
+                if not p.min_area_um2 <= row.area_um2 <= p.max_area_um2:
+                    failed.append("面积")
+                if row[f"mean_ch{channel}"] < max(p.min_intensity, p.bg_fold * row.get("background", 0)):
+                    failed.append("强度")
+                if p.min_contrast > 0 and row.get("contrast", np.nan) < p.min_contrast:
+                    failed.append("对比度")
+                reasons.add("、".join(failed) if failed else "通过当前筛选，请查配对及人工编辑")
+            reason = "附近候选：" + " / ".join(sorted(reasons))
+        elif candidates is None:
+            reason = "缺少对应脑片候选缓存"
+        elif tiles is None:
+            reason = "无邻近候选，旧缓存缺少暗块记录"
+        elif any(c == channel and x0 <= x < x1 and y0 <= y < y1 for c, x0, y0, x1, y1 in tiles):
+            reason = "所在分块因亮度过低跳过"
+        else:
+            reason = "无邻近原始候选（含基础面积和组织范围筛选）"
+        out.append({"x": float(x), "y": float(y), "线索": reason})
+    return out

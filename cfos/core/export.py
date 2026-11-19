@@ -26,13 +26,16 @@ def build_tables(project: Project, intensity: bool | None = None) -> dict[str, p
     region_img, region_sec, roi_rows = [], [], []
     for im in project.images:
         df = project.load_cells(im)
-        if df is None or df.empty:
+        if df is None:
             continue
         enabled = {s.name for s in im.sections if s.enabled}
+        enabled.intersection_update(df.attrs.get("processed_sections", enabled))
+        if not enabled:
+            continue
         df = df[df["section"].isin(enabled)]
         from .pipeline import drop_excluded
         df = drop_excluded(df, im)
-        if "combo" not in df.columns:
+        if len(df) and "combo" not in df.columns:
             from .slide_io import open_slide
             sl = open_slide(im.path)
             df = colocalize(df, sl.pixel_size_um, project.coloc, nucleus_channel(names))
@@ -43,6 +46,12 @@ def build_tables(project: Project, intensity: bool | None = None) -> dict[str, p
         cells.insert(0, "图片", im.key)
         s = summarize(cells, names, group_cols=("图片", "section"), require_nucleus=project.coloc.require_nucleus)
         from .coloc import add_nucleus_ratios
+        covered = pd.DataFrame([(im.key, sec.name) for sec in im.sections if sec.name in enabled],
+                               columns=["图片", "section"])
+        s = covered.merge(s, on=["图片", "section"], how="left")
+        for col in s.columns.difference(["图片", "section"]):
+            if "比例" not in col:
+                s[col] = s[col].fillna(0).astype(int)
         s = add_nucleus_ratios(s, names)     # v0.8.3：X+ 占 DAPI+ 的比例 %（推荐主指标）
         # 动物、组别、前后位置（按动物和 Bregma 排序，方便看连续切片）
         from . import registration as _R
@@ -69,12 +78,13 @@ def build_tables(project: Project, intensity: bool | None = None) -> dict[str, p
         per_section.append(s)
         from .slide_io import open_slide as _open
         _sl = _open(im.path); px = _sl.pixel_size_um
-        reg_secs = [s_ for s_ in im.sections if s_.enabled and s_.registration.get("plane")]
+        reg_secs = [s_ for s_ in im.sections if s_.name in enabled and s_.registration.get("plane")]
         if reg_secs:
             from .regions import assign_regions, region_summary
             from .atlas import load_atlas
             cells, areas = assign_regions(cells, _sl, reg_secs, project.results_dir, im.key, im.exclusions,
                                           intensity=intensity, unmix_model=um)
+            areas["图片"] = im.key
             rcells = cells[cells["section"].isin({s_.name for s_ in reg_secs})]
             region_sec.append(region_summary(rcells, areas, names, ("图片", "section"), project.coloc.require_nucleus))
             st = load_atlas().structures.set_index("index")
@@ -300,7 +310,7 @@ def params_table(project: Project) -> pd.DataFrame:
         from .accuracy import summary, MATCH_UM
         acc = summary(project)
         for _, a in acc.iterrows():
-            rows.append((f"{a['通道']} 识别准确率（人工点数对照，{int(a['检查方框数'])} 个方框）",
+            rows.append((f"{a['通道']} 识别准确率（{a['模型']}，{a['视野类型']}，参数 {a['参数编号']}，{int(a['检查方框数'])} 个方框）",
                          f"人工 {a['人工计数']} 个，软件 {a['软件识别']} 个，配对 {a['配对成功']} 个；"
                          f"查准率 {a['查准率']:.1%}，查全率 {a['查全率']:.1%}，F1 {a['F1']:.3f}（配对距离 ≤ {MATCH_UM:g} µm）"))
     except Exception:  # noqa: BLE001
@@ -341,6 +351,11 @@ def export_excel(project: Project, path: str | Path, masks: bool = True, progres
     if "按脑区×脑片" in tables:   # 只在导出的 Excel 里加（组间统计等内部计算不需要）
         from .region_sets import annotate
         tables["按脑区×脑片"] = annotate(tables["按脑区×脑片"])
+    if project.accuracy:
+        from .accuracy import summary
+        tables["准确率汇总"] = summary(project)
+        fields = pd.DataFrame(project.accuracy)
+        tables["准确率视野"] = fields.drop(columns=["人工点", "漏检线索"], errors="ignore")
     tables["分析参数"] = params_table(project)
     try:
         _write_xlsx(tables, path)
@@ -361,6 +376,10 @@ def _write_xlsx(tables, path):
             df.to_excel(xw, sheet_name=name, index=False)
             ws = xw.sheets[name]
             for j, col in enumerate(df.columns, 1):
+                if col == "面积 (mm²)":
+                    for cell in ws.iter_cols(min_col=j, max_col=j, min_row=2, max_row=ws.max_row):
+                        for value in cell:
+                            value.number_format = "0.0000####"
                 ws.cell(1, j).font = Font(bold=True)
                 ws.cell(1, j).fill = PatternFill("solid", fgColor="DDEBF7")
                 ws.cell(1, j).alignment = Alignment(horizontal="center", wrap_text=True)

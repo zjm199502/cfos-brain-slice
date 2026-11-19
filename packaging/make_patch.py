@@ -38,14 +38,14 @@ if not exist "%SRC%\cfos\__init__.py" (
   exit /b 1
 )
 if not exist "%DST%\main.py" (
-  echo 没有在默认位置找到已安装的 FosMap 脑片活动图谱（原名 cFos 脑片分析）：
+  echo 没有在默认位置找到已安装的 FosFolio 脑片图册（原名 cFos 脑片分析）：
   echo   %DST%
   echo 请把补丁里 app 文件夹中的全部内容，复制到你的安装目录下的 app 文件夹里（覆盖同名文件）。
   pause
   exit /b 1
 )
 echo 将安装补丁 v{VERSION} 到：%DST%
-echo 请先关闭 FosMap 脑片活动图谱（原名 cFos 脑片分析），然后按任意键开始…
+echo 请先关闭 FosFolio 脑片图册（原名 cFos 脑片分析），然后按任意键开始…
 pause >nul
 xcopy "%SRC%" "%DST%" /E /Y /I /Q >nul
 if errorlevel 1 (
@@ -59,9 +59,9 @@ pause
 """
 
 MAC_CMD = """#!/bin/bash
-# FosMap 脑片活动图谱（原名 cFos 脑片分析）补丁 v{VERSION}：手动安装到已安装的程序里（v0.7 等没有自动更新功能的旧版本用）
+# FosFolio 脑片图册（原名 cFos 脑片分析）补丁 v{VERSION}：手动安装到已安装的程序里（v0.7 等没有自动更新功能的旧版本用）
 D="$(cd "$(dirname "$0")" && pwd)"
-for A in "/Applications/FosMap脑片活动图谱.app" "$HOME/Applications/FosMap脑片活动图谱.app" \
+for A in "/Applications/FosFolio脑片图册.app" "$HOME/Applications/FosFolio脑片图册.app" "/Applications/FosMap脑片活动图谱.app" "$HOME/Applications/FosMap脑片活动图谱.app" \
          "/Applications/cFos脑片分析.app" "$HOME/Applications/cFos脑片分析.app"; do
   [ -d "$A" ] && break
 done
@@ -72,7 +72,7 @@ if [ ! -f "$T/main.py" ]; then
   read -r -p "按回车键关闭…"; exit 1
 fi
 echo "将安装补丁 v{VERSION} 到：$T"
-read -r -p "请先退出 FosMap 脑片活动图谱，然后按回车键开始…"
+read -r -p "请先退出 FosFolio 脑片图册，然后按回车键开始…"
 if cp -R "$D/app/." "$T/"; then
   echo; echo "补丁已安装，可以打开软件了。以后的更新可以在软件里“帮助 → 检查更新”自动完成。"
 else
@@ -81,7 +81,7 @@ fi
 read -r -p "按回车键关闭…"
 """
 
-README = """FosMap 脑片活动图谱（原名 cFos 脑片分析）补丁 v{VERSION}
+README = """FosFolio 脑片图册（原名 cFos 脑片分析）补丁 v{VERSION}
 
 【已经装了 v0.8 或更新版本】
 打开软件 →“帮助 → 从文件安装补丁…”→ 选这个 zip 文件（不用解压）→ 重启软件。
@@ -162,7 +162,7 @@ def main():
     (out / "latest.json").write_text(json.dumps(latest, ensure_ascii=False, indent=1), encoding="utf-8")
     # 累积的更新公告（新的在最前面）
     hist = out / "更新公告.md"
-    old = hist.read_text(encoding="utf-8") if hist.exists() else "# FosMap 脑片活动图谱 更新公告\n"
+    old = hist.read_text(encoding="utf-8") if hist.exists() else "# FosFolio 脑片图册 更新公告\n"
     head, _, rest = old.partition("\n")
     marker = f"## v{version}（"
     if marker in rest:          # 重新发布同一版本：替换旧的那一段

@@ -254,7 +254,7 @@ def read_patch_info(zip_path: Path) -> dict:
         try:
             info = json.loads(z.read("patch.json").decode("utf-8"))
         except KeyError:
-            raise ValueError("这不是 FosMap 脑片活动图谱（cFos 脑片分析）的补丁包（里面没有 patch.json）。") from None
+            raise ValueError("这不是 FosFolio 脑片图册（cFos 脑片分析）的补丁包（里面没有 patch.json）。") from None
     for k in ("version", "min_base", "files"):
         if k not in info:
             raise ValueError(f"补丁包信息不完整（缺少 {k}）。")

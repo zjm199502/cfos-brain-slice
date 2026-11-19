@@ -1,6 +1,8 @@
 <img src="cfos/gui/assets/fosmap_128.png" width="96" align="right">
 
-# FosMap 脑片活动图谱（开发中）
+# FosFolio 脑片图册
+
+多通道脑片配准与细胞定量。v0.8.6 起使用新名称，原 FosMap 用户可从软件内检查更新。
 
 原名“cFos 脑片分析”。版本号规则：x.y.1 到 x.y.10 是小版本（补丁，软件内自动更新）；x.y.10 之后的下一个版本是大版本 x.(y+1).0，并发布正式 GitHub Release。例如 0.8.10 之后是 0.9.0。
 

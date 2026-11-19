@@ -56,8 +56,15 @@ class ImageEntry:
     rel: str | None = None                           # 相对项目文件夹的路径（项目整体移动后自动找回）
     size: int | None = None                          # 文件大小（重新定位时确认是同一个文件）
 
+    storage_key: str = ""
+
+    def __post_init__(self):
+        if self.storage_key and (self.storage_key in (".", "..") or
+                                 any(c in self.storage_key for c in "/\\:\x00")):
+            raise ValueError("项目图片标识无效")
+
     def to_dict(self):
-        return {"path": self.path, "rel": self.rel, "size": self.size, "status": self.status, "error": self.error,
+        return {"path": self.path, "storage_key": self.key, "rel": self.rel, "size": self.size, "status": self.status, "error": self.error,
                 "sections": [s.to_dict() for s in self.sections],
                 "exclusions": [[list(map(float, p)) for p in poly] for poly in self.exclusions],
                 "rois": [{"name": r["name"], "polygon": [list(map(float, p)) for p in r["polygon"]]} for r in self.rois],
@@ -66,7 +73,7 @@ class ImageEntry:
 
     @staticmethod
     def from_dict(d):
-        return ImageEntry(path=d["path"], rel=d.get("rel"), size=d.get("size"),
+        return ImageEntry(path=d["path"], storage_key=d.get("storage_key", ""), rel=d.get("rel"), size=d.get("size"),
                           status=d.get("status", "未处理"), error=d.get("error", ""),
                           sections=[Section.from_dict(s) for s in d.get("sections", [])],
                           exclusions=[[tuple(p) for p in poly] for poly in d.get("exclusions", [])],
@@ -75,7 +82,7 @@ class ImageEntry:
 
     @property
     def key(self) -> str:
-        return Path(self.path).stem
+        return self.storage_key or Path(self.path).stem
 
 
 @dataclass
@@ -105,10 +112,37 @@ class Project:
     section_channels: list = field(default_factory=list)  # 找组织轮廓、拆分脑片用哪些通道（空 = 所有在用的通道）（v0.8.2）
     unmix: dict = field(default_factory=dict)  # 识别前去除通道串色的设置（unmix.UnmixSettings 的字典）（v0.8.2）
 
+    reserved_keys: list = field(default_factory=list)
+
     def __post_init__(self):
         from . import slide_io, detection
         slide_io.Z_MODE = self.z_mode
         detection.MODEL_ROOT = str(Path(self.folder) / "models")
+
+    def import_image(self, path):
+        from uuid import uuid4
+        from .slide_io import open_slide
+        path = Path(path).resolve()
+        for entry in self.images:
+            if Path(entry.path).resolve() == path:
+                return entry, []
+        slide = open_slide(str(path))
+        try:
+            if self.channel_names and len(slide.channels) != len(self.channel_names):
+                raise ValueError(f"通道数（{len(slide.channels)}）与项目中其他图片不同")
+            self.ensure_channels(slide.channels)
+            notes = list(getattr(slide, "notes", []))
+        finally:
+            slide.close()
+        used = {key.casefold() for key in self.reserved_keys}
+        used.update(im.key.casefold() for im in self.images)
+        key = path.stem
+        while key.casefold() in used:
+            key = f"{path.stem}~{uuid4().hex[:12]}"
+        self.reserved_keys.append(key)
+        entry = ImageEntry(path=str(path), storage_key=key)
+        self.images.append(entry)
+        return entry, notes
 
     # ---------- 读写 ----------
     @property
@@ -125,7 +159,7 @@ class Project:
                 im.rel = rel_path(im.path, self.folder)
                 im.size = file_size(im.path) or im.size
         d = {
-            "version": 1,
+            "version": 1, "reserved_keys": self.reserved_keys,
             "images": [im.to_dict() for im in self.images],
             "channel_names": self.channel_names,
             "display": {str(k): _display_dict(v) for k, v in self.display.items()},
@@ -174,6 +208,18 @@ class Project:
             d = json.loads(bak.read_text(encoding="utf-8"))  # 主文件损坏（如写入时断电），用备份
         p = Project(folder=folder)
         p.images = [ImageEntry.from_dict(x) for x in d.get("images", [])]
+        from collections import Counter
+        from uuid import uuid5, NAMESPACE_URL
+        p.reserved_keys = list(dict.fromkeys(d.get("reserved_keys", []) + [im.key for im in p.images]))
+        counts = Counter(im.key.casefold() for im in p.images)
+        for im in p.images:
+            if counts[im.key.casefold()] > 1:
+                im.storage_key = f"{Path(im.path).stem}~{uuid5(NAMESPACE_URL, im.path).hex[:12]}"
+                p.reserved_keys.append(im.storage_key)
+                im.status = "旧项目有同名图片，请重新识别并核对分组"
+                im.error = "旧结果归属不明，已保留原文件。"
+            else:
+                im.storage_key = im.key
         p.channel_names = d.get("channel_names", [])
         p.display = {int(k): DisplayChannel(**{kk: vv for kk, vv in v.items() if kk in DisplayChannel.__dataclass_fields__})
                      for k, v in d.get("display", {}).items()}
@@ -474,13 +520,14 @@ class Project:
         try:
             with open(p, "rb") as f:
                 d = pickle.load(f)
-        except Exception:  # noqa: BLE001  文件损坏时当作没有
+            if tuple(d.get("bbox0", ())) != tuple(section.bbox0):
+                return None
+            if signature is not None and d.get("signature") != signature:
+                return None
+            return unpack(d) if d.get("format") else normalize(d["cells"])
+        except (OSError, EOFError, pickle.UnpicklingError, ValueError, TypeError,
+                AttributeError, KeyError, IndexError, ImportError):
             return None
-        if tuple(d.get("bbox0", ())) != tuple(section.bbox0):
-            return None
-        if signature is not None and d.get("signature") != signature:
-            return None
-        return unpack(d) if d.get("format") else normalize(d["cells"])
 
     def load_cells(self, image: ImageEntry) -> pd.DataFrame | None:
         import pickle

@@ -54,11 +54,7 @@ def make_patch(project, slide, image, center_xy, ch: int):
     sec = next((s for s in image.sections if s.enabled and s.bbox0[0] <= center_xy[0] < s.bbox0[0] + s.bbox0[2]
                 and s.bbox0[1] <= center_xy[1] < s.bbox0[1] + s.bbox0[3]), None)
     if sec is not None:
-        det._CUR_UNMIX = getattr(project.detection, "unmix", None)
-        try:
-            lo, hi, _ = det._norm_percentiles(slide, sec, ch, p.norm_low, p.norm_high)
-        finally:
-            det._CUR_UNMIX = None
+        lo, hi, _ = det.section_norms(slide, sec, {ch: p}, getattr(project.detection, "unmix", None))[ch]
     else:
         lo, hi = np.percentile(raw, [p.norm_low, p.norm_high])
     x = det.prepare_input(raw, p, lo, hi, pix)

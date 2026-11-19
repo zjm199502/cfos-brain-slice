@@ -16,6 +16,7 @@ from .slide_io import Slide
 from .sections import Section
 
 _MODELS: dict = {}
+_MODEL_IDENTITIES: dict = {}
 MODEL_ROOT = None   # 项目中微调模型所在的文件夹（打开项目时设置）
 
 
@@ -106,6 +107,8 @@ class ChannelParams:
     gamma: float = 1.0                # 识别前的伽马增强，<1 会把暗的细胞提亮（DAPI 默认 0.5）
     model: str = ""                   # 识别模型：空 = 通用模型；否则为项目里微调过的模型名称
 
+    skip_dark_tiles: bool = True
+
     def to_dict(self):
         return asdict(self)
 
@@ -121,17 +124,26 @@ class DetectionSettings:
     unmix_sig: object = field(default=None, repr=False, compare=False)
 
 
-def _norm_percentiles(slide: Slide, section: Section, ch: int, lo: float, hi: float):
-    """在较低分辨率下估计整张脑片的归一化范围，保证各分块亮度一致。"""
+def section_norms(slide, section, channels, model=None):
+    """Read the normalization thumbnail and rasterize the tissue mask once per section."""
+    if not channels:
+        return {}
     lv = slide.level_for_pixel_size(2.0)
-    a = read_unmixed(slide, lv, section.bbox0, ch, _CUR_UNMIX)
-    mask = section_mask(section, a.shape, slide.downsample(lv))
-    v = a[mask] if mask.any() else a.ravel()
-    lo_v, hi_v, bg = np.percentile(v, [lo, hi, 50])
-    return lo_v, hi_v, max(float(bg), 1.0)
-
-
-_CUR_UNMIX = None      # detect_section 运行时的解混模型（_norm_percentiles 用）
+    indices = list(channels)
+    if model is not None and np.asarray(model.matrix).shape == (len(slide.channels),) * 2:
+        from .unmix import apply
+        planes = apply(slide.read(lv, section.bbox0), model, indices)
+    else:
+        planes = slide.read(lv, section.bbox0, indices)
+    mask = section_mask(section, planes.shape[1:], slide.downsample(lv))
+    use_mask = mask.any()
+    norms = {}
+    for c, plane in zip(indices, planes):
+        params = channels[c]
+        lo, hi, bg = np.percentile(plane[mask] if use_mask else plane.ravel(),
+                                   [params.norm_low, params.norm_high, 50])
+        norms[c] = lo, hi, max(float(bg), 1.0)
+    return norms
 
 
 def read_unmixed(slide: Slide, lv: int, bbox0, ch: int, model=None) -> np.ndarray:
@@ -303,15 +315,10 @@ def detect_section(slide: Slide, section: Section, settings: DetectionSettings,
     geo = (x0, y0, ds, pix, contour0)
 
     det_chs = [c for c in range(n_ch) if settings.channels.get(c, ChannelParams()).detect]
-    global _CUR_UNMIX
     um = getattr(settings, "unmix", None)
     um = um if um is not None and np.asarray(um.matrix).shape == (n_ch, n_ch) else None
-    _CUR_UNMIX = um
-    try:
-        norms = {c: _norm_percentiles(slide, section, c, settings.channels[c].norm_low,
-                                      settings.channels[c].norm_high) for c in det_chs}
-    finally:
-        _CUR_UNMIX = None
+    norms = section_norms(slide, section, {c: settings.channels[c] for c in det_chs}, um)
+    dark_tiles = []
 
     T, ov = settings.tile, settings.overlap
     tiles = [(tx, ty) for ty in range(0, H, T) for tx in range(0, W, T)]
@@ -374,13 +381,6 @@ def detect_section(slide: Slide, section: Section, settings: DetectionSettings,
             rx0, ry0 = max(0, tx - ov), max(0, ty - ov)
             rx1, ry1 = min(W, tx + T + ov), min(H, ty + T + ov)
             bb = (x0 + rx0 * ds, y0 + ry0 * ds, (rx1 - rx0) * ds, (ry1 - ry0) * ds)
-            img = slide.read(lv, bb)
-            if um is not None and img.size:
-                from .unmix import apply as _unmix
-                img = _unmix(img, um)       # 识别前去除通道串色；之后的识别和亮度测量都用校正后的图
-            if img.size == 0:
-                tick(len(det_chs))
-                continue
             # 跳过不含组织的分块
             if poly is not None:
                 cx = x0 + (tx + min(T, W - tx) / 2) * ds
@@ -393,12 +393,21 @@ def detect_section(slide: Slide, section: Section, settings: DetectionSettings,
                 if not inside_any:
                     tick(len(det_chs))
                     continue
+            img = slide.read(lv, bb)
+            if um is not None and img.size:
+                from .unmix import apply as _unmix
+                img = _unmix(img, um)       # 识别前去除通道串色；之后的识别和亮度测量都用校正后的图
+            if img.size == 0:
+                tick(len(det_chs))
+                continue
             for c in det_chs:
                 p = settings.channels[c]
                 lo, hi, bg = norms[c]
                 thr = max(p.min_intensity, p.bg_fold * bg)
                 x = prepare_input(img[c], p, lo, hi, pix)
-                if float(x.max()) < 0.2:
+                if p.skip_dark_tiles and float(x.max()) < 0.2:
+                    dark_tiles.append((c, x0 + tx * ds, y0 + ty * ds,
+                                       x0 + min(tx + T, W) * ds, y0 + min(ty + T, H) * ds))
                     tick()
                     continue
                 # 主进程只算神经网络（GPU 或 CPU），得到候选点；去重、画轮廓、测量交给后台进程
@@ -422,6 +431,7 @@ def detect_section(slide: Slide, section: Section, settings: DetectionSettings,
                           [f"mean_ch{k}" for k in range(n_ch)])
     df.insert(0, "section", section.name)
     df["cell_id"] = np.arange(len(df))
+    df.attrs["dark_tiles"] = dark_tiles
     return df
 
 
@@ -435,6 +445,9 @@ def raw_signature(settings: DetectionSettings) -> str:
     d = {"px": settings.pixel_um, "tile": settings.tile, "ov": settings.overlap,
          "ch": {str(c): {k: getattr(p, k) for k in RAW_KEYS if not (k == "model" and not p.model)}
                 for c, p in sorted(settings.channels.items())}}
+    for c, p in settings.channels.items():
+        if not p.skip_dark_tiles:
+            d["ch"][str(c)]["skip_dark_tiles"] = False
     if getattr(settings, "unmix_sig", None):     # 只有开启了串色校正才加进签名，旧项目的签名不变
         d["unmix"] = settings.unmix_sig
     return json.dumps(d, sort_keys=True)

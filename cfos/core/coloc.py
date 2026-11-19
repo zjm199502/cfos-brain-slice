@@ -213,16 +213,18 @@ def summarize(cells: pd.DataFrame, channel_names: list[str], group_cols=("sectio
     require_nucleus=True 时只统计 DAPI+ 的细胞，并另列被排除的无核信号数量。"""
     n = len(channel_names)
     nuc = nucleus_channel(channel_names)
-    excluded = None
-    if require_nucleus and nuc is not None and len(cells):
-        keep = cells[f"pos_ch{nuc}"].to_numpy(bool)
-        excluded = cells[~keep]
-        cells = cells[keep]
     group_cols = [c for c in group_cols if c in cells.columns]
     rows = []
     groups = cells.groupby(group_cols) if group_cols else [((), cells)]
+    empty_groups = cells.empty and bool(group_cols)
+    if empty_groups:
+        groups = [(tuple(None for _ in group_cols), cells)]
     for key, g in groups:
         key = key if isinstance(key, tuple) else (key,)
+        excluded = None
+        if require_nucleus and nuc is not None:
+            keep = g[f"pos_ch{nuc}"].to_numpy(bool)
+            excluded, g = g[~keep], g[keep]
         row = dict(zip(group_cols, key))
         for c in range(n):
             row[f"{channel_names[c]}+"] = int(g[f"pos_ch{c}"].sum())
@@ -240,8 +242,6 @@ def summarize(cells: pd.DataFrame, channel_names: list[str], group_cols=("sectio
                 row["+".join(channel_names[c] for c in combo) + " 共标"] = int(m.sum())
         if excluded is not None:
             ex = excluded
-            for col_, val in zip(group_cols, key):
-                ex = ex[ex[col_] == val]
             for c in range(n):
                 if c != nuc:
                     ne = int(ex[f"pos_ch{c}"].sum())
@@ -251,4 +251,5 @@ def summarize(cells: pd.DataFrame, channel_names: list[str], group_cols=("sectio
                     row[f"{cn} 全部信号（含无 {nn} 核的）"] = kept + ne
                     row[f"{cn} 信号中有 {nn} 核的比例 %"] = round(100.0 * kept / (kept + ne), 1) if kept + ne else None
         rows.append(row)
-    return pd.DataFrame(rows)
+    result = pd.DataFrame(rows)
+    return result.iloc[:0] if empty_groups else result

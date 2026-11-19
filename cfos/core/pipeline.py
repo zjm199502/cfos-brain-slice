@@ -48,20 +48,27 @@ def drop_excluded(df: pd.DataFrame, im: ImageEntry) -> pd.DataFrame:
 def rebuild_cells(project: Project, im: ImageEntry, pixel_um0: float) -> pd.DataFrame | None:
     """从每张脑片的原始识别结果，按当前阈值重新筛选并计算共标（不重新识别）。"""
     frames = []
+    names = []
     for s in im.sections:
         if not s.enabled:
             continue
         raw = project.load_part(im, s)
         if raw is not None:
             frames.append(raw)
+            names.append(s.name)
     if not frames:
         return None
+    return _merge_frames(project, im, pixel_um0, frames, names)
+
+
+def _merge_frames(project, im, pixel_um0, frames, names):
     df = pd.concat(frames, ignore_index=True)
     df = det.apply_filters(df, project.detection)
     from .manual import apply_manual, load_manual
     df = apply_manual(df, load_manual(project, im), pixel_um0, len(project.channel_names))
     df["cell_id"] = np.arange(len(df))
     df = colocalize(df, pixel_um0, project.coloc, nucleus_channel(project.channel_names)) if len(df) else df
+    df.attrs["processed_sections"] = names
     project.save_cells(im, df)
     return df
 
@@ -79,14 +86,44 @@ def detect_image(project: Project, im: ImageEntry, sl=None, redo=False, report=N
         secs = [s for s in im.sections if s.enabled]
         from .unmix import prepare as _prepare_unmix
         _prepare_unmix(project, sl, im)        # 识别前去除串色：开启了但还没估算时，先用这张图片估算
-        sig = det.raw_signature(project.detection)
+        import hashlib
+        import json
+        from . import accel
+        from .sdnet import onnx_for
+        models = {}
+        for p in project.detection.channels.values():
+            if p.detect and p.model not in models:
+                directory = det._model_dir(p.model)
+                stamp = []
+                if directory:
+                    files = set(directory.iterdir())
+                    if accel.net_backend() == "onnx" and not (directory / "model.onnx").is_file():
+                        selected = onnx_for(directory)
+                        if selected is not None:
+                            files.add(selected)
+                    for file in sorted(files):
+                        if file.suffix in (".json", ".h5", ".onnx") and file.is_file():
+                            stat = file.stat()
+                            stamp.append((file.name, stat.st_size, stat.st_mtime_ns))
+                identity = (str(directory), stamp, accel.net_backend())
+                if det._MODEL_IDENTITIES.get(p.model) != identity:
+                    det.forget_model(p.model)
+                    det._MODEL_IDENTITIES[p.model] = identity
+                models[p.model] = identity
+        src = Path(im.path).stat()
+        identity = [det.raw_signature(project.detection), project.z_mode, models,
+                    src.st_size, src.st_mtime_ns, sl.pixel_size_um]
+        frames = []
         a, b = progress_range
         reused = done = 0
         name = Path(im.path).name
         for k, s in enumerate(secs):
             if cancel is not None and cancel():
                 raise InterruptedError
-            if not redo and project.load_part(im, s, sig) is not None:
+            sig = hashlib.sha256(json.dumps([identity, s.bbox0, s.contour0], sort_keys=True).encode()).hexdigest()
+            cached = None if redo else project.load_part(im, s, sig)
+            if cached is not None:
+                frames.append(cached)
                 reused += 1
                 continue
 
@@ -97,8 +134,10 @@ def detect_image(project: Project, im: ImageEntry, sl=None, redo=False, report=N
             log.info("识别 %s %s", name, s.name)
             raw = det.detect_section(sl, s, project.detection, progress=prog, cancel=cancel, prefilter=False)
             project.save_part(im, s, sig, raw)
+            frames.append(raw)
             done += 1
-        rebuild_cells(project, im, sl.pixel_size_um)
+        if frames:
+            _merge_frames(project, im, sl.pixel_size_um, frames, [s.name for s in secs])
         im.status = "已识别细胞"
         im.error = ""
         project.save()
@@ -114,7 +153,9 @@ def refilter_all(project: Project, report=None) -> int:
     for i, im in enumerate(project.images):
         if report:
             report(i, len(project.images), f"正在重新筛选和计算共标：{im.key}")
-        if not any(project.load_part(im, s) is not None for s in im.sections if s.enabled):
+        parts = {sec.name: raw for sec in im.sections if sec.enabled
+                 if (raw := project.load_part(im, sec)) is not None}
+        if not parts:
             # 旧版本项目没有原始识别结果，只能在原结果上重新算共标
             df = project.load_cells(im)
             if df is None or df.empty:
@@ -129,7 +170,7 @@ def refilter_all(project: Project, report=None) -> int:
             project.save_cells(im, df)
         else:
             sl = open_slide(im.path); px = sl.pixel_size_um; sl.close()
-            rebuild_cells(project, im, px)
+            _merge_frames(project, im, px, list(parts.values()), list(parts))
         n += 1
     return n
 
@@ -151,20 +192,11 @@ def run_batch(project: Project, files, do_register=True, do_nonlinear=True, redo
     for f in files:
         if Path(f).resolve() not in existing:
             try:
-                sl = open_slide(f)
-                if project.channel_names and len(sl.channels) != len(project.channel_names):
-                    sl.close()
-                    checklist.append({"图片": Path(f).name, "脑片": "", "配准": "",
-                                      "需要检查": f"出错：通道数（{len(sl.channels)}）与项目中其他图片不同，已跳过"})
-                    continue
-                project.ensure_channels(sl.channels)
-                sl.close()
+                im, _ = project.import_image(f)
             except Exception as e:  # noqa: BLE001
                 log.error("无法打开 %s\n%s", f, traceback.format_exc())
                 checklist.append({"图片": Path(f).name, "脑片": "", "配准": "", "需要检查": f"出错：{friendly(e)}"})
                 continue
-            im = ImageEntry(path=str(f))
-            project.images.append(im)
             existing[Path(f).resolve()] = im
     project.save()
     targets = [existing[Path(f).resolve()] for f in files if Path(f).resolve() in existing]
