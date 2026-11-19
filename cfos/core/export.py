@@ -10,7 +10,7 @@ from openpyxl.styles import Font, PatternFill, Alignment
 from openpyxl.utils import get_column_letter
 
 from .coloc import colocalize, merged_cells, summarize, nucleus_channel
-from .project import Project
+from .project import EXPORT_HEMISPHERES, Project
 from .. import APP_NAME
 
 
@@ -279,6 +279,7 @@ def params_table(project: Project) -> pd.DataFrame:
         rows.append(("脑区平均荧光强度", "按去除串色后的图测量（与细胞识别一致）" if on else "按原图测量"))
     from . import region_sets as RS
     rows.append(("导出的脑区范围", RS.describe(project.export_region_set, project.export_max_depth, project.export_skip_layers)))
+    rows.append(("脑区表半脑导出方式", project.export_hemisphere))
     rows.append(("脑区类别说明", RS.CATEGORY_HELP))
     tc = project.tissue_channels()
     rows.append(("拆分脑片用的通道", "全部通道" if tc is None else "、".join(project.channel_names[c] for c in tc)))
@@ -350,7 +351,11 @@ def export_excel(project: Project, path: str | Path, masks: bool = True, progres
             logging.getLogger("cfos").exception("质量检查失败")
     if "按脑区×脑片" in tables:   # 只在导出的 Excel 里加（组间统计等内部计算不需要）
         from .region_sets import annotate
-        tables["按脑区×脑片"] = annotate(tables["按脑区×脑片"])
+        regions = tables["按脑区×脑片"]
+        sides = EXPORT_HEMISPHERES[project.export_hemisphere]
+        if sides is not None:
+            regions = regions.loc[regions["半脑"].isin(sides)]
+        tables["按脑区×脑片"] = annotate(regions)
     reviews = []
     for image in project.images:
         for r in image.field_reviews:

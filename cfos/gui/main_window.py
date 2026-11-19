@@ -22,7 +22,7 @@ from qtpy.QtWidgets import (
 from ..core import detection as det
 from ..core.coloc import colocalize, merged_cells, summarize, nucleus_channel
 from ..core.export import export_excel
-from ..core.project import Project, ImageEntry, STANDARD_CHANNELS, DYE_LABELS, UNUSED_LABEL
+from ..core.project import Project, ImageEntry, STANDARD_CHANNELS, DYE_LABELS, UNUSED_LABEL, EXPORT_HEMISPHERES
 from ..core.sections import Section, find_sections, contour_in_bbox
 from ..core.slide_io import open_slide
 from .layout import fit_window, PanelScroll, ProjectLabel
@@ -241,6 +241,7 @@ class MainWindow(UpdateMixin, TeachingMixin, FigureMixin, AccuracyMixin, Relocat
             self.exp_scope.set_values(self.project.export_region_set, self.project.export_max_depth,
                                       self.project.export_skip_layers)
             self.exp_intensity.setChecked(self.project.export_intensity)
+            self.exp_hemisphere.setCurrentText(self.project.export_hemisphere)
         if i == 8:
             self._sync_figure_panel()
 
@@ -1936,13 +1937,17 @@ class MainWindow(UpdateMixin, TeachingMixin, FigureMixin, AccuracyMixin, Relocat
         w = QWidget(); L = QVBoxLayout(w)
         L.addWidget(hint("把所有图片的统计结果导出成一个 Excel 文件，包括三张表：\n"
                          "• 按脑片汇总：每张脑片各通道阳性细胞数和共标数\n"
-                         "• 按脑区×脑片：每张脑片每个脑区（分左右半脑，含上级脑区）的细胞数、面积和密度（需先配准）\n"
+                         "• 按脑区×脑片：每张脑片每个脑区的细胞数、面积和密度，默认左右合并（需先配准）\n"
                          "• 分析参数：方便以后复现\n"
                          "如果在“② 脑片拆分”中画了自定义区域，会多一张“按自定义区域”表。"))
         ob = QGroupBox("导出选项"); of = QVBoxLayout(ob)
         from .region_scope import RegionScopeBox
         rb = QGroupBox("“按脑区×脑片”表里列出哪些脑区"); rl = QVBoxLayout(rb)
         self.exp_scope = RegionScopeBox(with_layers=True); rl.addWidget(self.exp_scope)
+        rl.addWidget(QLabel("半脑导出方式"))
+        self.exp_hemisphere = QComboBox()
+        self.exp_hemisphere.addItems(list(EXPORT_HEMISPHERES))
+        rl.addWidget(self.exp_hemisphere)
         rl.addWidget(hint("没列出的细分脑区不会漏数：它们的细胞已经计入所属的脑区和大脑区。\n"
                           "表里另有“脑区中文名”“所属大脑区”“脑区类别”三列，可以在 Excel 里按它们筛选。"))
         self.exp_masks = QCheckBox("同时保存细胞 mask（1/3 分辨率）"); self.exp_masks.setChecked(True)
@@ -1975,6 +1980,7 @@ class MainWindow(UpdateMixin, TeachingMixin, FigureMixin, AccuracyMixin, Relocat
         project.export_skip_layers = self.exp_scope.skip_layers()
         project.export_max_depth = self.exp_scope.max_depth()
         project.export_intensity = self.exp_intensity.isChecked()
+        project.export_hemisphere = self.exp_hemisphere.currentText()
         project.save()
         masks, qc = self.exp_masks.isChecked(), self.exp_qc.isChecked()
 

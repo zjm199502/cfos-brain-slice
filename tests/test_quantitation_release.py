@@ -11,6 +11,32 @@ from cfos.core.sections import Section
 
 
 class Quantitation(unittest.TestCase):
+    def test_excel_hemisphere_modes(self):
+        from cfos.core.export import export_excel
+        with TemporaryDirectory() as folder:
+            project = Project(Path(folder))
+            project.save()
+            config = project.folder / "cfos_project.json"
+            data = json.loads(config.read_text("utf8"))
+            del data["export_hemisphere"]
+            config.write_text(json.dumps(data), encoding="utf8")
+            project = Project.load(project.folder)
+            self.assertEqual(project.export_hemisphere, "仅左右合并")
+            source = pd.DataFrame({"半脑": ["左", "右", "左右合计"], "细胞数": [2, 7, 9]})
+            for mode, counts in [("仅左右合并", [9]), ("仅左半脑", [2]), ("仅右半脑", [7]),
+                                 ("左右分别导出", [2, 7]), ("左右分别导出并附合计", [2, 7, 9])]:
+                project.export_hemisphere = mode
+                project.save()
+                loaded = Project.load(project.folder)
+                tables = {"按脑片汇总": pd.DataFrame({"细胞数": [9]}), "按脑区×脑片": source}
+                with self.subTest(mode=mode), patch("cfos.core.export.build_tables", return_value=tables):
+                    file = export_excel(loaded, project.folder / "result.xlsx", masks=False, qc=False, quality=False)
+                    sheets = pd.read_excel(file, sheet_name=None)
+                    self.assertEqual(sheets["按脑区×脑片"]["细胞数"].tolist(), counts)
+                    self.assertEqual(sheets["按脑片汇总"]["细胞数"].tolist(), [9])
+                    params = sheets["分析参数"].set_index("参数")["值"]
+                    self.assertEqual(params["脑区表半脑导出方式"], mode)
+
     def test_covered_zero_and_density(self):
         from types import SimpleNamespace
         st = pd.DataFrame([dict(index=1, acronym="root", name="root")])
