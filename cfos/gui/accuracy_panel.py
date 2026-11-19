@@ -285,7 +285,7 @@ class AccuracyMixin:
                 record["采用候选"] = True
                 image.status = "盲评参数已更新，待重新识别"
                 project.save()
-                self.run_detection(False)
+                self.run_detection(False, [sec.name])
         self.run_task(job, done, label="正在比较当前与候选参数…")
 
     def review_history(self):

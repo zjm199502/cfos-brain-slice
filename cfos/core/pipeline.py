@@ -62,31 +62,55 @@ def rebuild_cells(project: Project, im: ImageEntry, pixel_um0: float) -> pd.Data
     return _merge_frames(project, im, pixel_um0, frames, names)
 
 
-def _merge_frames(project, im, pixel_um0, frames, names):
+def _merge_frames(project, im, pixel_um0, frames, names, partial=False):
     sections = {sec.name: sec for sec in im.sections}
     filtered = [det.apply_filters(raw, effective_settings(project.detection, im, sections[name]))
                 for name, raw in zip(names, frames)]
     df = pd.concat(filtered, ignore_index=True)
     from .manual import apply_manual, load_manual
-    df = apply_manual(df, load_manual(project, im), pixel_um0, len(project.channel_names))
+    manual = load_manual(project, im)
+    if partial:
+        manual = {kind: [r for r in records if r.get("section") in names or
+                         (kind == "removed" and not r.get("section"))]
+                  for kind, records in manual.items()}
+    df = apply_manual(df, manual, pixel_um0, len(project.channel_names))
     df["cell_id"] = np.arange(len(df))
     df = colocalize(df, pixel_um0, project.coloc, nucleus_channel(project.channel_names)) if len(df) else df
-    df.attrs["processed_sections"] = names
+    processed = set(names)
+    if partial:
+        previous = project.load_cells(im)
+        if previous is not None:
+            enabled = {s.name for s in im.sections if s.enabled}
+            keep = previous[previous["section"].isin(enabled.difference(names))]
+            # Older whole-image results predate explicit tracking of zero-cell sections.
+            processed.update(enabled.intersection(previous.attrs.get("processed_sections", enabled)))
+            if len(keep):
+                for column in ("cell_id", "merged_id"):
+                    if len(df) and column in keep:
+                        df[column] += int(keep[column].max()) + 1
+                df = pd.concat([keep, df], ignore_index=True)
+    df.attrs["processed_sections"] = [s.name for s in im.sections if s.name in processed]
     project.save_cells(im, df)
     return df
 
 
 def detect_image(project: Project, im: ImageEntry, sl=None, redo=False, report=None, cancel=None,
-                 progress_range=(0, 100), total=100) -> dict:
+                 progress_range=(0, 100), total=100, section_names=None) -> dict:
     """识别一张图片的所有脑片。每张脑片识别完马上保存，参数没变的脑片直接用上次的结果，
     所以中途取消、死机或断电后，再点一次就从没做完的脑片继续。返回 {"reused": n, "done": n}。"""
     own = sl is None
     if own:
         sl = open_slide(im.path)
     try:
-        if not im.sections:
+        if not im.sections and section_names is None:
             im.sections = find_sections(sl, channels=project.tissue_channels())
         secs = [s for s in im.sections if s.enabled]
+        partial = section_names is not None
+        if partial:
+            selected = set(section_names)
+            secs = [s for s in secs if s.name in selected]
+            if not secs or len(secs) != len(selected):
+                raise ValueError("请选择当前图片中已启用的脑片。")
         from .unmix import prepare as _prepare_unmix
         _prepare_unmix(project, sl, im)        # 识别前去除串色：开启了但还没估算时，先用这张图片估算
         import hashlib
@@ -144,8 +168,13 @@ def detect_image(project: Project, im: ImageEntry, sl=None, redo=False, report=N
             frames.append(raw)
             done += 1
         if frames:
-            _merge_frames(project, im, sl.pixel_size_um, frames, [s.name for s in secs])
+            result = _merge_frames(project, im, sl.pixel_size_um, frames, [s.name for s in secs], partial)
         im.status = "已识别细胞"
+        if partial:
+            completed = len(result.attrs["processed_sections"])
+            enabled_count = sum(s.enabled for s in im.sections)
+            if completed < enabled_count:
+                im.status = f"已识别细胞（{completed}/{enabled_count} 张脑片）"
         im.error = ""
         project.save()
         return {"reused": reused, "done": done}

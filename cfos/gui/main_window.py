@@ -13,7 +13,7 @@ from napari.qt import QtViewer
 from qtpy.QtCore import QSize, Qt, QTimer
 from qtpy.QtGui import QFont
 from qtpy.QtWidgets import (
-    QAbstractItemView, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout, QGroupBox,
+    QAbstractItemView, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFileDialog, QFormLayout, QGroupBox,
     QHBoxLayout, QHeaderView, QLabel, QListWidget, QListWidgetItem, QMainWindow, QMessageBox,
     QProgressBar, QPushButton, QScrollArea, QSlider, QSizePolicy, QSplitter, QStackedWidget, QTableWidget,
     QTableWidgetItem, QVBoxLayout, QWidget,
@@ -1131,7 +1131,7 @@ class MainWindow(UpdateMixin, TeachingMixin, FigureMixin, AccuracyMixin, Relocat
         b0 = big_button("预览当前视野的减背景/去卷积效果"); b0.clicked.connect(self.preview_enhance)
         L.addWidget(b0)
         b1 = big_button("预览当前视野的细胞识别"); b1.clicked.connect(self.preview_detection)
-        b2 = big_button("识别当前图片的全部脑片"); b2.clicked.connect(lambda: self.run_detection(False))
+        b2 = big_button("选择当前图片的脑片并识别…"); b2.clicked.connect(self.choose_detection_sections)
         b3 = big_button("批量识别项目中所有图片"); b3.clicked.connect(lambda: self.run_detection(True))
         b4 = big_button("按新阈值重新筛选（几秒钟，不用重新识别）"); b4.clicked.connect(self.refilter)
         b4.setToolTip("只改了面积、最低强度、自动阳性阈值、局部对比度时，点这里即可，不需要重新识别。\n"
@@ -1471,13 +1471,46 @@ class MainWindow(UpdateMixin, TeachingMixin, FigureMixin, AccuracyMixin, Relocat
 
         self.run_task(job, done, label="正在预览预处理效果…")
 
-    def run_detection(self, all_images: bool):
+    def choose_detection_sections(self):
+        sections = [s for s in self.image.sections if s.enabled] if self.image else []
+        if not sections:
+            self.info("请先在「② 脑片拆分」中添加脑片，并勾选需要分析的脑片。")
+            return
+        dlg = QDialog(self)
+        dlg.setWindowTitle("选择要识别的脑片")
+        layout = QVBoxLayout(dlg)
+        layout.addWidget(QLabel("勾选本次要识别的脑片，可多选。"))
+        items = QListWidget()
+        layout.addWidget(items)
+        for section in sections:
+            item = QListWidgetItem(section.name, items)
+            item.setCheckState(Qt.Unchecked)
+        all_button = QPushButton("全选")
+        def select_all():
+            for i in range(items.count()):
+                items.item(i).setCheckState(Qt.Checked)
+        all_button.clicked.connect(select_all)
+        layout.addWidget(all_button)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        start = buttons.button(QDialogButtonBox.Ok)
+        start.setText("开始识别")
+        start.setEnabled(False)
+        def selected():
+            return [items.item(i).text() for i in range(items.count())
+                    if items.item(i).checkState() == Qt.Checked]
+        items.itemChanged.connect(lambda _: start.setEnabled(bool(selected())))
+        buttons.accepted.connect(dlg.accept)
+        buttons.rejected.connect(dlg.reject)
+        layout.addWidget(buttons)
+        fit_window(dlg, 360, 420)
+        if dlg.exec_() == QDialog.Accepted:
+            self.run_detection(False, selected())
+
+    def run_detection(self, all_images: bool, section_names=None):
         targets = list(self.project.images) if all_images else [self.image]
         if not all_images and not self.image.sections:
             self.info("当前图片还没有拆分脑片，请先到“② 脑片拆分”。")
             return
-        settings = self.project.detection
-        coloc_p = self.project.coloc
         project = self.project
 
         def job(task):
@@ -1488,7 +1521,8 @@ class MainWindow(UpdateMixin, TeachingMixin, FigureMixin, AccuracyMixin, Relocat
             for i, im in enumerate(targets):
                 try:
                     r = detect_image(project, im, report=task.report, cancel=task.is_cancelled,
-                                     progress_range=(i * 100, i * 100 + 100), total=len(targets) * 100)
+                                     progress_range=(i * 100, i * 100 + 100), total=len(targets) * 100,
+                                     section_names=section_names)
                     reused += r["reused"]
                     summary[im.key] = project.load_cells(im)
                 except InterruptedError:
@@ -1508,6 +1542,8 @@ class MainWindow(UpdateMixin, TeachingMixin, FigureMixin, AccuracyMixin, Relocat
                 self._cells_cache[k_] = df
             self._draw_cells()
             lines = []
+            if section_names:
+                lines.append("本次选择：" + "、".join(section_names))
             if reused:
                 lines.append(f"（有 {reused} 张脑片的识别参数没有变化，直接使用了上次的结果）")
             if errors:
@@ -1515,6 +1551,8 @@ class MainWindow(UpdateMixin, TeachingMixin, FigureMixin, AccuracyMixin, Relocat
             for k_, df in res.items():
                 if df is None:
                     continue
+                if section_names:
+                    df = df[df["section"].isin(section_names)]
                 cnt = ", ".join(f"{self.ch_name(c)} {int((df['channel'] == c).sum())}" for c in range(len(self.project.channel_names))) if len(df) else "无"
                 lines.append(f"{k_}：{cnt}")
             self.det_summary.setText("识别完成：\n" + "\n".join(lines))
