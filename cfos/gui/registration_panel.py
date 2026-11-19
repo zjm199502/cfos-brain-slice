@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import numpy as np
+from .layout import fit_window
 from qtpy.QtCore import Qt, QTimer
 from qtpy.QtWidgets import (
     QCheckBox, QComboBox, QFormLayout, QGroupBox, QHBoxLayout, QLabel, QPushButton, QSlider,
@@ -631,7 +632,7 @@ class RegistrationMixin:
         if not groups:
             self.info("还没有脑片。")
             return
-        dlg = QDialog(self); dlg.setWindowTitle("同一动物的连续切片"); dlg.resize(760, 520)
+        dlg = QDialog(self); dlg.setWindowTitle("同一动物的连续切片"); fit_window(dlg, 760, 520)
         L = QVBoxLayout(dlg)
         tip = QLabel("下表按前后位置从前（Bregma 大）到后排列。动物编号在“⑦ 分组与统计”中填写；没填的按图片分组。\n"
                      "“统一切面角度”：把这只动物所有切片的倾斜角度统一为中位数，前后位置保持不变。\n"

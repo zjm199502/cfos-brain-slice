@@ -126,7 +126,14 @@ class TiledTiffLevel:
         try:
             ps = [p.aspage() if hasattr(p, "aspage") else p for p in pages]
             p0 = ps[0]
+            # Some QPTIFF pyramid levels omit the final partial tile row.
+            # Use tifffile's chunk reader for these levels.
+            if not p0.is_tiled:
+                return False
+            expected = (-(-p0.imagewidth // p0.tilewidth)
+                        * -(-p0.imagelength // p0.tilelength))
             return all(p.is_tiled and int(p.samplesperpixel) == 1 and int(p.imagedepth) == 1
+                       and len(p.dataoffsets) == len(p.databytecounts) == expected
                        and int(p.tiledepth) == 1 and p.dtype is not None
                        and (p.imagelength, p.imagewidth, p.tilelength, p.tilewidth)
                        == (p0.imagelength, p0.imagewidth, p0.tilelength, p0.tilewidth) for p in ps)

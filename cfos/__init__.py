@@ -10,4 +10,4 @@ APP_NAME = "FosFolio 脑片图册"   # 显示名称；安装目录、用户数�
 _os.environ.setdefault("TF_ENABLE_ONEDNN_OPTS", "0")
 _os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
 
-__version__ = "0.8.7"
+__version__ = "0.8.8"

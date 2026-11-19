@@ -13,6 +13,7 @@ from qtpy.QtWidgets import (
 )
 
 from ..core.resources import resources_dir
+from .layout import fit_window
 
 TEACH_DIR = "teaching"
 DEMO_FILE = "示例脑片.ome.tif"
@@ -120,7 +121,11 @@ class _Thumb(QLabel):
     def mousePressEvent(self, _e):
         dlg = QDialog(self.window()); dlg.setWindowTitle("参考图")
         L = QVBoxLayout(dlg)
-        lb = QLabel(); lb.setPixmap(QPixmap(str(self.path)).scaled(900, 700, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        fit_window(dlg, 940, 820)
+        lb = QLabel()
+        lb.setAlignment(Qt.AlignCenter)
+        lb.setPixmap(QPixmap(str(self.path)).scaled(
+            max(1, dlg.width()-36), max(1, dlg.height()-120), Qt.KeepAspectRatio, Qt.SmoothTransformation))
         L.addWidget(lb)
         c = QLabel(self.caption); c.setWordWrap(True); L.addWidget(c)
         b = QPushButton("关闭"); b.clicked.connect(dlg.accept); L.addWidget(b)
@@ -162,7 +167,7 @@ class TeachingMixin:
                     t = "、".join(f"{k} {v:,} 个" for k, v in ans.get("counts", {}).items())
                     a = QLabel(f"<i>示例项目参考答案（默认参数，Excel“按脑片汇总”中的数字）：{t}。你的结果在 ±5% 以内就说明操作正确。</i>")
                     a.setWordWrap(True); L.addWidget(a)
-            w = self.stack.widget(i)
+            w = self.stack.widget(i).widget()
             w.layout().insertWidget(0, box)
             self._lesson_boxes.append(box)
         self._set_teaching(self.teach_cb.isChecked())
@@ -203,6 +208,7 @@ class TeachingMixin:
             it = self.steps.item(i)
             if it is not None:
                 it.setText(s + ("  ✓" if on and i != 2 and self._step_done(i) else ""))
+                self.step_picker.setItemText(i, it.text())
 
     # ---------------------------------------------------------- 示例项目
     def open_demo_project(self):

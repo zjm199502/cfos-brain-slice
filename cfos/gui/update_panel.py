@@ -1,6 +1,7 @@
 """“帮助”菜单：关于、检查更新、安装补丁、恢复到安装版本。"""
 from __future__ import annotations
 
+from .layout import fit_window
 from qtpy.QtCore import Qt, QUrl
 from qtpy.QtGui import QAction, QDesktopServices
 from qtpy.QtWidgets import QDialog, QDialogButtonBox, QFileDialog, QLabel, QMessageBox, QTextBrowser, \
@@ -86,7 +87,7 @@ class UpdateMixin:
 
     # ---------------------------------------------------------------- 关于
     def show_about(self):
-        dlg = QDialog(self); dlg.setWindowTitle(f"关于 {APP_NAME}"); dlg.resize(620, 620)
+        dlg = QDialog(self); dlg.setWindowTitle(f"关于 {APP_NAME}"); fit_window(dlg, 620, 620)
         L = QVBoxLayout(dlg)
         tb = QTextBrowser(); tb.setOpenExternalLinks(True)
         tb.document().setDefaultStyleSheet(LINK_CSS); tb.setHtml(about_html())
@@ -119,7 +120,7 @@ class UpdateMixin:
 
     def _show_update_dialog(self, res, silent):
         m = res["manifest"]
-        dlg = QDialog(self); dlg.setWindowTitle("软件更新"); dlg.resize(600, 560)
+        dlg = QDialog(self); dlg.setWindowTitle("软件更新"); fit_window(dlg, 600, 560)
         L = QVBoxLayout(dlg)
         full = res["status"] == "full"
         head = (f"<b>有新版本 v{m['version']}</b>（你现在用的是 {updater.version_text()}）。")

@@ -5,6 +5,7 @@ import io
 from pathlib import Path
 
 import numpy as np
+from .layout import fit_window
 from qtpy.QtCore import Qt
 from qtpy.QtGui import QPixmap
 from qtpy.QtWidgets import (
@@ -378,18 +379,22 @@ class FigureMixin:
             img, meta = fig.render_roi(self.project, self.image, self.slide, roi, st, df=df, max_side=1400)
         except Exception as e:  # noqa: BLE001
             self.error(f"预览失败：{e}"); return
-        dlg = QDialog(self); dlg.setWindowTitle(f"预览：{roi['name']}"); dlg.resize(960, 760)
+        dlg = QDialog(self); dlg.setWindowTitle(f"预览：{roi['name']}"); fit_window(dlg, 960, 760)
         L = QVBoxLayout(dlg)
         pm = _pixmap(img)
-        if pm.width() > 920 or pm.height() > 660:
-            pm = pm.scaled(920, 660, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        available = dlg.size()
+        available.setWidth(max(1, available.width()-40))
+        available.setHeight(max(1, available.height()-120))
+        if pm.width() > available.width() or pm.height() > available.height():
+            pm = pm.scaled(available, Qt.KeepAspectRatio, Qt.SmoothTransformation)
         lb = QLabel(); lb.setPixmap(pm); lb.setAlignment(Qt.AlignCenter); L.addWidget(lb, 1)
         sb = meta.get("scale_bar", {})
         x, y, w, h = fig.clamp_roi(roi, self.slide.level_shapes[0])
         ds = self.slide.downsample(fig.choose_level(self.slide, w, h, st))
-        L.addWidget(QLabel(f"预览已缩小显示。实际导出约 {int(w / ds)} × {int(h / ds)} 像素"
+        description = QLabel(f"预览已缩小显示。实际导出约 {int(w / ds)} × {int(h / ds)} 像素"
                            f"（{self.slide.pixel_size_um * ds:.3g} µm/像素，{w * self.slide.pixel_size_um:.0f} × "
-                           f"{h * self.slide.pixel_size_um:.0f} µm）；比例尺 {sb.get('length_um', 0):g} µm。"))
+                           f"{h * self.slide.pixel_size_um:.0f} µm）；比例尺 {sb.get('length_um', 0):g} µm。")
+        description.setWordWrap(True); L.addWidget(description)
         b = QPushButton("关闭"); b.clicked.connect(dlg.accept); L.addWidget(b)
         dlg.show(); self._fig_dialog = dlg
 

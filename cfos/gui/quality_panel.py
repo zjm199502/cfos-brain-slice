@@ -1,6 +1,7 @@
 """自动质量检查的界面部分：脑片表格里的“质量”列、检查按钮和结果窗口。"""
 from __future__ import annotations
 
+from .layout import fit_window
 from qtpy.QtCore import Qt
 from qtpy.QtGui import QColor
 from qtpy.QtWidgets import (
@@ -53,7 +54,7 @@ class QualityMixin:
             return
         df = df.sort_values(["质量分", "图片", "脑片"]).reset_index(drop=True)
         n_bad = int((df["质量"] == "可疑").sum()); n_warn = int((df["质量"] == "注意").sum())
-        dlg = QDialog(self); dlg.setWindowTitle("脑片质量检查"); dlg.resize(820, 520)
+        dlg = QDialog(self); dlg.setWindowTitle("脑片质量检查"); fit_window(dlg, 820, 520)
         L = QVBoxLayout(dlg)
         lb = QLabel(f"共 {len(df)} 张脑片：可疑 {n_bad} 张，注意 {n_warn} 张，正常 {len(df) - n_bad - n_warn} 张。"
                     "按质量分从低到高排列；双击一行可以跳到这张脑片。\n"

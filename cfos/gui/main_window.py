@@ -10,12 +10,12 @@ import numpy as np
 import pandas as pd
 from napari.components import ViewerModel
 from napari.qt import QtViewer
-from qtpy.QtCore import Qt, QTimer
+from qtpy.QtCore import QSize, Qt, QTimer
 from qtpy.QtGui import QFont
 from qtpy.QtWidgets import (
     QAbstractItemView, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout, QGroupBox,
     QHBoxLayout, QHeaderView, QLabel, QListWidget, QListWidgetItem, QMainWindow, QMessageBox,
-    QProgressBar, QPushButton, QScrollArea, QSlider, QSplitter, QStackedWidget, QTableWidget,
+    QProgressBar, QPushButton, QScrollArea, QSlider, QSizePolicy, QSplitter, QStackedWidget, QTableWidget,
     QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
@@ -25,6 +25,7 @@ from ..core.export import export_excel
 from ..core.project import Project, ImageEntry, STANDARD_CHANNELS, DYE_LABELS, UNUSED_LABEL
 from ..core.sections import Section, find_sections, contour_in_bbox
 from ..core.slide_io import open_slide
+from .layout import fit_window, PanelScroll, ProjectLabel
 from .worker import Task
 from .registration_panel import RegistrationMixin
 from .groups_panel import GroupsMixin
@@ -70,7 +71,7 @@ class MainWindow(UpdateMixin, TeachingMixin, FigureMixin, AccuracyMixin, Relocat
         super().__init__()
         from ..core.updater import version_text
         self.setWindowTitle(f"{APP_NAME} {version_text()}")
-        self.resize(1500, 920)
+        fit_window(self, 1500, 920)
         self.project: Project | None = None
         self.image: ImageEntry | None = None
         self.slide = None
@@ -83,38 +84,37 @@ class MainWindow(UpdateMixin, TeachingMixin, FigureMixin, AccuracyMixin, Relocat
 
         # 左侧步骤
         self.steps = QListWidget()
-        self.steps.setFixedWidth(140)
         f = QFont(); f.setPointSize(11)
         self.steps.setFont(f)
+        fm = self.steps.fontMetrics()
+        nav_width = max(fm.horizontalAdvance(s+"  ✓") for s in STEPS)+32
+        self.steps.setFixedWidth(nav_width)
         for s in STEPS:
             it = QListWidgetItem(s)
-            it.setSizeHint(it.sizeHint().expandedTo(self.steps.sizeHint().__class__(150, 40)))
+            it.setSizeHint(QSize(0, max(36, fm.height()+12)))
             self.steps.addItem(it)
 
         # 右侧面板
         self.stack = QStackedWidget()
-        self.stack.addWidget(self._panel_project())
-        self.stack.addWidget(self._panel_sections())
-        self.stack.addWidget(self._panel_display())
-        self.stack.addWidget(self._panel_detection())
-        self.stack.addWidget(self._panel_coloc())
-        self.stack.addWidget(self._panel_registration())
-        self.stack.addWidget(self._panel_groups())
-        self.stack.addWidget(self._panel_export())
-        self.stack.addWidget(self._panel_figure())
+        for panel in (self._panel_project, self._panel_sections, self._panel_display,
+                      self._panel_detection, self._panel_coloc, self._panel_registration,
+                      self._panel_groups, self._panel_export, self._panel_figure):
+            self.stack.addWidget(PanelScroll(panel()))
         self.steps.currentRowChanged.connect(self._on_step)
-        right = QScrollArea(); right.setWidgetResizable(True); right.setWidget(self.stack)
-        right.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        right.setMinimumWidth(380); right.setMaximumWidth(460)
-
+        self.stack.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
         # 顶部：当前图片
         top = QHBoxLayout()
         top.addWidget(QLabel("当前图片："))
-        self.image_combo = QComboBox(); self.image_combo.setMinimumWidth(380)
+        self.image_combo = QComboBox()
+        self.image_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.image_combo.setMinimumContentsLength(7)
+        self.image_combo.currentTextChanged.connect(self.image_combo.setToolTip)
         self.image_combo.currentIndexChanged.connect(self._on_image_changed)
         top.addWidget(self.image_combo, 1)
-        self.project_label = QLabel("未打开项目")
-        top.addWidget(self.project_label)
+        self.project_label = ProjectLabel()
+        self.project_label.set_project("未打开项目")
+        self.project_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        top.addWidget(self.project_label, 1)
         self._teaching_toggle(top)
 
         # 图层列表和图层工具（选择、画矩形、删除等）
@@ -127,15 +127,44 @@ class MainWindow(UpdateMixin, TeachingMixin, FigureMixin, AccuracyMixin, Relocat
         self.qt_viewer.layers.setContextMenuPolicy(Qt.NoContextMenu)
         tl.addWidget(QLabel("图层（点眼睛图标可显示/隐藏）"))
         tl.addWidget(self.qt_viewer.layers, 1)
-        tools.setFixedWidth(220)
-        view_row = QHBoxLayout(); view_row.addWidget(tools); view_row.addWidget(self.qt_viewer, 1)
+        self.tools_scroll = PanelScroll(tools)
+        self.tools_scroll.setFixedWidth(max(208, tools.minimumSizeHint().width()+24))
+        view_row = QHBoxLayout()
+        view_row.setContentsMargins(0, 0, 0, 0)
+        view_row.addWidget(self.tools_scroll)
+        view_row.addWidget(self.qt_viewer, 1)
+        self.view_pane = QWidget()
+        self.view_pane.setLayout(view_row)
+        self.split = QSplitter()
+        self.split.setChildrenCollapsible(False)
+        self.split.addWidget(self.steps)
+        self.split.addWidget(self.view_pane)
+        self.split.addWidget(self.stack)
+        self.split.setStretchFactor(1, 1)
 
-        center = QWidget(); cl = QVBoxLayout(center); cl.setContentsMargins(0, 0, 0, 0)
-        cl.addLayout(top); cl.addLayout(view_row, 1)
-
-        split = QSplitter(); split.addWidget(self.steps); split.addWidget(center); split.addWidget(right)
-        split.setStretchFactor(1, 1)
-        self.setCentralWidget(split)
+        self.step_picker = QComboBox()
+        self.step_picker.addItems(STEPS)
+        self.step_picker.activated.connect(self.steps.setCurrentRow)
+        self.layers_button = QPushButton("图层工具")
+        self.layers_button.setCheckable(True)
+        self.layers_button.toggled.connect(self._toggle_tools)
+        self.pane_button = QPushButton("查看图像")
+        self.pane_button.setCheckable(True)
+        self.pane_button.toggled.connect(self._toggle_pane)
+        self.navigation = QWidget()
+        nav = QHBoxLayout(self.navigation)
+        nav.setContentsMargins(0, 0, 0, 0)
+        for widget in (self.step_picker, self.pane_button, self.layers_button):
+            nav.addWidget(widget)
+        nav.addStretch(1)
+        center = QWidget()
+        cl = QVBoxLayout(center)
+        cl.setContentsMargins(4, 2, 4, 2)
+        cl.addLayout(top)
+        cl.addWidget(self.navigation)
+        cl.addWidget(self.split, 1)
+        self.setCentralWidget(center)
+        self._layout_mode = None
         self._build_help_menu()
 
         # 底部进度条
@@ -157,8 +186,42 @@ class MainWindow(UpdateMixin, TeachingMixin, FigureMixin, AccuracyMixin, Relocat
         self._refresh_enabled()
 
     # ================================================================ 通用
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if hasattr(self, "_layout_mode"):
+            self._adapt_layout()
+
+    def _adapt_layout(self):
+        width = self.width()
+        mode = "single" if width < 900 else "compact" if width < 1280 else "wide"
+        if mode == self._layout_mode:
+            return
+        self._layout_mode = mode
+        self.navigation.setVisible(mode != "wide")
+        self.steps.setVisible(mode == "wide")
+        self.pane_button.setVisible(mode == "single")
+        self._toggle_pane(self.pane_button.isChecked())
+        if mode != "single":
+            panel = min(590, max(545, int(width*.36)))
+            self.split.setSizes([self.steps.width() if mode == "wide" else 0,
+                                 max(1, width-panel-(self.steps.width() if mode == "wide" else 0)), panel])
+
+    def _toggle_tools(self, checked):
+        self.tools_scroll.setVisible(self._layout_mode == "wide" or checked)
+
+    def _toggle_pane(self, show_image):
+        single = self._layout_mode == "single"
+        self.view_pane.setVisible(not single or show_image)
+        self.stack.setVisible(not single or not show_image)
+        self.pane_button.setText("查看步骤" if show_image else "查看图像")
+        self.layers_button.setVisible(not single or show_image)
+        self._toggle_tools(self.layers_button.isChecked())
+
     def _on_step(self, i):
+        self.step_picker.setCurrentIndex(i)
         self.stack.setCurrentIndex(i)
+        if self._layout_mode == "single":
+            self.pane_button.setChecked(False)
         if i != 5 and getattr(self, "_reg_drag_on", False):
             self._reg_set_drag_mode(False)
         self._refresh_step_marks()
@@ -191,6 +254,7 @@ class MainWindow(UpdateMixin, TeachingMixin, FigureMixin, AccuracyMixin, Relocat
                 it.setFlags(flags | Qt.ItemIsEnabled)
             else:
                 it.setFlags(flags & ~Qt.ItemIsEnabled)
+            self.step_picker.model().item(i).setEnabled(bool(has_img))
         self.btn_add_images.setEnabled(has_p)
 
     def error(self, text):
@@ -398,7 +462,7 @@ class MainWindow(UpdateMixin, TeachingMixin, FigureMixin, AccuracyMixin, Relocat
         attach_project(p.folder); log.info("打开项目 %s", p.folder)
         self.project = p
         self._cells_cache.clear()
-        self.project_label.setText(f"项目：{p.folder.name}")
+        self.project_label.set_project(f"项目：{p.folder.name}")
         self._refresh_images()
         self._refresh_channels_form()
         self._refresh_enabled()
@@ -532,6 +596,7 @@ class MainWindow(UpdateMixin, TeachingMixin, FigureMixin, AccuracyMixin, Relocat
                 st.setForeground(Qt.red)
             self.images_table.setItem(i, 2, st)
             self.image_combo.addItem(f"{i + 1}. {Path(im.path).name}")
+            self.image_combo.setItemData(i, str(im.path), Qt.ToolTipRole)
         self.image_combo.blockSignals(False)
         if p.images:
             idx = cur if 0 <= cur < len(p.images) else 0

@@ -4,6 +4,7 @@
 下面直接写明这种选法包含什么，并可以打开一个树形窗口查看具体会列出哪些脑区。"""
 from __future__ import annotations
 
+from .layout import fit_window
 from qtpy.QtCore import Qt, Signal
 from qtpy.QtGui import QBrush, QColor, QFont
 from qtpy.QtWidgets import (QCheckBox, QComboBox, QDialog, QHBoxLayout, QLabel, QLineEdit, QPushButton, QSpinBox,
@@ -92,7 +93,7 @@ class RegionPreviewDialog(QDialog):
     def __init__(self, mode, depth=0, skip_layers=False, parent=None):
         super().__init__(parent)
         self.setWindowTitle("会列出哪些脑区")
-        self.resize(900, 660)
+        fit_window(self, 900, 660)
         L = QVBoxLayout(self)
         t = RS.info()
         sel = RS.selected(mode, depth, skip_layers)

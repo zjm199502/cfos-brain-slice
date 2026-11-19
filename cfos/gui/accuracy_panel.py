@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import numpy as np
+from .layout import fit_window
 from qtpy.QtWidgets import (
     QCheckBox, QComboBox, QDoubleSpinBox, QMessageBox, QGroupBox, QHBoxLayout, QLabel, QPushButton, QVBoxLayout,
 )
@@ -88,6 +89,8 @@ class AccuracyMixin:
         for nm in (BOX_LAYER, PTS_LAYER, RES_LAYER):
             if nm in self.viewer.layers:
                 self.viewer.layers.remove(nm)
+        if self._layout_mode == "single":
+            self.pane_button.setChecked(True)
         px = self.slide.pixel_size_um
         side = self.acc_size.value() / px
         cy, cx = self.viewer.camera.center[-2], self.viewer.camera.center[-1]
@@ -169,7 +172,7 @@ class AccuracyMixin:
             self.info("还没有检查记录。")
             return
         df = pd.DataFrame(self.project.accuracy).drop(columns=["人工点", "方框"], errors="ignore")
-        dlg = QDialog(self); dlg.setWindowTitle("识别准确率检查记录"); dlg.resize(900, 400)
+        dlg = QDialog(self); dlg.setWindowTitle("识别准确率检查记录"); fit_window(dlg, 900, 400)
         L = QVBoxLayout(dlg)
         t = QTableWidget(len(df), len(df.columns)); t.setHorizontalHeaderLabels(list(df.columns))
         for i, (_, r) in enumerate(df.iterrows()):
