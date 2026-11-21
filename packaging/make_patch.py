@@ -124,7 +124,9 @@ def main():
 
     files = {}
     for f in sorted((APP / "cfos").rglob("*")):
-        if "__pycache__" in f.parts or not f.is_file() or f.suffix not in PATCH_SUFFIXES:
+        if "__pycache__" in f.parts or not f.is_file():
+            continue
+        if f.suffix not in PATCH_SUFFIXES and f.name != "LICENSE.txt":
             continue
         files["app/" + f.relative_to(APP).as_posix()] = f.read_bytes()
     files["app/main.py"] = (APP / "main.py").read_bytes()

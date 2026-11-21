@@ -21,6 +21,8 @@ def _v(n):
 
 # 模型、数据、关键算法（手工维护）
 KEY = [
+    ("czifile", "2026.10.14", "蔡司 CZI 文件读取（BSD-3-Clause）", "BSD-3-Clause",
+     "https://pypi.org/project/czifile/2026.10.14/", "Christoph Gohlke"),
     ("Cellpose", "4.2.1", "逐通道细胞分割（PyTorch）", "BSD-3-Clause", "https://github.com/MouseLand/cellpose",
      "Pachitariu et al., Cellpose-SAM"),
     ("Cellpose-SAM", "cpsam_v2", "荧光图像实例分割权重", "BSD-3-Clause",
@@ -119,7 +121,8 @@ def main():
         for n, v, lic, u in crow:
             L.append(f"| {n} | {v} | {u} |")
     L += ["", "## 本软件自己的代码", "",
-          "`cfos/` 文件夹中的全部代码、`packaging/` 中的打包脚本和 `resources/teaching/` 中的教学示意图由本项目编写。"
+          "`cfos/core/_czifile/` 和 `cfos/core/vsi_meta/` 含第三方源码，许可随上述目录分发。"
+          "本项目维护其余应用代码、打包脚本和教学示意图。"
           "`resources/demo/` 中的示例脑片由本项目提供，仅供学习本软件使用。", "",
           "联系：zjm199502@163.com，https://github.com/zjm199502/cfos-brain-slice", ""]
     (APP / "THIRD_PARTY.md").write_text("\n".join(L), encoding="utf-8")

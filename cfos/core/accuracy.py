@@ -8,6 +8,7 @@ from __future__ import annotations
 import datetime as _dt
 import hashlib
 import json
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -83,8 +84,14 @@ def record(project, image, section: str, channel: int, box0, res: dict, model: s
     r["参数编号"] = hashlib.sha256(encoded.encode()).hexdigest()[:12]
     r["原图"] = image.path
     if image.scene_id is not None:
-        r["VSI 扫描区"] = image.scene_name
-        r["VSI stack"] = image.scene_id
+        if Path(image.path).suffix.lower() == ".czi":
+            r["CZI 场景"] = image.scene_name
+            r["CZI S"] = image.scene_id
+            if image.czi_time_index is not None:
+                r["CZI T"] = image.czi_time_index
+        else:
+            r["VSI 扫描区"] = image.scene_name
+            r["VSI stack"] = image.scene_id
     r["视野类型"] = res.get("field_type", "常规")
     r["检查面积 mm²"] = res.get("field_area_mm2")
     r["动物"] = project.samples.get(f"{image.key}/{section}", {}).get("animal", "")

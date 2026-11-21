@@ -331,8 +331,12 @@ def params_table(project: Project) -> pd.DataFrame:
     except Exception:  # noqa: BLE001
         pass
     rows += [("图片", im.path) for im in project.images]
-    rows += [(f"VSI 扫描区（{im.key}）", f"{im.scene_name} (stack{im.scene_id})")
-             for im in project.images if im.scene_id is not None]
+    for im in project.images:
+        if im.scene_id is not None:
+            label = "CZI 场景" if Path(im.path).suffix.lower() == ".czi" else "VSI 扫描区"
+            rows.append((f"{label}（{im.key}）", im.scene_description))
+            if im.czi_time_index is not None:
+                rows.append((f"CZI 时间点（{im.key}）", f"第 1 个（原始 T={im.czi_time_index}，共 {im.czi_time_count} 个）"))
     return pd.DataFrame(rows, columns=["参数", "值"])
 
 

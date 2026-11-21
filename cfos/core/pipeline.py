@@ -15,9 +15,10 @@ from .field_review import effective_settings
 from .coloc import colocalize, nucleus_channel
 from .log import log, friendly
 from .project import Project, ImageEntry, processed_section_names
+from .relocate import IMAGE_EXT
 from .sections import find_sections
 
-IMAGE_EXTS = (".qptiff", ".tif", ".tiff", ".kfbf", ".vsi")
+IMAGE_EXTS = tuple(sorted(IMAGE_EXT))
 
 
 def list_images(folder) -> list[Path]:
@@ -158,7 +159,7 @@ def detect_image(project: Project, im: ImageEntry, sl=None, redo=False, report=N
         src = Path(im.path).stat()
         identity = [det.cellpose4.model_identity(), project.z_mode, src.st_size, src.st_mtime_ns, sl.pixel_size_um]
         if getattr(sl, "scene_id", None) is not None:
-            identity.append(sl.vsi_source_signature())
+            identity.append(sl.scene_source_signature())
         frames = []
         a, b = progress_range
         reused = done = 0

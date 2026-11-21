@@ -7,6 +7,7 @@
 | 名称 | 版本 | 用途 | 来源 | 引用 |
 |---|---|---|---|---|
 | Cellpose | 4.2.1 | 逐通道分割 | https://github.com/MouseLand/cellpose | Cellpose-SAM |
+| czifile | 2026.10.14 | 蔡司 CZI 图像及元数据读取，原始模块在 cfos/core/_czifile（BSD-3-Clause） | https://pypi.org/project/czifile/2026.10.14/ | Christoph Gohlke |
 | Cellpose-SAM v2 | cpsam_v2 | 细胞识别预训练权重 | https://huggingface.co/mouseland/cellpose-sam | Cellpose-SAM |
 | DeepSlice | 1.2.8 | 切片在图谱中的自动定位 | https://github.com/PolarBean/DeepSlice | Carey et al., Nature Communications 2023 |
 | DeepSlice 小鼠模型权重（Allen_Mixed_Best、Synthetic_data_final） | — | DeepSlice 的预训练模型（两个模型取平均；v0.8.1 起转换为 ONNX 格式随安装包附带） | https://github.com/PolarBean/DeepSliceWeightsMQ | 同上 |
@@ -175,6 +176,6 @@
 
 ## 本软件自己的代码
 
-`cfos/` 文件夹中的全部代码、`packaging/` 中的打包脚本和 `resources/teaching/` 中的教学示意图由本项目编写。`resources/demo/` 中的示例脑片由本项目提供，仅供学习本软件使用。
+`cfos/core/_czifile/` 和 `cfos/core/vsi_meta/` 含第三方源码，许可随上述目录分发。本项目维护其余应用代码、打包脚本和教学示意图。`resources/demo/` 中的示例脑片由本项目提供，仅供学习本软件使用。
 
 联系：zjm199502@163.com，https://github.com/zjm199502/cfos-brain-slice

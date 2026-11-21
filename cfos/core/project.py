@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import re
+import unicodedata
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 
@@ -44,6 +45,23 @@ COLOR_PRESETS = {"蓝": (0, 0, 255), "绿": (0, 255, 0), "红": (255, 0, 0), "�
                  "黄": (255, 255, 0), "青": (0, 255, 255), "白": (255, 255, 255)}
 
 
+def _check_czi_channels(expected: list[str] | tuple[str, ...], actual: list[str]):
+    def identity(name):
+        name = " ".join(unicodedata.normalize("NFKC", name).casefold().split())
+        if re.fullmatch(r"(?:(?:channel|ch|c|通道)\s*[:#_-]?\s*)?\d+", name):
+            return ""
+        return name
+
+    if len(expected) == len(actual):
+        for before, after in zip(map(identity, expected), map(identity, actual)):
+            if before and after and before != after:
+                break
+        else:
+            return
+    raise ValueError(f"CZI 仪器通道的名称或顺序不匹配。项目记录为 {' / '.join(expected)}，"
+                     f"当前文件为 {' / '.join(actual)}。请在 ZEN 统一通道顺序和名称，或使用独立项目。")
+
+
 @dataclass
 class ImageEntry:
     path: str
@@ -60,9 +78,12 @@ class ImageEntry:
     storage_key: str = ""
     review_settings: dict = field(default_factory=dict)
     field_reviews: list = field(default_factory=list)
-    scene_id: int | None = None        # Olympus 原文件的 stack 编号；旧项目未记录时沿用原来的选图规则
+    scene_id: int | None = None        # VSI 的 stack 编号或 CZI 的 S 维编号
     scene_name: str = ""
     vsi_channels: list[str] = field(default_factory=list)  # ordered scanner labels, independent of user-assigned dyes
+    czi_channels: list[str] = field(default_factory=list)
+    czi_time_index: int | None = None
+    czi_time_count: int | None = None
 
     def __post_init__(self):
         if self.storage_key and (self.storage_key in (".", "..") or
@@ -72,6 +93,9 @@ class ImageEntry:
     def to_dict(self):
         return {"path": self.path, "scene_id": self.scene_id, "scene_name": self.scene_name,
                 **({"vsi_channels": self.vsi_channels} if self.vsi_channels else {}),
+                **({"czi_channels": self.czi_channels} if self.czi_channels else {}),
+                **({"czi_time_index": self.czi_time_index, "czi_time_count": self.czi_time_count}
+                   if self.czi_time_index is not None else {}),
                 "review_settings": self.review_settings, "field_reviews": self.field_reviews, "storage_key": self.key, "rel": self.rel, "size": self.size, "status": self.status, "error": self.error,
                 "sections": [s.to_dict() for s in self.sections],
                 "exclusions": [[list(map(float, p)) for p in poly] for poly in self.exclusions],
@@ -83,6 +107,8 @@ class ImageEntry:
     def from_dict(d):
         return ImageEntry(path=d["path"], scene_id=d.get("scene_id"), scene_name=d.get("scene_name", ""),
                           vsi_channels=list(d.get("vsi_channels") or []),
+                          czi_channels=list(d.get("czi_channels") or []),
+                          czi_time_index=d.get("czi_time_index"), czi_time_count=d.get("czi_time_count"),
                           review_settings=d.get("review_settings", {}),
                           field_reviews=d.get("field_reviews", []), storage_key=d.get("storage_key", ""), rel=d.get("rel"), size=d.get("size"),
                           status=d.get("status", "未处理"), error=d.get("error", ""),
@@ -99,7 +125,22 @@ class ImageEntry:
     def display_name(self) -> str:
         from .relocate import file_name
         name = file_name(self.path)
-        return f"{name} · {self.scene_name or f'stack{self.scene_id}'}" if self.scene_id is not None else name
+        if self.scene_id is None:
+            return name
+        return f"{name} · {self.scene_name or self.scene_code}"
+
+    @property
+    def scene_code(self) -> str:
+        return f"S{self.scene_id}" if Path(self.path).suffix.lower() == ".czi" else f"stack{self.scene_id}"
+
+    @property
+    def scene_description(self) -> str:
+        code = self.scene_code
+        if not self.scene_name:
+            return code
+        if self.scene_name == code or self.scene_name.endswith(f"({code})"):
+            return self.scene_name
+        return f"{self.scene_name} ({code})"
 
     @property
     def source_id(self):
@@ -109,7 +150,14 @@ class ImageEntry:
         from .slide_io import open_slide
         if self.vsi_channels:
             return open_slide(self.path, z_mode=z_mode, scene_id=self.scene_id, vsi_channels=self.vsi_channels)
-        return open_slide(self.path, z_mode=z_mode, scene_id=self.scene_id)
+        slide = open_slide(self.path, z_mode=z_mode, scene_id=self.scene_id)
+        if self.czi_channels:
+            try:
+                _check_czi_channels(self.czi_channels, [c.name for c in slide.channels])
+            except ValueError:
+                slide.close()
+                raise
+        return slide
 
 
 def processed_section_names(image: ImageEntry, cells: pd.DataFrame | None) -> set[str]:
@@ -180,9 +228,9 @@ class Project:
         slide_io.Z_MODE = self.z_mode
 
     def import_image(self, path):
-        """兼容原来的单条返回值。一个 VSI 的其他扫描区也会加入项目。"""
+        """兼容单条返回值，同时加入该文件的所有可读扫描区。"""
         entries, notes = self.import_images(path)
-        if len(entries) > 1:
+        if len(entries) > 1 and Path(path).suffix.lower() == ".vsi":
             from .vsi import list_vsi_scenes
             by_id = {entry.scene_id: entry for entry in entries}
             for scene in list_vsi_scenes(path):
@@ -191,7 +239,9 @@ class Project:
         return entries[0], notes
 
     def import_images(self, path):
-        """同一 VSI 的各个荧光扫描区共享原文件路径，各自保存坐标和结果。"""
+        """同一原文件可有多个扫描区，各自保存坐标、通道设置来源和分析结果。"""
+        from collections import Counter
+        from contextlib import closing
         from uuid import uuid4
         path = Path(path).resolve()
         existing = {im.scene_id: im for im in self.images if Path(im.path).resolve() == path}
@@ -199,14 +249,25 @@ class Project:
         legacy = None
         channel_order = []
         anchor = None
-        if path.suffix.lower() == ".vsi":
-            from collections import Counter
-            from contextlib import closing
-            from .vsi import list_vsi_scenes
-            scenes = list_vsi_scenes(path, notes=notes)
+        suffix = path.suffix.lower()
+        prefix = "S" if suffix == ".czi" else "stack"
+        if suffix in (".vsi", ".czi"):
+            if suffix == ".vsi":
+                from .vsi import list_vsi_scenes as list_scenes
+            else:
+                from .czi import list_czi_scenes as list_scenes
+            scenes = list_scenes(path, notes=notes)
             name_counts = Counter(s.name for s in scenes)
-            choices = [(s.scene_id, s.name if name_counts[s.name] == 1 else f"{s.name} (stack{s.scene_id})")
-                       for s in sorted(scenes, key=lambda s: s.scene_id)]
+            choices = []
+            for s in sorted(scenes, key=lambda s: s.scene_id):
+                code = f"{prefix}{s.scene_id}"
+                name = s.name or code
+                if s.name and name_counts[s.name] > 1:
+                    name = f"{s.name} ({code})"
+                choices.append((s.scene_id, name))
+        else:
+            choices = [(None, "")]
+        if suffix == ".vsi":
             legacy = existing.pop(None, None)
             if legacy is not None:
                 with closing(legacy.open_slide(self.z_mode)) as old_slide:
@@ -220,14 +281,13 @@ class Project:
                 if not channel_order:
                     with closing(anchor.open_slide(self.z_mode)) as original:
                         channel_order = list(original.vsi_channels)
-        else:
-            choices = [(None, "")]
 
         used = {key.casefold() for key in self.reserved_keys}
         used.update(im.key.casefold() for im in self.images)
         entries, added = [], []
         channels = None
         channel_count = len(self.channel_names)
+        czi_orders = dict.fromkeys(tuple(im.czi_channels) for im in self.images if im.czi_channels) if suffix == ".czi" else {}
         for scene_id, name in choices:
             if scene_id in existing:
                 entries.append(existing[scene_id])
@@ -235,7 +295,7 @@ class Project:
             base = path.stem
             if len(choices) > 1:
                 label = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", name or "").strip(" .")[:64]
-                base += f"~{label or f'stack{scene_id}'}"
+                base += f"~{label or f'{prefix}{scene_id}'}"
             key = base
             while key.casefold() in used:
                 key = f"{base}~{uuid4().hex[:12]}"
@@ -256,9 +316,17 @@ class Project:
                     notes.append(f"跳过：{msg}。")
                     continue
                 channel_count = len(slide.channels)
-                if scene_id is not None and not channel_order:
+                if suffix == ".vsi" and not channel_order:
                     channel_order = list(slide.vsi_channels)
                     entry.vsi_channels = list(channel_order)
+                if suffix == ".czi":
+                    labels = [ch.name for ch in slide.channels]
+                    for expected in czi_orders:
+                        _check_czi_channels(expected, labels)
+                    czi_orders[tuple(labels)] = None
+                    entry.czi_channels = labels
+                    entry.czi_time_index = slide.czi_time_index
+                    entry.czi_time_count = slide.czi_time_count
                 if channels is None:
                     channels = slide.channels
                 notes.extend(slide.notes)

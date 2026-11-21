@@ -10,13 +10,21 @@
 
 面向小鼠脑切片荧光图像的一体化分析软件：脑片拆分 → 亮度/对比度 → 逐通道细胞识别 → 共标统计 → CCFv3 配准 → 分组统计 / 功能网络 → 导出 Excel。
 
+## v0.9.3 蔡司 CZI
+
+在「① 项目与图片」添加单文件 `.czi`。各荧光场景独立保存，可读取 8/16 位通道、平铺图像和 Z 层。时间序列按第一个时间点分析。[CZI 更新说明](packaging/更新公告/0.9.3.md)
+
+## v0.9.2 / v0.8.11 Excel 自选脑区
+
+在「⑧ 导出 Excel → 脑区范围 → 自选脑区…」搜索并勾选 Allen 脑区。使用 StarDist 的 v0.8.x 用户更新至 v0.8.11 后可使用此功能。[v0.8.x 专用更新](https://github.com/zjm199502/cfos-brain-slice/blob/installers/updates/v0.8/README.md)
+
 ## v0.9.1 Olympus VSI 多扫描区
 
 添加一次 `.vsi` 即可逐区导入荧光扫描。每个扫描区在“当前图片”中显示原始名称，可独立拆分脑片、识别细胞和导出统计。旧项目重新添加同一文件，即可保留原有最大扫描区的结果并补入其他区域。
 
 ## v0.9.0 安装与升级
 
-下载 [Windows x64 安装程序](https://github.com/zjm199502/cfos-brain-slice/releases/download/v0.9.0/FosFolio-0.9.0-Windows-x64-Setup.exe) 或 [Apple 芯片 Mac 安装包](https://github.com/zjm199502/cfos-brain-slice/releases/download/v0.9.0/FosFolio-0.9.0-macOS-arm64.zip)。旧版用户可在「帮助 → 检查更新」打开新版下载页。本版使用完整安装包升级。
+首次安装 Cellpose 4 系列时，推荐优先从[腾讯云 CNB 下载完整离线包](https://cnb.cool/fosfolio/cfos-brain-slice/-/releases/tag/v0.9.0)。常规安装包可从 [GitHub 发布页](https://github.com/zjm199502/cfos-brain-slice/releases/tag/v0.9.0) 获取。
 
 细胞识别支持选择单张或多张脑片。单层厚切片可以先用人工标注视野比较漏检和误检，再将选定的参数应用到相应脑片。Excel 默认合并左右半脑，导出时可以选择分侧统计。详见[本版更新公告](packaging/更新公告/0.9.0.md)。
 

@@ -80,6 +80,8 @@ def _image_info(project) -> list[dict]:
     rows = []
     for im in project.images:
         r = {"图片": im.key, "路径": im.path, "存在": Path(im.path).exists(), "脑片数": len(im.sections)}
+        if im.scene_id is not None:
+            r["原图扫描区"] = im.scene_description
         try:
             r["文件大小 MB"] = round(Path(im.path).stat().st_size / 2**20, 1)
             sl = im.open_slide()

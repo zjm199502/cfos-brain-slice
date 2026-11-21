@@ -30,14 +30,13 @@ from .worker import Task
 from .registration_panel import RegistrationMixin
 from .groups_panel import GroupsMixin
 from .quality_panel import QualityMixin
-from .relocate_panel import RelocateMixin
+from .relocate_panel import IMAGE_FILTER, RelocateMixin
 from .teaching import TeachingMixin
 from .figure_panel import FigureMixin
 from .accuracy_panel import AccuracyMixin
 from .update_panel import UpdateMixin
 
 from .. import APP_NAME  # noqa: E402
-IMAGE_FILTER = "荧光全片图像 (*.qptiff *.tif *.tiff *.ome.tif *.ome.tiff *.kfbf *.vsi);;所有文件 (*)"
 COLORMAP = {"DAPI": "blue", "Green": "green", "Red": "red", "Far red": "magenta"}
 POINT_COLOR = {"DAPI": "#4f8cff", "Green": "#3ddc4a", "Red": "#ff4040", "Far red": "#ff40ff"}
 
@@ -367,7 +366,7 @@ class MainWindow(UpdateMixin, TeachingMixin, FigureMixin, AccuracyMixin, Relocat
         w = QWidget(); L = QVBoxLayout(w)
         L.addWidget(hint("第一步：新建一个项目文件夹（用来保存设置和结果），然后添加要分析的图片。"
                          "一张图片上可以有多张脑片，下一步会自动拆分。\n"
-                         "Olympus VSI 的各个扫描区会分别列出。旧项目可用“添加图片”重新选择原 VSI，补齐其他扫描区。"))
+                         "Olympus VSI 的扫描区、ZEISS CZI 的场景会分别列出。旧项目可重新添加原 VSI，补齐其他扫描区。"))
         row = QHBoxLayout()
         b1 = big_button("新建项目…"); b1.clicked.connect(self.new_project)
         b2 = big_button("打开项目…"); b2.clicked.connect(self.open_project)
@@ -585,7 +584,7 @@ class MainWindow(UpdateMixin, TeachingMixin, FigureMixin, AccuracyMixin, Relocat
         from ..core.pipeline import list_images
         dlg = QDialog(self); dlg.setWindowTitle("一键批量处理")
         L = QVBoxLayout(dlg)
-        L.addWidget(hint("选择放图片的文件夹，软件会依次处理其中所有 .qptiff / .tif / .kfbf / .vsi 图片，"
+        L.addWidget(hint("选择放图片的文件夹，软件会依次处理其中的 TIFF、QPTIFF、KFBF、VSI 和 CZI 图片，"
                          "全部使用当前项目里的识别参数（建议先用一张图片调好参数）。\n"
                          "完成后会在项目文件夹里生成 Excel，并列出需要人工检查配准的脑片。"))
         row = QHBoxLayout(); path = QLineEdit(); pick = QPushButton("选择文件夹…")
@@ -596,7 +595,7 @@ class MainWindow(UpdateMixin, TeachingMixin, FigureMixin, AccuracyMixin, Relocat
             d = QFileDialog.getExistingDirectory(self, "选择图片文件夹")
             if d:
                 path.setText(d)
-                cnt.setText(f"找到 {len(list_images(d))} 个图片文件。多扫描区 VSI 会按扫描区分别处理。")
+                cnt.setText(f"找到 {len(list_images(d))} 个图片文件。VSI 扫描区和 CZI 场景会分别处理。")
         pick.clicked.connect(choose)
         c_reg = QCheckBox("配准到脑图谱"); c_reg.setChecked(True)
         c_nl = QCheckBox("配准后做非线性贴合"); c_nl.setChecked(True)
@@ -617,7 +616,7 @@ class MainWindow(UpdateMixin, TeachingMixin, FigureMixin, AccuracyMixin, Relocat
         from ..core.pipeline import list_images, run_batch
         files = list_images(folder)
         if not files:
-            self.error("这个文件夹里没有找到 .qptiff / .tif / .kfbf / .vsi 图片。")
+            self.error("这个文件夹里没有找到 TIFF、QPTIFF、KFBF、VSI 或 CZI 图片。")
             return
         if self.project is None:
             pf = Path(folder) / "cFos分析项目"

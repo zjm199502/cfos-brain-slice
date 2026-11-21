@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from pathlib import Path
 
 import numpy as np
 from scipy import ndimage as ndi
@@ -42,6 +43,13 @@ VERSION = 2
 def _signature(project, im, s) -> str:
     d = {"v": VERSION, "bbox": list(s.bbox0), "reg": s.registration, "exc": im.exclusions,
          "z": project.z_mode}
+    path = Path(im.path)
+    if path.suffix.lower() == ".czi":
+        try:
+            source = path.stat()
+            d["czi"] = [im.scene_id, source.st_size, source.st_mtime_ns]
+        except OSError:
+            d["czi"] = [im.scene_id, None]
     return hashlib.md5(json.dumps(d, sort_keys=True, default=str).encode()).hexdigest()
 
 

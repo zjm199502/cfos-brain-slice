@@ -6,6 +6,10 @@ from pathlib import Path
 
 from qtpy.QtWidgets import QFileDialog, QHBoxLayout, QMessageBox, QPushButton
 
+from ..core.relocate import IMAGE_EXT
+
+IMAGE_FILTER = "荧光全片图像 (" + " ".join("*" + suffix for suffix in sorted(IMAGE_EXT)) + ");;所有文件 (*)"
+
 
 class RelocateMixin:
     def _relocate_widgets(self, layout):
@@ -15,7 +19,7 @@ class RelocateMixin:
                       "软件会按文件名在里面（含子文件夹）搜索，找到后自动改好路径。已有的识别、配准结果都保留。")
         b2 = QPushButton("替换选中图片的文件…"); b2.clicked.connect(self.replace_image_file)
         b2.setToolTip("手动为选中的图片指定新文件（例如文件改过名）。请选择同一次扫描的文件。"
-                      "同一 VSI 的所有扫描区会一起换到新路径。")
+                      "同一 VSI 或 CZI 的所有扫描区会一起换到新路径。")
         row.addWidget(b1); row.addWidget(b2)
         layout.addLayout(row)
 
@@ -65,21 +69,27 @@ class RelocateMixin:
             return
         im = self.project.images[r]
         f, _ = QFileDialog.getOpenFileName(self, f"为 {im.display_name} 选择新文件", str(self.project.folder.parent),
-                                           "荧光全片图像 (*.qptiff *.tif *.tiff *.kfbf *.vsi);;所有文件 (*)")
+                                           IMAGE_FILTER)
         if not f:
             return
         source, destination = Path(im.path).resolve(), Path(f).resolve()
         related = [entry for entry in self.project.images if Path(entry.path).resolve() == source]
+        if any(entry.scene_id is not None for entry in related) and source.suffix.lower() != destination.suffix.lower():
+            self.error(f"请选择对应的 {source.suffix.upper()} 原文件，以保留原扫描区编号。")
+            return
         if source != destination and any(Path(entry.path).resolve() == destination for entry in self.project.images):
             self.error("所选文件已经作为另一张原图加入项目。请选择选中图片对应的原文件。")
             return
         bad_size = False
+        czi_times = {}
         for entry in related:
             try:
                 sl = replace(entry, path=str(destination)).open_slide(z_mode=self.project.z_mode)
                 try:
                     h, w = sl.level_shapes[0]
                     nch = len(sl.channels)
+                    if sl.czi_time_index is not None:
+                        czi_times[entry.scene_id] = (sl.czi_time_index, sl.czi_time_count)
                 finally:
                     sl.close()
             except Exception as e:  # noqa: BLE001
@@ -97,6 +107,8 @@ class RelocateMixin:
             entry.storage_key = entry.key
             entry.path = str(destination)
             entry.error = ""
+            if entry.scene_id in czi_times:
+                entry.czi_time_index, entry.czi_time_count = czi_times[entry.scene_id]
         self._reg_cache.clear()
         self.project.save(); self._refresh_images()
         if any(entry is self.image for entry in related):

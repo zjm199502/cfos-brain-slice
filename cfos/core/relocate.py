@@ -11,7 +11,7 @@ import os
 import re
 from pathlib import Path
 
-IMAGE_EXT = {".qptiff", ".tif", ".tiff", ".kfbf", ".vsi"}
+IMAGE_EXT = {".qptiff", ".tif", ".tiff", ".kfbf", ".vsi", ".czi"}
 
 
 def file_name(path: str) -> str:
