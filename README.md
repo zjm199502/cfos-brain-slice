@@ -1,8 +1,14 @@
 # FosFolio 脑片图册安装与更新
 
-## 安装 v0.9.0
+## 已在使用 v0.8.x（StarDist）
 
-升级前请退出正在运行的软件。v0.8.x 用户可以从「帮助 → 检查更新 → 打开下载页面」进入同一发布页。[v0.9.0 正式发布页](https://github.com/zjm199502/cfos-brain-slice/releases/tag/v0.9.0)
+要使用 Excel 自选脑区导出，请打开「帮助 → 检查更新 → 现在更新」，重启后可在「帮助 → 关于」看到 v0.8.11。若旧窗口提示「需要下载完整安装包」，请关闭窗口，下载 v0.8.11 专用 ZIP，在「帮助 → 从文件安装补丁…」中选择它。[v0.8.x 专用补丁和安装说明](updates/v0.8/README.md)
+
+## 新安装 v0.9.0（Cellpose 4）
+
+国内用户推荐优先从腾讯云下载离线包，内含 Cellpose 4 运行环境和模型。此完整安装包会切换识别引擎。[腾讯云 CNB 下载](https://cnb.cool/fosfolio/cfos-brain-slice/-/releases/tag/v0.9.0) · [GitHub 发布页](https://github.com/zjm199502/cfos-brain-slice/releases/tag/v0.9.0)
+
+需要首次联网配置识别环境时，也可选择下列常规安装包。
 
 | 平台 | 下载及安装 |
 | --- | --- |
