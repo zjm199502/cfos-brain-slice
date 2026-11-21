@@ -19,6 +19,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import sys
 import zipfile
@@ -34,10 +35,20 @@ MANIFEST_URLS = [
     f"https://fastly.jsdelivr.net/gh/{REPO}@{BRANCH}/{CHANNEL}/latest.json",
 ]
 DOWNLOAD_PAGE = f"https://github.com/{REPO}/tree/{BRANCH}/{CHANNEL}"
-FULL_PAGE = "https://cnb.cool/fosfolio/cfos-brain-slice/-/releases/tag/v0.9.0"
+FULL_PAGE = f"https://github.com/{REPO}/blob/{BRANCH}/{CHANNEL}/README.md"
 SOURCE_URL = f"https://github.com/{REPO}"
 CONTACT = "zjm199502@163.com，" + SOURCE_URL
 MAX_FAILED_STARTS = 2
+
+
+def _legacy_version(version) -> bool:
+    return isinstance(version, str) and re.fullmatch(r"0\.8(?:\.[0-9]+)?", version) is not None
+
+
+def _require_legacy_update(version, min_base):
+    if not _legacy_version(version) or vtuple(min_base)[:2] > (0, 8):
+        raise ValueError(f"当前使用 v0.8 更新通道。此更新（{version}，最低安装版本 {min_base}）"
+                         f"不适用于此通道。请下载 v0.8 专用补丁：{DOWNLOAD_PAGE}")
 
 
 # ------------------------------------------------------------------ 版本和位置
@@ -111,7 +122,7 @@ def active_patch() -> dict | None:
     if (series_app / "cfos" / "__init__.py").is_file():
         app = series_app
         v = _read_version_file(app / "cfos" / "__init__.py")
-    if not (app / "cfos" / "__init__.py").exists():
+    if not _legacy_version(v) or _read_version_file(app / "cfos" / "__init__.py") != v:
         return None
     bv = base_version()
     if vtuple(v) <= vtuple(bv) or vtuple(st.get("min_base", "0")) > vtuple(bv):
@@ -205,11 +216,12 @@ def check() -> dict:
     """返回 {"status": "latest" | "patch" | "full", "manifest": ..., "url": ...}。
     patch = 有可直接安装的补丁；full = 有新版本但需要下载完整安装包（依赖组件变了）。"""
     m, url = fetch_manifest()
+    _require_legacy_update(m.get("version"), m.get("min_base", "0"))
     cur, base = current_version(), base_version()
     if vtuple(m["version"]) <= vtuple(cur):
         return {"status": "latest", "manifest": m, "url": url}
     if vtuple(m.get("min_base", "0")) > vtuple(base):
-        return {"status": "full", "manifest": m, "url": url}
+        return {"status": "full", "manifest": {**m, "full_installer": FULL_PAGE}, "url": url}
     return {"status": "patch", "manifest": m, "url": url}
 
 
@@ -265,6 +277,9 @@ def read_patch_info(zip_path: Path) -> dict:
     for k in ("version", "min_base", "files"):
         if k not in info:
             raise ValueError(f"补丁包信息不完整（缺少 {k}）。")
+    if "app/_series/0.8/cfos/__init__.py" in info["files"]:
+        raise ValueError(f"这是用于旧客户端首次分流的共享过渡包。当前通道请使用 v0.8 专用补丁：{DOWNLOAD_PAGE}")
+    _require_legacy_update(info["version"], info["min_base"])
     return info
 
 
@@ -275,7 +290,7 @@ def install_patch(zip_path: Path) -> dict:
     v, base = info["version"], base_version()
     if vtuple(info["min_base"]) > vtuple(base):
         raise ValueError(f"这个补丁（{v}）需要先安装 {info['min_base']} 或更新的完整安装包，"
-                         f"你现在装的是 {base}。请到 GitHub 下载完整安装包：{FULL_PAGE}")
+                         f"你现在装的是 {base}。请参阅 v0.8 通道的安装说明：{FULL_PAGE}")
     if vtuple(v) <= vtuple(base):
         raise ValueError(f"这个补丁（{v}）不比你安装的版本（{base}）新，不需要安装。")
     root = updates_dir()
