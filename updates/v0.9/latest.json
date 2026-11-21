@@ -1,0 +1,12 @@
+{
+ "version": "0.9.2",
+ "min_base": "0.9.0",
+ "date": "2026-11-21",
+ "notes": "# FosFolio v0.9.2 更新公告\n\n## Excel 导出支持自选脑区\n\n在「⑧ 导出 Excel」的「脑区范围」选择「自选脑区」，按缩写、英文名、已收录的中文名或 Allen ID 搜索。勾选多个脑区后点击「应用」。项目会记住选择，手动导出和一键批量处理都使用这份清单。\n\n「按脑区×脑片」只列所选且在切片上有组织覆盖的脑区。选中上级脑区会导出包含下属区域的汇总；要同时查看亚区，请也勾选该亚区。父区与亚区的结果有重叠。半脑导出仍可单独设置，所选脑区可在「分析参数」中核对。\n\nv0.9.x 系列的补丁也包含 v0.9.1 的 Olympus VSI 多扫描区修复。\n\n在「帮助 → 检查更新」中点击「现在更新」，完成后重启软件。\n\n新用户下载 v0.9.0 完整安装包时，推荐优先使用[腾讯云 CNB 下载页](https://cnb.cool/fosfolio/cfos-brain-slice/-/releases/tag/v0.9.0)。\n\n联系方式：zjm199502@163.com，https://github.com/zjm199502/cfos-brain-slice",
+ "patch": {
+  "file": "cfos-patch-0.9.2.zip",
+  "size": 433480,
+  "sha256": "be39d32744a4910ab032322caff38bd9fa1b6cd34d7824e3056a8e0f117243fc"
+ },
+ "full_installer": "https://cnb.cool/fosfolio/cfos-brain-slice/-/releases/tag/v0.9.0"
+}

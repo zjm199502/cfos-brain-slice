@@ -1,12 +1,12 @@
 {
- "version": "0.9.1",
- "min_base": "0.9.0",
+ "version": "0.9.2",
+ "min_base": "0.7",
  "date": "2026-11-21",
- "notes": "# FosFolio v0.9.1 更新公告\n\n## Olympus VSI 多扫描区\n\n在「① 项目与图片」添加一个 .vsi 文件，软件会把其中的荧光扫描区逐一列出，并显示显微镜记录的名称，例如 EFI 10x_01。可在「当前图片」切换扫描区，或在「② 脑片拆分」点「自动识别所有图片的脑片」。标签和整张玻片的概览图会自动排除。\n\n已在旧版添加过的 .vsi，可以在同一个项目中再添加一次。原来最大扫描区的脑片框、人工标注、分组和分析结果仍归属该扫描区，其余扫描区作为新条目加入。各区的计数、配准和 Excel 汇总独立保存。\n\n将 .vsi 和旁边的同名像素文件夹一起保留。若有扫描区缺少配套像素文件，导入时会提示对应的 stack 编号。\n\n同一文件中各区的通道存储顺序不同时，软件按显微镜记录的通道名匹配。例如 FITC 和 Cy5 的顺序互换，显示和分析仍使用各自的像素。无法判断通道对应关系时，导入提示会列出受影响的扫描区。\n\n## 如何更新\n\n已安装 v0.9.0 的用户，打开「帮助 → 检查更新」，点击「现在更新」。补丁约 0.43 MB，重启后生效。如已单独下载补丁 ZIP，可选择「帮助 → 从文件安装补丁」。\n\nv0.8.x 用户请先安装 v0.9.0，再在软件内检查更新。国内用户推荐优先使用腾讯云 CNB 下载完整安装包。\n\nWindows x64（3.67 GB）\nhttps://cnb.cool/fosfolio/cfos-brain-slice/-/releases/download/v0.9.0/FosFolio-0.9.0-Windows-x64-Offline-Compact.zip\n\nApple 芯片 Mac（macOS 15 及以上，1.81 GB）\nhttps://cnb.cool/fosfolio/cfos-brain-slice/-/releases/download/v0.9.0/FosFolio-0.9.0-macOS-arm64-Offline-Compact.tar.xz\n\n联系方式：zjm199502@163.com，https://github.com/zjm199502/cfos-brain-slice",
+ "notes": "# FosFolio 软件内更新（v0.8.11 / v0.9.2）\n\n点击「现在更新」即可。使用 v0.8.x 的用户重启后为 v0.8.11（StarDist）；使用 v0.9.x 的用户重启后为 v0.9.2（Cellpose 4）。旧客户端标题统一显示 v0.9.2。\n\n## Excel 导出支持自选脑区\n\n在「⑧ 导出 Excel」的「脑区范围」选择「自选脑区」，按缩写、英文名、已收录的中文名或 Allen ID 搜索。勾选多个脑区后点击「应用」。项目会记住选择，手动导出和一键批量处理都使用这份清单。\n\n「按脑区×脑片」只列所选且在切片上有组织覆盖的脑区。选中上级脑区会导出包含下属区域的汇总；要同时查看亚区，请也勾选该亚区。父区与亚区的结果有重叠。半脑导出仍可单独设置，所选脑区可在「分析参数」中核对。\n\nv0.9.x 系列的补丁也包含 v0.9.1 的 Olympus VSI 多扫描区修复。\n\n在「帮助 → 检查更新」中点击「现在更新」，完成后重启软件。\n\n新用户下载 v0.9.0 完整安装包时，推荐优先使用[腾讯云 CNB 下载页](https://cnb.cool/fosfolio/cfos-brain-slice/-/releases/tag/v0.9.0)。\n\n联系方式：zjm199502@163.com，https://github.com/zjm199502/cfos-brain-slice",
  "patch": {
-  "file": "cfos-patch-0.9.1.zip",
-  "size": 432968,
-  "sha256": "0ebbc1931189274a9f0165318c3601ea4f6de23decdfa6c997768a783c84c3f4"
+  "file": "cfos-update-0.8.11-and-0.9.2.zip",
+  "size": 851719,
+  "sha256": "64afcb7cf5a178e77c9d99a938d780930c032f4727e10636adf02fa1cf84e184"
  },
  "full_installer": "https://cnb.cool/fosfolio/cfos-brain-slice/-/releases/tag/v0.9.0"
 }
