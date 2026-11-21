@@ -1,13 +1,13 @@
 # 第三方组件与致谢 / Third-party components and acknowledgements
 
-下面列出 FosMap 脑片活动图谱用到的所有公开软件包、模型、数据和代码，以及它们的版本和来源；版本即安装包中实际使用的版本。
+下表列出 FosFolio 脑片图册使用的软件包、模型、数据和代码。Cellpose 运行环境和预训练权重由用户在首次识别前按需下载。
 
 ## 模型、数据和主要算法
 
 | 名称 | 版本 | 用途 | 来源 | 引用 |
 |---|---|---|---|---|
-| StarDist | 0.9.2 | 细胞识别算法 | https://github.com/stardist/stardist | Schmidt et al., MICCAI 2018; Weigert et al., WACV 2020 |
-| StarDist 预训练模型 2D_versatile_fluo | 0.1 | 细胞核识别模型（随安装包附带，并转换为 ONNX 格式） | https://github.com/stardist/stardist-models | 同上 |
+| Cellpose | 4.2.1 | 逐通道分割 | https://github.com/MouseLand/cellpose | Cellpose-SAM |
+| Cellpose-SAM v2 | cpsam_v2 | 细胞识别预训练权重 | https://huggingface.co/mouseland/cellpose-sam | Cellpose-SAM |
 | DeepSlice | 1.2.8 | 切片在图谱中的自动定位 | https://github.com/PolarBean/DeepSlice | Carey et al., Nature Communications 2023 |
 | DeepSlice 小鼠模型权重（Allen_Mixed_Best、Synthetic_data_final） | — | DeepSlice 的预训练模型（两个模型取平均；v0.8.1 起转换为 ONNX 格式随安装包附带） | https://github.com/PolarBean/DeepSliceWeightsMQ | 同上 |
 | Xception ImageNet 预训练权重 | v0.4 | DeepSlice 网络的顶层（只带其中 ImageNet 分类层的权重） | https://github.com/fchollet/deep-learning-models/releases/tag/v0.4 | Chollet, CVPR 2017 |
@@ -15,7 +15,7 @@
 | elastix（itk-elastix） | 0.25.4 | 非线性配准 | https://github.com/InsightSoftwareConsortium/ITKElastix | Klein et al., IEEE TMI 2010; Shamonin et al., Front. Neuroinform. 2014 |
 | QuickNII 坐标约定 | — | 图谱切面参数（与 DeepSlice 输出一致），只参考了公开的格式说明，没有使用其代码 | https://www.nitrc.org/projects/quicknii | Puchades et al., PLoS ONE 2019 |
 | bioio-vsi | 2dd575b（2026-10-16） | 奥林巴斯 .vsi 文件的元数据解析（通道名、像素尺寸、维度顺序），代码收在 cfos/core/vsi_meta | https://github.com/szarma/bioio-vsi |  |
-| TensorFlow / Keras | 2.21.0 / 3.15.1 | 神经网络运行（StarDist、DeepSlice） | https://www.tensorflow.org/ |  |
+| TensorFlow / Keras | 2.21.0 / 3.15.1 | DeepSlice 旧权重转换和兼容运行 | https://www.tensorflow.org/ |  |
 | ONNX Runtime | 1.31.1 | 细胞识别神经网络的 CPU 计算 | https://onnxruntime.ai/ |  |
 | napari | 0.10.0 | 看图界面 | https://napari.org/ | napari contributors, Zenodo |
 | Qt for Python（PySide6） | 6.12.0 | 图形界面 | https://www.qt.io/qt-for-python |  |

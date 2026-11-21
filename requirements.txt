@@ -9,11 +9,11 @@ openpyxl
 matplotlib
 tensorflow-cpu; sys_platform != "darwin"
 tensorflow; sys_platform == "darwin"
-stardist
+# Cellpose 4 and native PyTorch use a separate environment managed by cfos.core.cellpose_setup.
 PySide6
 napari[pyside6]
 DeepSlice
 itk-elastix
 h5py
 networkx
-onnxruntime   # 细胞识别神经网络（比 TensorFlow 的 CPU 计算快约一倍，结果相同）
+onnxruntime

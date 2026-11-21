@@ -44,6 +44,7 @@ class Slide:
     _cache: object = field(repr=False, default=None)        # 已解码图块缓存（v0.8.3）
     _fh: object = field(repr=False, default=None)
     _fh_lock: object = field(repr=False, default=None)
+    preview_norm_cache: dict = field(repr=False, default_factory=dict)
 
     @property
     def n_levels(self) -> int:

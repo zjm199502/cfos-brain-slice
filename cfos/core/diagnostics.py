@@ -18,7 +18,8 @@ def _versions() -> dict:
     out = {}
     try:
         from importlib import metadata
-        for p in ("numpy", "scipy", "pandas", "tensorflow", "tensorflow-cpu", "keras", "stardist", "onnxruntime",
+        for p in ("numpy", "scipy", "pandas", "tensorflow", "tensorflow-cpu", "keras", "onnxruntime",
+                  "onnxruntime-directml", "onnxruntime-gpu",
                   "napari", "PySide6", "itk-elastix", "DeepSlice", "tifffile", "imagecodecs", "scikit-image"):
             try:
                 out[p] = metadata.version(p)
@@ -62,8 +63,10 @@ def system_info() -> dict:
     except Exception:  # noqa: BLE001
         pass
     try:
-        from . import accel
-        info["细胞识别神经网络"] = accel.backend_text()
+        from . import cellpose4
+        from .gpu_devices import gpu_names
+        info["系统显卡"] = list(gpu_names())
+        info["Cellpose 4 推理设备"] = cellpose4.backend_text()
     except Exception:  # noqa: BLE001
         pass
     for k in ("TF_ENABLE_ONEDNN_OPTS", "CFOS_MAX_CORES", "CFOS_WORKERS", "CFOS_NET", "OMP_NUM_THREADS"):

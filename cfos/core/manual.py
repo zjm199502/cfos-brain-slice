@@ -61,7 +61,7 @@ def measure_added(slide, x, y, px_um) -> tuple[list[float], list]:
     return means, contour
 
 
-def apply_manual(df: pd.DataFrame, manual: dict, px_um: float, n_ch: int) -> pd.DataFrame:
+def apply_manual(df: pd.DataFrame, manual: dict, px_um: float, n_ch: int, *, exact_removals=False) -> pd.DataFrame:
     """把校正记录应用到（已按阈值筛选的）细胞表上。增加列 manual：0 = 自动识别，1 = 手动补加。"""
     df = df.copy()
     df["manual"] = 0
@@ -69,14 +69,22 @@ def apply_manual(df: pd.DataFrame, manual: dict, px_um: float, n_ch: int) -> pd.
         return df
     keep = np.ones(len(df), bool)
     tol = MATCH_UM / px_um
-    for c in {int(r["channel"]) for r in manual["removed"]}:
-        sel = np.nonzero(df["channel"].to_numpy() == c)[0]
+    groups = {}
+    for r in manual["removed"]:
+        groups.setdefault((r.get("section"), int(r["channel"])), []).append((r["x"], r["y"]))
+    for (section, c), points in groups.items():
+        matches = df["channel"].to_numpy() == c
+        if section:
+            matches &= df["section"].to_numpy() == section
+        sel = np.flatnonzero(matches)
         if not len(sel):
             continue
         tree = cKDTree(df.iloc[sel][["x", "y"]].to_numpy(float))
-        pts = np.array([[r["x"], r["y"]] for r in manual["removed"] if int(r["channel"]) == c], float)
-        d, k = tree.query(pts, distance_upper_bound=tol)
-        keep[sel[k[np.isfinite(d)]]] = False
+        d, k = tree.query(points, distance_upper_bound=tol)
+        # With only the last filtered table available, already removed detections
+        # are absent. Replaying a deletion by radius could eat another neighbour.
+        matched = d == 0 if exact_removals else np.isfinite(d)
+        keep[sel[k[matched]]] = False
     df = df[keep]
     add = []
     for r in manual["added"]:

@@ -1,10 +1,8 @@
-"""逐通道细胞识别（StarDist，CPU 可运行），分块处理整张脑片，只保留细胞表格和轮廓以节省内存。"""
+"""逐通道细胞识别：分块运行分割模型，测量细胞并保存坐标与轮廓。"""
 from __future__ import annotations
 
 import os
 from dataclasses import dataclass, asdict, field
-
-os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
 
 import numpy as np
 import pandas as pd
@@ -14,84 +12,13 @@ from skimage import measure
 
 from .slide_io import Slide
 from .sections import Section
-
-_MODELS: dict = {}
-_MODEL_IDENTITIES: dict = {}
-MODEL_ROOT = None   # 项目中微调模型所在的文件夹（打开项目时设置）
-
-
-def _set_tf_threads():
-    """TensorFlow 的线程数按 cpu.main_threads()（只在 TensorFlow 第一次运行前有效）。"""
-    try:
-        import tensorflow as tf
-        from .cpu import main_threads
-        n = main_threads()
-        if tf.config.threading.get_intra_op_parallelism_threads() != n:
-            tf.config.threading.set_intra_op_parallelism_threads(n)
-            tf.config.threading.set_inter_op_parallelism_threads(2 if n >= 4 else 1)
-    except Exception:  # noqa: BLE001  已经初始化过就保持原样
-        pass
-
-
-def _model_dir(key: str):
-    from pathlib import Path
-    if key:
-        d = Path(MODEL_ROOT or ".") / key
-        if not (d / "weights_best.h5").exists() and not (d / "weights_last.h5").exists() \
-                and not (d / "model.onnx").exists():
-            raise FileNotFoundError(f"找不到微调模型“{key}”（{d}）。请在“④ 细胞识别”中改回通用模型，或重新训练。")
-        return d
-    from .resources import stardist_model_dir
-    return stardist_model_dir()
-
-
-def get_model(name: str = ""):
-    """name 为空 = 软件自带的通用模型；否则为项目 models 文件夹里微调过的模型。
-
-    v0.8.1 起默认直接用模型文件夹里的 ONNX 文件（core/sdnet.py），不加载 TensorFlow；
-    只有找不到对应的 ONNX 文件（比如 v0.8 以前训练、还没转换过的微调模型）或设置了 CFOS_NET=tf 时，
-    才用 TensorFlow（需要已安装“微调组件”）。"""
-    import logging
-    from . import accel
-    key = name or ""
-    if key not in _MODELS:
-        d = _model_dir(key)
-        if accel.net_backend() == "onnx" and d is not None:
-            from .sdnet import OnnxStarDist, onnx_for
-            f = onnx_for(d)
-            if f is not None:
-                _MODELS[key] = OnnxStarDist(d, f, key)
-                accel._status.update(device="CPU（ONNX Runtime）", failed="")
-                logging.getLogger("cfos").info("细胞识别神经网络：ONNX Runtime（%s，不用 TensorFlow）", f.name)
-                return _MODELS[key]
-        from .components import require_tensorflow
-        require_tensorflow(f"使用微调模型“{key}”" if key else "细胞识别")
-        _set_tf_threads()
-        from stardist.models import StarDist2D
-        _MODELS[key] = StarDist2D(None, name=d.name, basedir=str(d.parent)) if d is not None \
-            else StarDist2D.from_pretrained("2D_versatile_fluo")
-    m = _MODELS[key]
-    if not getattr(m, "_cfos_net_done", False) and hasattr(m, "_predict_setup"):    # TensorFlow 模型
-        m._cfos_net_done = True
-        if accel.net_backend() == "onnx":
-            try:
-                ok = accel.use_onnx_cpu(m, getattr(m, "logdir", None), key)   # 顺便转换成 ONNX，以后不再需要 TensorFlow
-            except Exception as e:  # noqa: BLE001
-                ok = False
-                logging.getLogger("cfos").warning("ONNX Runtime 不可用，改用 TensorFlow：%s", e)
-            logging.getLogger("cfos").info("细胞识别神经网络：%s", "ONNX Runtime" if ok else "TensorFlow")
-    return m
-
-
-def forget_model(name: str):
-    _MODELS.pop(name, None)
+from . import cellpose4
 
 
 @dataclass
 class ChannelParams:
     """每个通道的识别参数（界面上可调）。"""
     detect: bool = True
-    prob_thresh: float = 0.5          # StarDist 置信度阈值，越高越严格
     min_area_um2: float = 20.0        # 细胞最小面积
     max_area_um2: float = 600.0       # 细胞最大面积
     min_intensity: float = 0.0        # 平均荧光强度下限（原始灰度值），0 表示不限制
@@ -105,9 +32,21 @@ class ChannelParams:
     norm_low: float = 1.0             # 归一化百分位（低）
     norm_high: float = 99.8           # 归一化百分位（高）
     gamma: float = 1.0                # 识别前的伽马增强，<1 会把暗的细胞提亮（DAPI 默认 0.5）
-    model: str = ""                   # 识别模型：空 = 通用模型；否则为项目里微调过的模型名称
+    model: str = cellpose4.MODEL_KEY
 
     skip_dark_tiles: bool = True
+    cellprob_threshold: float = 0.0   # Cellpose cell probability threshold (logit)
+
+    def __post_init__(self):
+        # Old projects and templates may still contain a StarDist model directory.
+        self.model = cellpose4.MODEL_KEY
+
+    @classmethod
+    def from_dict(cls, stored):
+        values = {k: v for k, v in stored.items() if k in cls.__dataclass_fields__}
+        if stored.get("model") != cellpose4.MODEL_KEY:
+            values.pop("cellprob_threshold", None)
+        return cls(**values)
 
     def to_dict(self):
         return asdict(self)
@@ -124,7 +63,7 @@ class DetectionSettings:
     unmix_sig: object = field(default=None, repr=False, compare=False)
 
 
-def section_norms(slide, section, channels, model=None):
+def section_norms(slide, section, channels, model=None, cancel=None):
     """Read the normalization thumbnail and rasterize the tissue mask once per section."""
     if not channels:
         return {}
@@ -140,7 +79,7 @@ def section_norms(slide, section, channels, model=None):
     tif = getattr(slide, "_tif", None)
     if (tif is not None and slide.downsample(lv) == 1 and w*h > 8_000_000
             and tif.pages[0].dtype.kind == "u" and tif.pages[0].dtype.itemsize <= 2):
-        return _band_norms(section, channels, read_planes)
+        return _band_norms(section, channels, read_planes, cancel)
     planes = read_planes(section.bbox0)
     mask = section_mask(section, planes.shape[1:], slide.downsample(lv))
     use_mask = mask.any()
@@ -153,7 +92,24 @@ def section_norms(slide, section, channels, model=None):
     return norms
 
 
-def _band_norms(section, channels, read_planes):
+def preview_norms(slide, section, channels, model, cache, cancel=None):
+    """Reuse scalar normalization values between fields in the current single-file image."""
+    if cache is None or slide.path.suffix.lower() not in (".tif", ".tiff", ".qptiff"):
+        return section_norms(slide, section, channels, model, cancel)
+    stat = slide.path.stat()
+    mixing = None if model is None else (np.asarray(model.matrix).tobytes(), np.asarray(model.offsets).tobytes())
+    key = (str(slide.path), stat.st_size, stat.st_mtime_ns, slide.z_mode, slide.pixel_size_um,
+           tuple(section.bbox0), np.asarray(section.contour0, dtype=float).tobytes(), mixing,
+           tuple((c, p.norm_low, p.norm_high) for c, p in channels.items()))
+    if key not in cache:
+        values = section_norms(slide, section, channels, model, cancel)
+        if len(cache) >= 24:
+            cache.pop(next(iter(cache)))
+        cache[key] = values
+    return cache[key]
+
+
+def _band_norms(section, channels, read_planes, cancel=None):
     """Exact linear percentiles without allocating a full-resolution scan and its mask."""
     from dataclasses import replace
     x, y, w, h = section.bbox0
@@ -162,6 +118,8 @@ def _band_norms(section, channels, read_planes):
     tissue_seen = False
     band = max(1, min(256, 500_000 // max(1, w)))
     for offset in range(0, h, band):
+        if cancel is not None and cancel():
+            raise InterruptedError("已取消")
         box = (x, y+offset, w, min(h-offset, band))
         planes = read_planes(box)
         if not planes.size:
@@ -328,18 +286,8 @@ def _measure_tile(lab, img, c, tile, geo, crit):
     return rows
 
 
-def _segment_measure(shape, prob, dist, points, nms_thresh, img, c, tile, geo, crit):
-    """从 StarDist 网络输出得到细胞（非极大值抑制 + 画多边形，与 predict_instances 相同），再测量。
-    在后台进程中运行，不需要加载 TensorFlow。"""
-    from stardist.nms import non_maximum_suppression_sparse
-    from stardist.geometry.geom2d import polygons_to_label
-    pts, probi, disti, _ = non_maximum_suppression_sparse(dist, prob, points, nms_thresh=nms_thresh, verbose=False)
-    lab = polygons_to_label(disti, pts, prob=probi, shape=shape, scale_dist=(1, 1))
-    return _measure_tile(lab, img, c, tile, geo, crit)
-
-
 def detect_section(slide: Slide, section: Section, settings: DetectionSettings,
-                   progress=None, cancel=None, prefilter: bool = True, norms=None) -> pd.DataFrame:
+                   progress=None, cancel=None, prefilter: bool = True, norms=None, field_box=None) -> pd.DataFrame:
     """识别一张脑片上所有通道的细胞。返回表格：每行一个细胞，坐标为第 0 层像素。
 
     prefilter=False 时只做最基本的筛选（面积 ≥ 2 µm²），面积 / 强度 / 对比度阈值留给 apply_filters，
@@ -354,15 +302,26 @@ def detect_section(slide: Slide, section: Section, settings: DetectionSettings,
     poly = MplPath(contour0) if contour0 is not None else None
     geo = (x0, y0, ds, pix, contour0)
 
-    det_chs = [c for c in range(n_ch) if settings.channels.get(c, ChannelParams()).detect]
+    det_chs = [c for c in range(n_ch) if c in settings.channels and settings.channels[c].detect]
+    if not det_chs:
+        raise ValueError("请在「细胞识别」中勾选至少一个需要识别的通道。")
     um = getattr(settings, "unmix", None)
     um = um if um is not None and np.asarray(um.matrix).shape == (n_ch, n_ch) else None
     if norms is None:
-        norms = section_norms(slide, section, {c: settings.channels[c] for c in det_chs}, um)
+        norms = section_norms(slide, section, {c: settings.channels[c] for c in det_chs}, um, cancel)
     dark_tiles = []
+    devices = {c: set() for c in det_chs}
 
     T, ov = settings.tile, settings.overlap
-    tiles = [(tx, ty) for ty in range(0, H, T) for tx in range(0, W, T)]
+    x_start, y_start, x_stop, y_stop = 0, 0, W, H
+    if field_box is not None:
+        # Keep the section's tile origin and full overlap, including at the field boundary.
+        fx, fy, fw, fh = field_box
+        x_start = max(0, int(np.floor((fx - x0) / (ds*T))) * T)
+        y_start = max(0, int(np.floor((fy - y0) / (ds*T))) * T)
+        x_stop = min(W, int(np.ceil((fx + fw - x0) / ds)))
+        y_stop = min(H, int(np.ceil((fy + fh - y0) / ds)))
+    tiles = [(tx, ty) for ty in range(y_start, y_stop, T) for tx in range(x_start, x_stop, T)]
     total = len(tiles) * max(1, len(det_chs))
     state = {"done": 0}
     results = []          # 按分块、通道的顺序保存（列表或尚未完成的后台任务），保证结果顺序与单进程相同
@@ -385,7 +344,7 @@ def detect_section(slide: Slide, section: Section, settings: DetectionSettings,
             import logging
             logging.getLogger("cfos").warning("并行测量进程意外退出，改为单进程：%s", e)
             _reset_pool()
-            results[i] = _segment_measure(*args)
+            results[i] = _measure_tile(*args)
         tick()
 
     def pending():
@@ -399,19 +358,18 @@ def detect_section(slide: Slide, section: Section, settings: DetectionSettings,
         while block and len(pending()) > max_pending:
             finish(pending()[0])
 
-    def submit(net, img, c, tile, crit):
+    def submit(args):
         nonlocal pool
-        args = net + (img, c, tile, geo, crit)
         if pool is not None:
             try:
-                results.append((pool.submit(_segment_measure, *args), args))
+                results.append((pool.submit(_measure_tile, *args), args))
                 return
             except Exception as e:  # noqa: BLE001  后台进程启动失败等：改为在本进程里算
                 import logging
                 logging.getLogger("cfos").warning("并行测量不可用，改为单进程：%s", e)
                 _reset_pool()
                 pool = None
-        results.append(_segment_measure(*args))
+        results.append(_measure_tile(*args))
         tick()
 
     try:
@@ -451,11 +409,10 @@ def detect_section(slide: Slide, section: Section, settings: DetectionSettings,
                                        x0 + min(tx + T, W) * ds, y0 + min(ty + T, H) * ds))
                     tick()
                     continue
-                # 主进程只算神经网络（GPU 或 CPU），得到候选点；去重、画轮廓、测量交给后台进程
-                model = get_model(p.model)
-                prob, dist, points = model.predict_sparse(x, prob_thresh=p.prob_thresh, show_tile_progress=False)
                 crit = (prefilter, p.min_area_um2, p.max_area_um2, thr, p.min_contrast, bg)
-                submit((x.shape, prob, dist, points, model.thresholds.nms), img, c, (tx, ty, T, rx0, ry0), crit)
+                labels = cellpose4.predict_labels(x, cellprob_threshold=p.cellprob_threshold, cancel=cancel)
+                devices[c].add(cellpose4.backend_text())
+                submit((labels, img, c, (tx, ty, T, rx0, ry0), geo, crit))
                 collect(block=True)
         for i in pending():
             if cancel is not None and cancel():
@@ -472,23 +429,26 @@ def detect_section(slide: Slide, section: Section, settings: DetectionSettings,
                           [f"mean_ch{k}" for k in range(n_ch)])
     df.insert(0, "section", section.name)
     df["cell_id"] = np.arange(len(df))
+    if field_box is not None:
+        df = df[(df.x >= fx) & (df.x < fx + fw) & (df.y >= fy) & (df.y < fy + fh)].copy()
     df.attrs["dark_tiles"] = dark_tiles
+    df.attrs["channel_models"] = {c: cellpose4.MODEL_KEY for c in det_chs}
+    df.attrs["channel_devices"] = {c: sorted(labels) for c, labels in devices.items()}
+    df.attrs["inference_settings"] = raw_signature(settings)
+    df.attrs["z_mode"] = getattr(slide, "z_mode", "max")
     return df
 
 
-RAW_KEYS = ("detect", "model", "prob_thresh", "norm_low", "norm_high", "gamma", "deconv", "deconv_blur_um",
-            "deconv_iter", "bg_radius_um")
+RAW_KEYS = ("cellprob_threshold", "norm_low", "norm_high", "gamma", "deconv", "deconv_blur_um",
+            "deconv_iter", "bg_radius_um", "skip_dark_tiles")
 
 
 def raw_signature(settings: DetectionSettings) -> str:
-    """影响“原始识别结果”的参数。参数不变时可以直接复用上次的识别结果（中断后继续）。"""
+    """Include the segmentation engine and enabled channels' inference settings."""
     import json
-    d = {"px": settings.pixel_um, "tile": settings.tile, "ov": settings.overlap,
-         "ch": {str(c): {k: getattr(p, k) for k in RAW_KEYS if not (k == "model" and not p.model)}
-                for c, p in sorted(settings.channels.items())}}
-    for c, p in settings.channels.items():
-        if not p.skip_dark_tiles:
-            d["ch"][str(c)]["skip_dark_tiles"] = False
+    d = {"model": cellpose4.MODEL_KEY, "px": settings.pixel_um, "tile": settings.tile, "ov": settings.overlap,
+         "ch": {str(c): {k: getattr(p, k) for k in RAW_KEYS}
+                for c, p in settings.channels.items() if p.detect}}
     if getattr(settings, "unmix_sig", None):     # 只有开启了串色校正才加进签名，旧项目的签名不变
         d["unmix"] = settings.unmix_sig
     return json.dumps(d, sort_keys=True)

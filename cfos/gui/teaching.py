@@ -43,9 +43,9 @@ LESSONS = {
          ("contrast_bright.png", "太亮：细胞连成一片，看不出边界", False),
          ("contrast_dim.png", "太暗：弱阳性细胞看不见", False)]),
     3: ("<b>目标</b>：每个细胞被一个轮廓圈住，不多圈、不漏圈。<br>"
-        "<b>做法</b>：选切片厚度 → 放大到一小块 → 点“预览当前视野的细胞识别” → 调“置信度阈值”等参数 → "
+        "<b>做法</b>：选切片厚度和识别通道 → 放大到一小块 → 点“预览当前视野的细胞识别” → 调整 Cellpose 掩膜阈值 → "
         "<b>在亮、暗、密集三种区域各预览一次</b> → 满意后点“选择当前图片的脑片并识别”，勾选需要的脑片。"
-        "识别完成后调阈值可以用“按新阈值重新筛选”，几秒钟就好。<br>"
+        "调整面积、平均强度或局部对比度后可重新筛选；调整掩膜阈值后需重新识别。<br>"
         "<b>常见错误</b><br>"
         "• 只看了一个地方就认为参数合适；<br>"
         "• 不同批次（染色深浅不同）的数据随意改参数，导致组间不可比：同一个实验请用同一套参数（可存为模板）；<br>"
@@ -212,7 +212,6 @@ class TeachingMixin:
 
     # ---------------------------------------------------------- 示例项目
     def open_demo_project(self):
-        from ..core.project import Project
         src = resources_dir() / "demo" / DEMO_FILE
         if not src.exists():
             self.error("没有找到示例图片（resources/demo）。请重新安装软件。")
@@ -221,6 +220,10 @@ class TeachingMixin:
                                                 str(Path.home() / "Documents"))
         if not base:
             return
+        self._when_task_stops(lambda: self._load_demo_project(src, base))
+
+    def _load_demo_project(self, src, base):
+        from ..core.project import Project
         folder = Path(base) / "cFos示例项目"
         img = folder / "原图" / DEMO_FILE
         img.parent.mkdir(parents=True, exist_ok=True)

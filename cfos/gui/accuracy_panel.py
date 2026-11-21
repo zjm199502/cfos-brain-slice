@@ -8,6 +8,7 @@ from qtpy.QtWidgets import (
 )
 
 from ..core import accuracy as A
+from ..core.cellpose4 import MODEL_KEY as CELLPOSE_MODEL
 
 BOX_LAYER = "准确率检查框"
 PTS_LAYER = "人工计数"
@@ -16,6 +17,14 @@ RES_LAYER = "准确率结果"
 
 def _score(value, fmt):
     return format(value, fmt) if np.isfinite(value) else "—"
+
+
+def _model_name(key):
+    if key is None:
+        return "模型未记录"
+    if key == CELLPOSE_MODEL:
+        return "Cellpose 4（cpsam_v2）"
+    return key or "StarDist（荧光细胞核）"
 
 
 class AccuracyMixin:
@@ -127,16 +136,21 @@ class AccuracyMixin:
         df = self.cells_for(self.image)
         if df is None:
             self.info("尚无整图结果。可直接使用下方的盲评比较。"); return
-        self._blind_locked = True
-        res = A.check(df, c, box, pts[:, ::-1][:, :2] if pts.shape[1] == 2 else pts[:, [-1, -2]],
-                      self.slide.pixel_size_um)
         from ..core.manual import section_of
+        from ..core.project import processed_section_names
         sec = section_of(self.image, box[0] + box[2] / 2, box[1] + box[3] / 2)
+        if sec not in processed_section_names(self.image, df):
+            self.info("检查框所在脑片尚无识别结果。可使用下方的盲评比较。"); return
+        models = df.attrs.get("section_models", {}).get(sec)
+        if models is not None and c not in models:
+            self.info("这张脑片上次识别时未启用此通道。可使用下方的盲评比较。"); return
+        model = _model_name(models.get(c) if models is not None else None)
+        self._blind_locked = True
+        res = A.check(df[df["section"] == sec], c, box, pts[:, [-1, -2]], self.slide.pixel_size_um)
         res["miss_details"] = A.miss_details(self.project, self.image, c, res["missed_xy"], self.slide.pixel_size_um)
         res["field_type"] = self.acc_field.currentText()
         res["field_area_mm2"] = box[2] * box[3] * (self.slide.pixel_size_um / 1000) ** 2
-        A.record(self.project, self.image, sec, c, box, res, self.project.detection.channels[c].model
-                 if c in self.project.detection.channels else "")
+        A.record(self.project, self.image, sec, c, box, res, model, cells=df)
         self.project.save()
         self._acc_show_result(res)
         self._acc_summary_text()
@@ -235,13 +249,14 @@ class AccuracyMixin:
         candidate = dict(min_contrast=self.review_contrast.value(), deconv=self.review_deconv.isChecked())
         field_type = self.acc_field.currentText()
         px = self.slide.pixel_size_um
+        norm_cache = self.slide.preview_norm_cache
         def job(task):
             slide = open_slide(image.path, z_mode=project.z_mode)
             try:
                 unmix.prepare(project, slide, image)
                 from copy import deepcopy
                 settings = deepcopy(effective_settings(project.detection, image, sec))
-                return compare(slide, sec, settings, c, box, pts, candidate, task.is_cancelled), settings
+                return compare(slide, sec, settings, c, box, pts, candidate, task.is_cancelled, norm_cache), settings
             finally:
                 slide.close()
         def done(payload):
@@ -252,7 +267,7 @@ class AccuracyMixin:
                       "人工点":pts.tolist(), "面积mm2":w*h*(px/1000)**2, "当前":asdict(settings.channels[c]),
                       "候选":{**asdict(settings.channels[c]), **candidate},
                       "新增":len(gained), "新增获确认":confirmed, "仅当前":len(lost)}
-            lines = [f"{sec.name} · {project.channel_names[c]} · 人工 {len(pts)} 个"]
+            lines = [f"{sec.name} · {project.channel_names[c]} · {_model_name(settings.channels[c].model)} · 人工 {len(pts)} 个"]
             for label, (score, frame) in zip(("当前","候选"), results):
                 record[label+"计数"] = {k:score[k] for k in ("tp","fp","fn")}
                 lines.append(f"{label}：TP {score['tp']}，FP {score['fp']}，FN {score['fn']}，F1 {_score(score['f1'], '.2f')}")
@@ -303,7 +318,7 @@ class AccuracyMixin:
         history = []
         for r in im.field_reviews:
             a,b = r["当前计数"], r["候选计数"]
-            history.append(f"{r['脑片']} · {r['通道']} · {r['类型']} · 框 {r['视野']}\n"
+            history.append(f"{r['脑片']} · {r['通道']} · {_model_name(r['当前'].get('model'))} · {r['类型']} · 框 {r['视野']}\n"
                            f"当前 TP/FP/FN {a['tp']}/{a['fp']}/{a['fn']}；候选 {b['tp']}/{b['fp']}/{b['fn']}；"
                            f"新增确认 {r['新增获确认']}/{r['新增']}")
         if history:

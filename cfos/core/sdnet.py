@@ -15,7 +15,7 @@ import numpy as np
 
 class OnnxStarDist:
     def __init__(self, model_dir: Path, onnx_file: Path, name: str = ""):
-        from .accel import OrtNet
+        from .accel import stardist_net
         self.logdir = Path(model_dir)
         self.name = name or self.logdir.name
         cfg = json.loads((self.logdir / "config.json").read_text(encoding="utf-8"))
@@ -25,7 +25,7 @@ class OnnxStarDist:
         if tf.exists():
             th.update(json.loads(tf.read_text(encoding="utf-8")))
         self.thresholds = SimpleNamespace(prob=float(th["prob"]), nms=float(th["nms"]))
-        self.keras_model = OrtNet(onnx_file, "CPUExecutionProvider", False)
+        self.keras_model = stardist_net(onnx_file, self.name)
         self.onnx_file = Path(onnx_file)
         (self.config.backbone == "unet" and self.config.axes == "YXC" and self.config.n_channel_in == 1) or \
             _raise(ValueError(f"不支持的模型结构：{self.logdir}"))

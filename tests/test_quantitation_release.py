@@ -11,6 +11,26 @@ from cfos.core.sections import Section
 
 
 class Quantitation(unittest.TestCase):
+    def test_excel_section_states_and_unprocessed_counts(self):
+        from cfos.core.export import build_tables, export_excel
+        with TemporaryDirectory() as folder:
+            p = Project(Path(folder), channel_names=["Cy5"])
+            sections = [Section(i, (0, 0, 32, 32), [], name)
+                        for i, name in enumerate(["A", "B", "C"])]
+            im = ImageEntry("sample.tif", sections=sections)
+            other = ImageEntry("other.tif", sections=[Section(1, (0, 0, 32, 32), [], "D")])
+            p.images = [im, other]
+            df = pd.DataFrame(dict(section=["A"], merged_id=[0], combo=["0"], channel=[0], x=[1.], y=[2.]))
+            df.attrs.update(processed_sections=["A", "B"], carried_forward_sections=["A"])
+            p.save_cells(im, df)
+            path = export_excel(p, p.folder / "states.xlsx", masks=False, qc=False, quality=False)
+            summary = pd.read_excel(path, sheet_name="按脑片汇总").set_index("脑片")
+            self.assertEqual(summary.loc["A", "筛选说明"], "沿用上次结果")
+            self.assertEqual(summary["识别状态"].tolist(), ["已分析（有细胞）", "已分析（零细胞）", "未分析", "未分析"])
+            self.assertEqual(summary.loc[["A", "B"], "Cy5+"].tolist(), [1, 0])
+            self.assertTrue(summary.loc[["C", "D"], "Cy5+"].isna().all())
+            self.assertEqual(build_tables(p)["按脑片汇总"]["脑片"].tolist(), ["A", "B"])
+
     def test_excel_hemisphere_modes(self):
         from cfos.core.export import export_excel
         with TemporaryDirectory() as folder:
@@ -106,11 +126,8 @@ class Quantitation(unittest.TestCase):
             project.unmix = {"enabled":False}
             slide = open_slide(path)
             raw = pd.DataFrame(columns=["section","channel","x","y","area_um2","mean_ch0","contour"])
-            model = root/"model"
-            model.mkdir()
-            (model/"model.onnx").write_bytes(b"version A")
             try:
-                with patch.object(detection,"_model_dir",return_value=model), patch.object(
+                with patch.object(detection.cellpose4, "model_identity", return_value={"weights": "A"}) as identity, patch.object(
                         detection,"detect_section",return_value=raw) as inference:
                     def run():
                         return pipeline.detect_image(project,im,sl=slide)
@@ -122,7 +139,7 @@ class Quantitation(unittest.TestCase):
                     self.assertEqual(run()["done"],1)
                     project.z_mode="mean"
                     self.assertEqual(run()["done"],1)
-                    (model/"model.onnx").write_bytes(b"modified version B")
+                    identity.return_value = {"weights": "B"}
                     self.assertEqual(run()["done"],1)
                     project.part_path(im,sec.name).write_bytes(b"broken")
                     self.assertEqual(run()["done"],1)

@@ -21,10 +21,10 @@ def _v(n):
 
 # 模型、数据、关键算法（手工维护）
 KEY = [
-    ("StarDist", _v("stardist"), "细胞识别算法", "BSD-3-Clause", "https://github.com/stardist/stardist",
-     "Schmidt et al., MICCAI 2018; Weigert et al., WACV 2020"),
-    ("StarDist 预训练模型 2D_versatile_fluo", "0.1", "细胞核识别模型（随安装包附带，并转换为 ONNX 格式）",
-     "BSD-3-Clause", "https://github.com/stardist/stardist-models", "同上"),
+    ("Cellpose", "4.2.1", "逐通道细胞分割（PyTorch）", "BSD-3-Clause", "https://github.com/MouseLand/cellpose",
+     "Pachitariu et al., Cellpose-SAM"),
+    ("Cellpose-SAM", "cpsam_v2", "荧光图像实例分割权重", "BSD-3-Clause",
+     "https://huggingface.co/mouseland/cellpose-sam", "Pachitariu et al., Cellpose-SAM"),
     ("DeepSlice", _v("DeepSlice"), "切片在图谱中的自动定位",
      "GPL-3.0", "https://github.com/PolarBean/DeepSlice", "Carey et al., Nature Communications 2023"),
     ("DeepSlice 小鼠模型权重（Allen_Mixed_Best、Synthetic_data_final）", "—",
@@ -39,9 +39,9 @@ KEY = [
      "Klein et al., IEEE TMI 2010; Shamonin et al., Front. Neuroinform. 2014"),
     ("QuickNII 坐标约定", "—", "图谱切面参数（与 DeepSlice 输出一致），只参考了公开的格式说明，没有使用其代码", "—",
      "https://www.nitrc.org/projects/quicknii", "Puchades et al., PLoS ONE 2019"),
-    ("TensorFlow / Keras", f"{_v('tensorflow')} / {_v('keras')}", "神经网络运行（StarDist、DeepSlice）", "Apache-2.0",
+    ("TensorFlow / Keras", f"{_v('tensorflow')} / {_v('keras')}", "DeepSlice 旧权重转换和兼容运行", "Apache-2.0",
      "https://www.tensorflow.org/", ""),
-    ("ONNX Runtime", _v("onnxruntime"), "细胞识别神经网络的 CPU 计算", "MIT", "https://onnxruntime.ai/", ""),
+    ("ONNX Runtime", _v("onnxruntime"), "神经网络推理（CPU 或可用的 GPU 执行后端）", "MIT", "https://onnxruntime.ai/", ""),
     ("napari", _v("napari"), "看图界面", "BSD-3-Clause", "https://napari.org/", "napari contributors, Zenodo"),
     ("Qt for Python（PySide6）", _v("PySide6"), "图形界面", "LGPL-3.0（未修改，动态链接）", "https://www.qt.io/qt-for-python", ""),
     ("Python（python-build-standalone）", "3.13", "安装包中的 Python 运行环境", "PSF License-2.0 等",

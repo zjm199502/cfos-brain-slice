@@ -14,7 +14,7 @@ from . import quality as Q
 from .field_review import effective_settings
 from .coloc import colocalize, nucleus_channel
 from .log import log, friendly
-from .project import Project, ImageEntry
+from .project import Project, ImageEntry, processed_section_names
 from .sections import find_sections
 from .slide_io import open_slide
 
@@ -46,50 +46,91 @@ def drop_excluded(df: pd.DataFrame, im: ImageEntry) -> pd.DataFrame:
 
 
 # ---------------------------------------------------------------- 识别
-def rebuild_cells(project: Project, im: ImageEntry, pixel_um0: float) -> pd.DataFrame | None:
-    """从每张脑片的原始识别结果，按当前阈值重新筛选并计算共标（不重新识别）。"""
-    frames = []
-    names = []
-    for s in im.sections:
-        if not s.enabled:
-            continue
-        raw = project.load_part(im, s)
-        if raw is not None:
-            frames.append(raw)
-            names.append(s.name)
-    if not frames:
+def rebuild_cells(project: Project, im: ImageEntry, pixel_um0: float | None = None) -> pd.DataFrame | None:
+    """Reapply thresholds where raw detections exist and retain previous counts elsewhere."""
+    parts = {s.name: raw for s in im.sections if s.enabled
+             if (raw := project.load_part(im, s)) is not None}
+    previous = project.load_cells(im) if len(parts) < sum(s.enabled for s in im.sections) else None
+    carried = set(processed_section_names(im, previous)).difference(parts) if previous is not None else set()
+    if not parts and not carried:
         return None
-    return _merge_frames(project, im, pixel_um0, frames, names)
+    if pixel_um0 is None:
+        slide = open_slide(im.path)
+        try:
+            pixel_um0 = slide.pixel_size_um
+        finally:
+            slide.close()
+    return _merge_frames(project, im, pixel_um0, list(parts.values()), list(parts),
+                         previous=previous, carried=carried)
 
 
-def _merge_frames(project, im, pixel_um0, frames, names, partial=False):
+def _merge_frames(project, im, pixel_um0, frames, names, partial=False, previous=None, carried=()):
     sections = {sec.name: sec for sec in im.sections}
-    filtered = [det.apply_filters(raw, effective_settings(project.detection, im, sections[name]))
-                for name, raw in zip(names, frames)]
-    df = pd.concat(filtered, ignore_index=True)
+    filtered = []
+    settings_by_section = {}
+    for name, raw in zip(names, frames):
+        settings = effective_settings(project.detection, im, sections[name])
+        filtered.append(det.apply_filters(raw, settings))
+        if "inference_settings" in raw.attrs:
+            settings_by_section[name] = {
+                "inference_settings": raw.attrs["inference_settings"], "z_mode": raw.attrs.get("z_mode"),
+                "model_identity": raw.attrs.get("model_identity"),
+                "filters": {c: {k: getattr(p, k) for k in ("min_area_um2", "max_area_um2", "min_intensity",
+                                                          "bg_fold", "min_contrast")}
+                            for c, p in settings.channels.items() if c in raw.attrs.get("channel_models", {})}}
     from .manual import apply_manual, load_manual
     manual = load_manual(project, im)
-    if partial:
-        manual = {kind: [r for r in records if r.get("section") in names or
-                         (kind == "removed" and not r.get("section"))]
-                  for kind, records in manual.items()}
-    df = apply_manual(df, manual, pixel_um0, len(project.channel_names))
+
+    def correct(frame, section_names, *, exact_removals=False):
+        relevant = {kind: [r for r in records if r.get("section") in section_names
+                           or (kind == "removed" and not r.get("section"))]
+                    for kind, records in manual.items()}
+        return apply_manual(frame, relevant, pixel_um0, len(project.channel_names), exact_removals=exact_removals)
+
+    corrected = []
+    if filtered:
+        corrected.append(correct(pd.concat(filtered, ignore_index=True), set(names)))
+    if carried:
+        old = previous[previous["section"].isin(carried)]
+        if "manual" in old:
+            old = old[old["manual"] != 1]
+        corrected.append(correct(old, carried, exact_removals=True))
+    df = corrected[0] if len(corrected) == 1 else pd.concat(corrected, ignore_index=True)
     df["cell_id"] = np.arange(len(df))
     df = colocalize(df, pixel_um0, project.coloc, nucleus_channel(project.channel_names)) if len(df) else df
-    processed = set(names)
+    processed = set(names).union(carried)
+    retained = set(carried)
     if partial:
         previous = project.load_cells(im)
         if previous is not None:
             enabled = {s.name for s in im.sections if s.enabled}
             keep = previous[previous["section"].isin(enabled.difference(names))]
             # Older whole-image results predate explicit tracking of zero-cell sections.
-            processed.update(enabled.intersection(previous.attrs.get("processed_sections", enabled)))
+            processed.update(enabled.intersection(processed_section_names(im, previous)))
+            retained.update(set(previous.attrs.get("carried_forward_sections", ())).intersection(processed - set(names)))
             if len(keep):
                 for column in ("cell_id", "merged_id"):
                     if len(df) and column in keep:
                         df[column] += int(keep[column].max()) + 1
                 df = pd.concat([keep, df], ignore_index=True)
     df.attrs["processed_sections"] = [s.name for s in im.sections if s.name in processed]
+    df.attrs["carried_forward_sections"] = [s.name for s in im.sections if s.name in retained]
+    sources = {}
+    devices = {}
+    if previous is not None:
+        for attribute, dest in [("section_models", sources), ("section_devices", devices),
+                                ("section_settings", settings_by_section)]:
+            for key, value in previous.attrs.get(attribute, {}).items():
+                if key in processed and key not in names:
+                    dest[key] = value
+    for key, raw in zip(names, frames):
+        if "channel_models" in raw.attrs:
+            sources[key] = raw.attrs["channel_models"]
+        if "channel_devices" in raw.attrs:
+            devices[key] = raw.attrs["channel_devices"]
+    df.attrs["section_models"] = sources
+    df.attrs["section_devices"] = devices
+    df.attrs["section_settings"] = settings_by_section
     project.save_cells(im, df)
     return df
 
@@ -100,7 +141,7 @@ def detect_image(project: Project, im: ImageEntry, sl=None, redo=False, report=N
     所以中途取消、死机或断电后，再点一次就从没做完的脑片继续。返回 {"reused": n, "done": n}。"""
     own = sl is None
     if own:
-        sl = open_slide(im.path)
+        sl = open_slide(im.path, z_mode=project.z_mode)
     try:
         if not im.sections and section_names is None:
             im.sections = find_sections(sl, channels=project.tissue_channels())
@@ -115,31 +156,8 @@ def detect_image(project: Project, im: ImageEntry, sl=None, redo=False, report=N
         _prepare_unmix(project, sl, im)        # 识别前去除串色：开启了但还没估算时，先用这张图片估算
         import hashlib
         import json
-        from . import accel
-        from .sdnet import onnx_for
-        models = {}
-        for p in project.detection.channels.values():
-            if p.detect and p.model not in models:
-                directory = det._model_dir(p.model)
-                stamp = []
-                if directory:
-                    files = set(directory.iterdir())
-                    if accel.net_backend() == "onnx" and not (directory / "model.onnx").is_file():
-                        selected = onnx_for(directory)
-                        if selected is not None:
-                            files.add(selected)
-                    for file in sorted(files):
-                        if file.suffix in (".json", ".h5", ".onnx") and file.is_file():
-                            stat = file.stat()
-                            stamp.append((file.name, stat.st_size, stat.st_mtime_ns))
-                identity = (str(directory), stamp, accel.net_backend())
-                if det._MODEL_IDENTITIES.get(p.model) != identity:
-                    det.forget_model(p.model)
-                    det._MODEL_IDENTITIES[p.model] = identity
-                models[p.model] = identity
         src = Path(im.path).stat()
-        identity = [det.raw_signature(project.detection), project.z_mode, models,
-                    src.st_size, src.st_mtime_ns, sl.pixel_size_um]
+        identity = [det.cellpose4.model_identity(), project.z_mode, src.st_size, src.st_mtime_ns, sl.pixel_size_um]
         frames = []
         a, b = progress_range
         reused = done = 0
@@ -148,9 +166,7 @@ def detect_image(project: Project, im: ImageEntry, sl=None, redo=False, report=N
             if cancel is not None and cancel():
                 raise InterruptedError
             settings = effective_settings(project.detection, im, s)
-            signature_data = [identity, s.bbox0, s.contour0]
-            if settings is not project.detection:
-                signature_data[0] = [det.raw_signature(settings), *identity[1:]]
+            signature_data = [identity, det.raw_signature(settings), s.bbox0, s.contour0]
             sig = hashlib.sha256(json.dumps(signature_data, sort_keys=True).encode()).hexdigest()
             cached = None if redo else project.load_part(im, s, sig)
             if cached is not None:
@@ -164,6 +180,7 @@ def detect_image(project: Project, im: ImageEntry, sl=None, redo=False, report=N
                            f"{name}：识别 {s.name} 的细胞（{d}/{t} 块）")
             log.info("识别 %s %s", name, s.name)
             raw = det.detect_section(sl, s, settings, progress=prog, cancel=cancel, prefilter=False)
+            raw.attrs["model_identity"] = identity[0]
             project.save_part(im, s, sig, raw)
             frames.append(raw)
             done += 1
@@ -189,25 +206,8 @@ def refilter_all(project: Project, report=None) -> int:
     for i, im in enumerate(project.images):
         if report:
             report(i, len(project.images), f"正在重新筛选和计算共标：{im.key}")
-        parts = {sec.name: raw for sec in im.sections if sec.enabled
-                 if (raw := project.load_part(im, sec)) is not None}
-        if not parts:
-            # 旧版本项目没有原始识别结果，只能在原结果上重新算共标
-            df = project.load_cells(im)
-            if df is None or df.empty:
-                continue
-            sl = open_slide(im.path); px = sl.pixel_size_um; sl.close()
-            from .manual import apply_manual, load_manual
-            df = df.drop(columns=[c for c in ("merged_id", "combo", "nuc_by_intensity") if c in df.columns])
-            if "manual" in df.columns:
-                df = df[df["manual"] != 1]  # 上次补加的细胞先去掉，下面按记录重新加
-            df = apply_manual(df, load_manual(project, im), px, len(project.channel_names))
-            df = colocalize(df, px, project.coloc, nucleus_channel(project.channel_names))
-            project.save_cells(im, df)
-        else:
-            sl = open_slide(im.path); px = sl.pixel_size_um; sl.close()
-            _merge_frames(project, im, px, list(parts.values()), list(parts))
-        n += 1
+        if rebuild_cells(project, im) is not None:
+            n += 1
     return n
 
 

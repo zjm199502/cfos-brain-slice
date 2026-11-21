@@ -1,16 +1,7 @@
-"""“微调模型”需要的组件（TensorFlow、tf2onnx 等）：按需下载、校验、安装、自检（v0.8.1，计划 2.6）。
+"""Optional TensorFlow runtime for DeepSlice and Keras-to-ONNX conversion.
 
-细胞识别和图谱配准已经不需要 TensorFlow（见 sdnet.py、deepslice_onnx.py），所以以后的安装包可以不带它，
-小几百 MB。只有学生第一次点“开始训练”时才自动下载这些组件：
-- 组件包由我们自己打包（packaging/make_components.py），版本与软件开发、测试用的完全相同，
-  放在 GitHub installers 分支的 updates/components/，按 90 MB 分卷；清单是 updates/components.json；
-- 每个分卷下载后核对 MD5，不对就重新下载；断网后再点会从断开的地方继续（HTTP Range）；
-- 解压到用户目录（不改安装目录），装完自动自检：加载 TensorFlow、在一小块合成图像上训练几步、转换成 ONNX；
-  自检不通过就明确提示，不让在坏环境里训练；
-- 没联网的电脑：用“帮助 → 安装微调组件（离线包）…”选拷过来的组件包 zip；
-- 组件与软件版本绑定：REQUIRED 变了（以后升级 TensorFlow），已装的旧组件自动视为需要更新。
-
-安装包里本来就带 TensorFlow 的（v0.8 及以前），什么都不用下载。"""
+The component archive and installation directory retain their historical names.
+"""
 from __future__ import annotations
 
 import hashlib
@@ -88,12 +79,11 @@ def tensorflow_available() -> bool:
     return activate() and ok()
 
 
-def require_tensorflow(purpose: str = "微调模型"):
+def require_tensorflow(purpose: str = "脑图谱自动定位（DeepSlice）"):
     if not tensorflow_available():
         raise ComponentMissing(
-            f"{purpose}需要“微调组件”（TensorFlow），这台电脑还没有安装。\n"
-            "在“④ 细胞识别 → 微调模型”里点“开始训练”时会自动下载安装；"
-            "没有网络的电脑可以用“帮助 → 安装微调组件（离线包）…”。")
+            f"{purpose}需要 TensorFlow 兼容组件。使用随软件提供的 DeepSlice ONNX 模型时，"
+            "请确认模型文件已安装，并清除 CFOS_NET=tf 后重新启动。")
 
 
 # ------------------------------------------------------------------ 下载
@@ -220,17 +210,17 @@ def install_pack(zip_path, progress=None) -> dict:
                 raise ValueError(f"组件包里有不安全的路径：{n}")
             z.extract(n, tmp)
             if progress and k % 200 == 0:
-                progress(k, len(names), "正在解压微调组件…")
+                progress(k, len(names), "正在解压 TensorFlow 兼容组件…")
     shutil.rmtree(d, ignore_errors=True)
     tmp.rename(d)
     if progress:
-        progress(0, 0, "正在自检微调组件（加载 TensorFlow、试训练几步、转换模型）…")
+        progress(0, 0, "正在核对 TensorFlow 和 ONNX 的推理结果…")
     ok, msg = selftest_subprocess(d)
     info["selftest_ok"] = ok
     info["selftest"] = msg
     (d / "component.json").write_text(json.dumps(info, ensure_ascii=False, indent=1), encoding="utf-8")
     if not ok:
-        raise RuntimeError(f"微调组件自检没有通过，暂时不能训练：{msg}\n请把诊断包发给开发者。")
+        raise RuntimeError(f"TensorFlow 兼容组件自检失败：{msg}\n请把诊断包发给开发者。")
     activate()
     # 清理旧版本组件
     for old in components_root().glob("微调组件_*"):
@@ -264,7 +254,7 @@ def selftest_subprocess(d: Path) -> tuple[bool, str]:
 
 
 def selftest() -> tuple[bool, str]:
-    """加载 TensorFlow → 在合成的小图像上训练 StarDist 两步 → 转换成 ONNX → 与 TensorFlow 输出对比。"""
+    """Verify a known Keras transformation and its exported ONNX predictions."""
     import tempfile
     import time
     import numpy as np
@@ -272,51 +262,36 @@ def selftest() -> tuple[bool, str]:
     try:
         os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
         import tensorflow as tf
-        from stardist.models import Config2D, StarDist2D
         from . import accel
-        rng = np.random.default_rng(0)
-        X, Y = [], []
-        yy, xx = np.mgrid[:128, :128]
-        for _ in range(4):
-            x = rng.normal(0.1, 0.03, (128, 128)).astype(np.float32)
-            lab = np.zeros((128, 128), np.int32)
-            for k in range(1, 9):
-                cy, cx = rng.integers(10, 118, 2)
-                m = (yy - cy) ** 2 + (xx - cx) ** 2 < 36
-                x[m] += 0.8; lab[m & (lab == 0)] = k
-            X.append(x); Y.append(lab)
+        model = tf.keras.Sequential([
+            tf.keras.Input(shape=(None, None, 1)),
+            tf.keras.layers.Rescaling(scale=2.0, offset=1.0),
+        ])
+        x = np.arange(16, dtype=np.float32).reshape(1, 4, 4, 1)
+        expected = 2 * x + 1
+        np.testing.assert_allclose(model(x, training=False).numpy(), expected, rtol=1e-5)
         with tempfile.TemporaryDirectory() as td:
-            conf = Config2D(n_rays=8, grid=(2, 2), n_channel_in=1, unet_n_depth=2, train_patch_size=(64, 64),
-                            train_batch_size=2, train_epochs=1, train_steps_per_epoch=2, train_tensorboard=False)
-            m = StarDist2D(conf, name="自检", basedir=td)
-            m.train(X, Y, validation_data=(X[:1], Y[:1]), epochs=1, steps_per_epoch=2)
-            p = accel.export_onnx(m.keras_model, Path(td) / "model.onnx")
-            x = X[0][np.newaxis, ..., np.newaxis]
-            a = accel.OrtNet(p, "CPUExecutionProvider").predict(x)
-            b = m.keras_model.predict(x, verbose=0)
-            d = max(float(np.abs(a[0] - b[0]).max()), float(np.abs(a[1] - b[1]).max()))
-            if d > 1e-3:
-                return False, f"转换后的模型与 TensorFlow 结果不一致（差 {d:.4f}）"
-        return True, f"TensorFlow {tf.__version__}，训练和转换正常（{time.time() - t0:.0f} 秒）"
+            p = accel.export_onnx(model, Path(td) / "model.onnx")
+            converted, = accel.OrtNet(p, "CPUExecutionProvider").predict(x)
+            np.testing.assert_allclose(converted, expected, rtol=1e-5)
+        return True, f"TensorFlow {tf.__version__}，Keras 与 ONNX 推理通过（{time.time() - t0:.0f} 秒）"
     except Exception as e:  # noqa: BLE001
         return False, f"{type(e).__name__}: {str(e)[:200]}"
 
 
 def ensure_tensorflow(progress=None, cancel=None) -> str:
-    """训练前调用：没有组件就自动下载、安装、自检。返回说明文字（已有时为空）。
-    progress(done, total, 文字)。"""
+    """Install and validate the optional TensorFlow component when needed."""
     if tensorflow_available():
         return ""
     if progress:
-        progress(0, 0, "第一次训练：正在连接服务器，准备下载微调组件…")
+        progress(0, 0, "正在连接服务器，准备下载 TensorFlow 兼容组件…")
 
     def rep(n, total):
         if progress:
-            progress(n, total, f"第一次训练：正在下载微调组件 {n / 1e6:.0f} / {total / 1e6:.0f} MB"
-                               "（断网后再点“开始训练”会接着下载）")
+            progress(n, total, f"正在下载 TensorFlow 兼容组件 {n / 1e6:.0f} / {total / 1e6:.0f} MB")
     z = download_pack(rep, cancel)
     info = install_pack(z, progress)
     z.unlink(missing_ok=True)
     if not tensorflow_available():
-        raise RuntimeError("微调组件已安装，但还是加载不了 TensorFlow。请把诊断包发给开发者。")
-    return f"已安装微调组件（{info.get('version')}）。"
+        raise RuntimeError("兼容组件已安装，但无法加载 TensorFlow。请把诊断包发给开发者。")
+    return f"已安装 TensorFlow 兼容组件（{info.get('version')}）。"

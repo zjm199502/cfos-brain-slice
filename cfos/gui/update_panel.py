@@ -17,7 +17,7 @@ FEATURES = [
     ("① 项目与图片", "导入 .qptiff / OME-TIFF / 江丰 .kfbf / 奥林巴斯 .vsi 等荧光扫描图，支持单层和 z-stack（最大投影 / 景深合成）。"),
     ("② 脑片拆分", "自动找出一张玻片上的每张脑片，可手动调整、排除破损区域。"),
     ("③ 亮度 / 对比度", "逐通道调整显示，所有截图沿用同一设置。"),
-    ("④ 细胞识别", "StarDist 深度学习逐通道识别阳性细胞（不需要显卡），可人工补点 / 删点、用自己的标注微调模型，"
+    ("④ 细胞识别", "使用 Cellpose 4 逐通道识别阳性细胞，支持 CPU 和 GPU 推理，可人工补点、删点并保存标注块，"
                   "并用“识别准确率检查”给出查准率、查全率；厚切片可识别前减背景、去卷积。"),
     ("⑤ 共标统计", "按距离 / 轮廓判断多通道共标，可按强度分级。"),
     ("⑥ 脑图谱配准", "DeepSlice 自动定位 + 前后位置自动校正 + 轮廓与 DAPI 纹理非线性贴合到 Allen CCFv3，可疑脑片自动标出，可拖动脑区边界手动矫正。"),
@@ -40,10 +40,10 @@ def about_html() -> str:
            if os.path.exists(logo) else "")
     return (f"{img}<h2>{APP_NAME} {updater.version_text()}</h2>"
             "<p>多通道脑片配准与细胞定量。从扫描图到按脑区统计的 cFos 阳性细胞数，"
-            "全部步骤在一个中文界面里完成，只用 CPU，离线运行。原名“FosMap 脑片活动图谱”和“cFos 脑片分析”。</p>"
+            "全部步骤在一个中文界面里离线完成。原名“FosMap 脑片活动图谱”和“cFos 脑片分析”。</p>"
             f"<ul>{rows}</ul>"
             f"<p>{contact_html()}</p>"
-            "<p>本软件使用了 StarDist、DeepSlice、elastix、Allen 小鼠脑图谱（CCFv3）、napari 等公开的软件和数据，"
+            "<p>本软件使用了 Cellpose、DeepSlice、elastix、Allen 小鼠脑图谱（CCFv3）、napari 等公开的软件和数据，"
             "完整列表和来源见 GitHub 上的 THIRD_PARTY.md。</p>")
 
 
@@ -81,7 +81,6 @@ class UpdateMixin:
         self.auto_update_act.setChecked(updater.auto_check_enabled())
         self.auto_update_act.toggled.connect(updater.set_auto_check)
         m.addAction(self.auto_update_act)
-        a = QAction("安装微调组件（离线包）…", self); a.triggered.connect(self.install_component_file); m.addAction(a)
         a = QAction("在 GitHub 上查看更新公告和补丁", self)
         a.triggered.connect(lambda: QDesktopServices.openUrl(QUrl(updater.DOWNLOAD_PAGE))); m.addAction(a)
 
@@ -178,22 +177,6 @@ class UpdateMixin:
             return
         self.run_task(lambda task: updater.install_patch(f), self._patch_installed, label="正在安装补丁…")
 
-    def install_component_file(self):
-        """没联网的电脑：选拷过来的微调组件包（TensorFlow 等，训练模型时才需要）。"""
-        from ..core import components as C
-        if C.tensorflow_available():
-            self.info("这台电脑已经可以训练模型（微调组件已安装），不需要再装。")
-            return
-        f, _ = QFileDialog.getOpenFileName(self, f"选择微调组件包（{C.platform_tag()}，从 GitHub 下载的 .zip）", "",
-                                           "组件包 (*.zip)")
-        if not f:
-            return
-
-        def done(info):
-            self.info(f"微调组件已安装并自检通过（{info.get('version')}）：{info.get('selftest', '')}\n"
-                      "现在可以在“④ 细胞识别 → 微调模型”里训练了。")
-        self.run_task(lambda task: C.install_pack(f, progress=task.report), done, label="正在安装微调组件…")
-
     def _patch_installed(self, info):
         r = QMessageBox.question(self, "补丁已安装",
                                  f"补丁 v{info['version']} 已安装，重启软件后生效。\n\n"
@@ -221,6 +204,10 @@ class UpdateMixin:
             self._restart()
 
     def _restart(self):
+        self._when_task_stops(self._restart_when_idle)
+
+    def _restart_when_idle(self):
+        self._release_project()
         try:
             if self.project is not None:
                 self.project.save()

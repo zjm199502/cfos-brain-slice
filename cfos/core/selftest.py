@@ -17,8 +17,8 @@ import numpy as np
 # 软件运行需要的组件（导入名, 显示名）
 MODULES = [("numpy", "numpy"), ("scipy", "scipy"), ("pandas", "pandas"), ("skimage", "scikit-image"),
            ("tifffile", "tifffile"), ("PIL", "Pillow"), ("openpyxl", "openpyxl（Excel）"),
-           ("matplotlib", "matplotlib"), ("onnxruntime", "ONNX Runtime"), ("stardist", "StarDist"),
-           ("csbdeep", "CSBDeep"), ("itk", "ITK / elastix"),
+           ("matplotlib", "matplotlib"), ("onnxruntime", "ONNX Runtime（图谱配准）"),
+           ("itk", "ITK / elastix"),
            ("zarr", "zarr"), ("networkx", "networkx（功能网络）"),
            ("psutil", "psutil"), ("napari", "napari（看图界面）"), ("qtpy", "Qt 界面")]
 
@@ -47,7 +47,7 @@ def _run(steps, name, fn, report, i, n):
 
 def run(report=None) -> tuple[bool, str, list]:
     """返回 (全部通过, 结果文字, 各步骤)。report(i, n, 文字) 用于显示进度。"""
-    from .resources import resources_dir, stardist_model_dir
+    from .resources import resources_dir
     steps: list[Step] = []
     ctx: dict = {}
     n = 6
@@ -64,7 +64,6 @@ def run(report=None) -> tuple[bool, str, list]:
         return f"{len(MODULES)} 个组件都能加载"
 
     def resources():
-        from . import accel
         r = resources_dir()
         from . import deepslice_onnx as DO
         need = ["atlas/allen_ccfv3_25um.npz", "atlas/structures.csv", "demo/示例脑片.ome.tif"]
@@ -76,13 +75,9 @@ def run(report=None) -> tuple[bool, str, list]:
             elif not (r / "deepslice/xception_top.npz").exists() and \
                     not (r / "deepslice/xception_weights_tf_dim_ordering_tf_kernels.h5").exists():
                 miss.append("deepslice/xception_top.npz")
-        d = stardist_model_dir()
-        if d is None:
-            miss.append("models/2D_versatile_fluo")
         if miss:
             raise RuntimeError("缺少资源文件：" + "、".join(miss))
-        onnx_ok = accel._sig_ok(accel.onnx_path(d), accel._signature(d))
-        return "图谱、DeepSlice、细胞识别模型、示例图片都在" + ("" if onnx_ok else "（识别模型的 ONNX 文件需要第一次使用时转换）")
+        return "已找到图谱、DeepSlice 和示例图片"
 
     def read():
         from .slide_io import open_slide
@@ -95,7 +90,7 @@ def run(report=None) -> tuple[bool, str, list]:
         return f"{len(sl.channels)} 个通道，{sl.pixel_size_um:.2f} µm/像素，找到 {len(secs)} 张脑片"
 
     def detect():
-        from . import accel
+        from . import cellpose4
         from .detection import DetectionSettings, ChannelParams, detect_section
         from .sections import Section
         sl, s = ctx["slide"], ctx["section"]
@@ -110,7 +105,7 @@ def run(report=None) -> tuple[bool, str, list]:
         counts = [int((df["channel"] == c).sum()) for c in range(len(sl.channels))]
         if sum(counts) == 0:
             raise RuntimeError("示例脑片上没有识别到细胞")
-        dev = accel._status.get("device") or "TensorFlow"
+        dev = cellpose4.backend_text()
         names = [c.name for c in sl.channels]
         return "、".join(f"{a} {b} 个" for a, b in zip(names, counts)) + f"（400 µm 见方；神经网络用 {dev}）"
 

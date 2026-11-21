@@ -23,25 +23,26 @@ def effective_settings(settings, image, section):
     return replace(settings, channels=channels)
 
 
-def compare(slide, section, settings, channel, box, manual, candidate, cancel):
+def compare(slide, section, settings, channel, box, manual, candidate, cancel, norm_cache=None):
     """两版共享全脑片归一化范围，并在评估框外留出分块边界。"""
     p = settings.channels[channel]
-    norms = detection.section_norms(slide, section, {channel: p}, settings.unmix)
+    norms = detection.preview_norms(slide, section, {channel: p}, settings.unmix, norm_cache, cancel)
     x, y, w, h = box
-    sx, sy, sw, sh = section.bbox0
-    ds = slide.downsample(slide.level_for_pixel_size(settings.pixel_um))
-    pad = int(np.ceil(settings.overlap * ds))
-    x0, y0 = max(sx, int(x)-pad), max(sy, int(y)-pad)
-    x1, y1 = min(sx+sw, int(np.ceil(x+w))+pad), min(sy+sh, int(np.ceil(y+h))+pad)
-    crop = replace(section, bbox0=(x0,y0,x1-x0,y1-y0))
     result = []
+    raw = None
+    raw_key = None
     for param in (p, replace(p, **candidate)):
         if cancel():
             raise InterruptedError
         local = replace(settings, channels={c: replace(param if c == channel else v, detect=c == channel)
                                              for c, v in settings.channels.items()})
-        df = detection.detect_section(slide, crop, local, cancel=cancel, norms=norms)
-        df = df[(df.x >= x) & (df.x < x+w) & (df.y >= y) & (df.y < y+h)]
+        key = detection.raw_signature(local)
+        if key != raw_key:
+            raw = detection.detect_section(slide, section, local, cancel=cancel, norms=norms,
+                                           prefilter=False, field_box=box)
+            raw = raw[(raw.x >= x) & (raw.x < x+w) & (raw.y >= y) & (raw.y < y+h)]
+            raw_key = key
+        df = detection.apply_filters(raw, local)
         score = accuracy.check(df, channel, box, manual, slide.pixel_size_um)
         result.append((score, df))
     old, new = result[0][1], result[1][1]

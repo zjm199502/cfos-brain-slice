@@ -20,6 +20,7 @@ from qtpy.QtWidgets import (
 )
 
 from ..core import detection as det
+from ..core import cellpose4
 from ..core.coloc import colocalize, merged_cells, summarize, nucleus_channel
 from ..core.export import export_excel
 from ..core.project import Project, ImageEntry, STANDARD_CHANNELS, DYE_LABELS, UNUSED_LABEL, EXPORT_HEMISPHERES
@@ -36,7 +37,6 @@ from .figure_panel import FigureMixin
 from .accuracy_panel import AccuracyMixin
 from .update_panel import UpdateMixin
 
-DECONV_SLOWDOWN = "多用 30–45% 的时间"   # 示例脑片实测（2 通道，4 核）：378 → 488 秒（v0.8）、403 → 581 秒（v0.8.1）
 from .. import APP_NAME  # noqa: E402
 IMAGE_FILTER = "荧光全片图像 (*.qptiff *.tif *.tiff *.ome.tif *.ome.tiff *.kfbf *.vsi);;所有文件 (*)"
 COLORMAP = {"DAPI": "blue", "Green": "green", "Red": "red", "Far red": "magenta"}
@@ -76,6 +76,7 @@ class MainWindow(UpdateMixin, TeachingMixin, FigureMixin, AccuracyMixin, Relocat
         self.image: ImageEntry | None = None
         self.slide = None
         self.task: Task | None = None
+        self._after_task = None
         self._cells_cache: dict[str, pd.DataFrame] = {}
 
         # 看图窗口
@@ -269,21 +270,35 @@ class MainWindow(UpdateMixin, TeachingMixin, FigureMixin, AccuracyMixin, Relocat
             self.info("上一个任务还在运行，请等待完成或点击“取消”。")
             return
         self.task = Task(fn, *args)
+        task = self.task
+        self.device_box.set_busy(True)
         self.progress.setRange(0, 0); self.progress.show(); self.cancel_btn.show()
         self.statusBar().showMessage(label)
 
         def prog(done, total, text):
+            if self.task is not task or self._after_task is not None:
+                return
             self.progress.setRange(0, max(total, 1)); self.progress.setValue(done)
             if text:
                 self.statusBar().showMessage(text)
 
         def ok(res):
+            if self.task is not task:
+                return
+            self.device_box.set_busy(False)
             self.progress.hide(); self.cancel_btn.hide()
+            if self._after_task is not None:
+                return
             self.statusBar().showMessage("完成。", 5000)
             on_done(res)
 
         def fail(msg):
+            if self.task is not task:
+                return
+            self.device_box.set_busy(False)
             self.progress.hide(); self.cancel_btn.hide()
+            if self._after_task is not None:
+                return
             self.statusBar().showMessage("任务未完成。", 5000)
             if msg == "任务已取消。":
                 self.info("任务已取消。已经完成的部分（例如已识别的脑片）都已保存，下次会从没做完的地方继续。")
@@ -295,7 +310,47 @@ class MainWindow(UpdateMixin, TeachingMixin, FigureMixin, AccuracyMixin, Relocat
         self.task.progress.connect(prog)
         self.task.finished_ok.connect(ok)
         self.task.failed.connect(fail)
+        self.task.finished.connect(self._finish_transition, Qt.QueuedConnection)
         self.task.start()
+
+    def _when_task_stops(self, action):
+        if self.task is not None and self.task.isRunning():
+            self._after_task = action
+            self.task.cancel()
+            self.centralWidget().setEnabled(False)
+            self.statusBar().showMessage("正在结束当前任务…")
+            return
+        action()
+
+    def _finish_transition(self):
+        if self._after_task is not None and self.sender() is self.task:
+            action, self._after_task = self._after_task, None
+            self.centralWidget().setEnabled(True)
+            action()
+
+    def _release_project(self):
+        self.task = None
+        self._after_task = None
+        self.centralWidget().setEnabled(True)
+        self.device_box.set_busy(False)
+        self.progress.hide(); self.cancel_btn.hide()
+        cellpose4.close()
+        if self.slide is not None:
+            self.slide.close()
+            self.slide = None
+        self.image = None
+        self._ft_patch = None
+        if getattr(self, "_save_timer", None) and self._save_timer.isActive() and self.project:
+            self._save_timer.stop()
+            self.project.save()
+
+    def closeEvent(self, event):
+        if self.task is not None and self.task.isRunning():
+            event.ignore()
+            self._when_task_stops(self.close)
+            return
+        self._release_project()
+        super().closeEvent(event)
 
     def ch_name(self, c):
         return self.project.channel_names[c] if self.project and c < len(self.project.channel_names) else f"通道{c + 1}"
@@ -439,11 +494,13 @@ class MainWindow(UpdateMixin, TeachingMixin, FigureMixin, AccuracyMixin, Relocat
             return
         if Project.is_project(d):
             if QMessageBox.question(self, APP_NAME, "这个文件夹里已经有项目了，要直接打开吗？") == QMessageBox.Yes:
-                self._load_project(Project.load(d))
+                self._when_task_stops(lambda: self._open_saved_project(d))
             return
-        p = Project(folder=Path(d)); p.save()
-        self._load_project(p)
-        self.add_images()
+        def create():
+            p = Project(folder=Path(d)); p.save()
+            self._load_project(p)
+            self.add_images()
+        self._when_task_stops(create)
 
     def open_project(self):
         d = QFileDialog.getExistingDirectory(self, "选择项目文件夹")
@@ -452,12 +509,19 @@ class MainWindow(UpdateMixin, TeachingMixin, FigureMixin, AccuracyMixin, Relocat
         if not Project.is_project(d):
             self.error("这个文件夹里没有找到项目文件（cfos_project.json）。")
             return
+        self._when_task_stops(lambda: self._open_saved_project(d))
+
+    def _open_saved_project(self, d):
         try:
             self._load_project(Project.load(d))
         except Exception as e:  # noqa: BLE001
             self.error(f"项目文件无法读取：{e}")
 
     def _load_project(self, p: Project):
+        if self.task is not None and self.task.isRunning():
+            self._when_task_stops(lambda: self._load_project(p))
+            return
+        self._release_project()
         self._q_levels = None
         from ..core.log import attach_project, log
         attach_project(p.folder); log.info("打开项目 %s", p.folder)
@@ -1113,9 +1177,12 @@ class MainWindow(UpdateMixin, TeachingMixin, FigureMixin, AccuracyMixin, Relocat
     # ================================================================ ④ 细胞识别
     def _panel_detection(self):
         w = QWidget(); L = QVBoxLayout(w)
-        L.addWidget(hint("每个通道单独识别阳性细胞（使用 StarDist 深度学习模型，不需要显卡）。\n"
+        L.addWidget(hint("Cellpose 4（Cellpose-SAM）逐通道识别细胞，可按通道设置掩膜阈值。\n"
                          "建议流程：先把看图窗口放大到一块有代表性的区域，点“预览当前视野”，"
                          "对照图片检查圈出的细胞是否合适，再调整参数；满意后点“识别当前图片”或“批量识别”。"))
+        from .device_panel import DetectionDeviceBox
+        self.device_box = DetectionDeviceBox(self.run_task)
+        L.addWidget(self.device_box)
         tb = QGroupBox("切片厚度"); tl = QVBoxLayout(tb)
         self.thick_combo = QComboBox()
         self.thick_combo.addItem("薄切片（≤ 20 µm）", "thin")
@@ -1136,7 +1203,7 @@ class MainWindow(UpdateMixin, TeachingMixin, FigureMixin, AccuracyMixin, Relocat
         b3 = big_button("批量识别项目中所有图片"); b3.clicked.connect(lambda: self.run_detection(True))
         b4 = big_button("按新阈值重新筛选（几秒钟，不用重新识别）"); b4.clicked.connect(self.refilter)
         b4.setToolTip("只改了面积、最低强度、自动阳性阈值、局部对比度时，点这里即可，不需要重新识别。\n"
-                      "改了灵敏度、提亮、减背景、去卷积则需要重新识别。")
+                      "改了 Cellpose 掩膜阈值、提亮、减背景或去卷积，需要重新识别。")
         for b in (b1, b2, b3, b4):
             L.addWidget(b)
         mb = QGroupBox("手动校正细胞（识别完成后）"); ml = QVBoxLayout(mb)
@@ -1155,18 +1222,18 @@ class MainWindow(UpdateMixin, TeachingMixin, FigureMixin, AccuracyMixin, Relocat
         L.addWidget(mb)
         self._accuracy_widgets(L)
 
-        tb2 = QGroupBox("用自己的标注改进识别模型（可选）"); tl2 = QVBoxLayout(tb2)
-        lb = QLabel("通用模型对你们的染色不够准时使用：①把看图窗口移到有代表性的地方，点“取一块并自动标注”；"
-                    "②在左侧用画笔补画漏掉的细胞（每画一个新细胞前按 M 键或点“画新细胞”）、用橡皮擦掉错的；"
-                    "③点“保存这块”。亮的、暗的、密集的区域各取几块，共 5–10 块后点“开始训练”（约 10 分钟）。")
+        tb2 = QGroupBox("保存人工校正的标注块"); tl2 = QVBoxLayout(tb2)
+        lb = QLabel("将视野移到目标区域，点击“取一块并自动标注”。用画笔或橡皮修正轮廓，"
+                    "按 M 开始下一个细胞，再点“保存这块”。标注块按通道保存在项目的 training 文件夹中。")
         lb.setWordWrap(True); tl2.addWidget(lb)
         r = QHBoxLayout(); r.addWidget(QLabel("通道：")); self.ft_ch = QComboBox(); r.addWidget(self.ft_ch, 1); tl2.addLayout(r)
         self.ft_ch.currentIndexChanged.connect(lambda _: self._ft_refresh())
         r = QHBoxLayout()
-        b = QPushButton("取一块并自动标注"); b.clicked.connect(self.ft_new_patch); r.addWidget(b)
-        b = QPushButton("保存这块"); b.clicked.connect(self.ft_save_patch); r.addWidget(b)
+        self.ft_new_btn = QPushButton("取一块并自动标注")
+        self.ft_new_btn.clicked.connect(self.ft_new_patch); r.addWidget(self.ft_new_btn)
+        self.ft_save_btn = QPushButton("保存这块")
+        self.ft_save_btn.clicked.connect(self.ft_save_patch); r.addWidget(self.ft_save_btn)
         tl2.addLayout(r)
-        b = QPushButton("开始训练"); b.clicked.connect(self.ft_train); tl2.addWidget(b)
         self.ft_info = QLabel(""); self.ft_info.setWordWrap(True); tl2.addWidget(self.ft_info)
         L.addWidget(tb2)
         self.det_summary = QLabel(""); self.det_summary.setWordWrap(True)
@@ -1292,21 +1359,18 @@ class MainWindow(UpdateMixin, TeachingMixin, FigureMixin, AccuracyMixin, Relocat
             p = self.project.detection.channels[c]
             box = QGroupBox(nm); f = QFormLayout(box)
             on = QCheckBox("识别这个通道的细胞"); on.setChecked(p.detect)
-            prob = QDoubleSpinBox(); prob.setRange(0.05, 0.95); prob.setSingleStep(0.05); prob.setValue(p.prob_thresh)
-            prob.setToolTip("越小找到的细胞越多（包括较暗的），越大越严格。默认 0.5。")
             amin = QDoubleSpinBox(); amin.setRange(1, 5000); amin.setValue(p.min_area_um2); amin.setSuffix(" µm²")
             amax = QDoubleSpinBox(); amax.setRange(10, 20000); amax.setValue(p.max_area_um2); amax.setSuffix(" µm²")
             imin = QDoubleSpinBox(); imin.setRange(0, 65535); imin.setValue(p.min_intensity)
             imin.setToolTip("细胞内平均荧光强度低于此值的不计为阳性。0 表示不限制。")
-            from ..core.finetune import list_models
-            mdl = QComboBox(); mdl.addItem("通用模型（软件自带）", "")
-            mdl.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon); mdl.setMinimumContentsLength(12)
-            for m in list_models(self.project):
-                if m.get("channel") == nm:
-                    mdl.addItem(f"{m['name']}（准确率 {m['f1_before']}→{m['f1_after']}）", m["name"])
-            mdl.setCurrentIndex(max(0, mdl.findData(p.model)))
-            mdl.setToolTip("“用自己的标注改进识别模型”训练出的模型会出现在这里。换模型后需要重新识别。")
-            f.addRow(on); f.addRow("识别模型", mdl); f.addRow("识别灵敏度阈值", prob); f.addRow("最小面积", amin); f.addRow("最大面积", amax)
+            cp_thresh = QDoubleSpinBox()
+            cp_thresh.setRange(-6, 6)
+            cp_thresh.setSingleStep(0.5)
+            cp_thresh.setValue(p.cellprob_threshold)
+            cp_thresh.setToolTip("Cellpose 的细胞像素得分阈值，默认 0。降低阈值可纳入较弱的像素。")
+            f.addRow(on)
+            f.addRow("Cellpose 掩膜阈值", cp_thresh)
+            f.addRow("最小面积", amin); f.addRow("最大面积", amax)
             skip_dark = QCheckBox("跳过极暗分块"); skip_dark.setChecked(p.skip_dark_tiles)
             skip_dark.setToolTip("对照弱阳性漏检时可取消勾选，然后重新识别。")
             f.addRow(skip_dark)
@@ -1330,32 +1394,31 @@ class MainWindow(UpdateMixin, TeachingMixin, FigureMixin, AccuracyMixin, Relocat
             bgr.setToolTip("识别前去掉大范围的雾状背景。半径要比细胞大，一般 20–50 µm。只影响识别，强度测量仍用原图。")
             f.addRow("识别前减背景", bgr)
             dcv = QCheckBox("识别前去卷积"); dcv.setChecked(p.deconv)
-            dcv.setToolTip(f"让模糊的细胞边界变清楚，粘在一起的细胞更容易分开，识别更准；但识别时间会增加（示例脑片{DECONV_SLOWDOWN}）。\n"
+            dcv.setToolTip("对模糊的细胞边界做去卷积。可在同一视野预览效果。\n"
                            "厚切片推荐勾选（厚切片预设默认勾选），薄切片一般不需要（默认不勾选）。")
             dcb = QDoubleSpinBox(); dcb.setRange(0.1, 3.0); dcb.setSingleStep(0.1); dcb.setValue(p.deconv_blur_um); dcb.setSuffix(" µm")
             dcb.setToolTip("图像的模糊程度。太大会让细胞变成空心圆环，样图建议 0.4 µm。")
             dci = QDoubleSpinBox(); dci.setDecimals(0); dci.setRange(1, 50); dci.setValue(p.deconv_iter)
-            dch = QLabel(f"勾选会增加运行时间（{DECONV_SLOWDOWN}），但提高识别精度")
-            dch.setStyleSheet("color: gray;"); dch.setWordWrap(True)
-            f.addRow(dcv); f.addRow(dch); f.addRow("去卷积模糊程度", dcb); f.addRow("去卷积迭代次数", dci)
+            f.addRow(dcv); f.addRow("去卷积模糊程度", dcb); f.addRow("去卷积迭代次数", dci)
 
-            def apply(_=None, c=c, on=on, prob=prob, amin=amin, amax=amax, imin=imin, gm=gm, bgf=bgf,
-                      bgr=bgr, dcv=dcv, dcb=dcb, dci=dci, mct=mct, mdl=mdl, skip_dark=skip_dark):
+            def apply(_=None, c=c, on=on, amin=amin, amax=amax, imin=imin, gm=gm, bgf=bgf,
+                      bgr=bgr, dcv=dcv, dcb=dcb, dci=dci, mct=mct, skip_dark=skip_dark, cp_thresh=cp_thresh):
                 p = self.project.detection.channels[c]
                 p.skip_dark_tiles = skip_dark.isChecked()
                 p.min_contrast = mct.value()
-                p.model = mdl.currentData() or ""
                 p.gamma = gm.value(); p.bg_fold = bgf.value()
                 p.bg_radius_um = bgr.value(); p.deconv = dcv.isChecked()
                 p.deconv_blur_um = dcb.value(); p.deconv_iter = int(dci.value())
-                p.detect = on.isChecked(); p.prob_thresh = prob.value()
+                p.detect = on.isChecked()
+                p.cellprob_threshold = cp_thresh.value()
                 p.min_area_um2 = amin.value(); p.max_area_um2 = amax.value(); p.min_intensity = imin.value()
                 self._save_later()
 
-            for wdg in (prob, amin, amax, imin, gm, bgf, bgr, dcb, dci, mct):
+            for wdg in (cp_thresh, amin, amax, imin, gm, bgf, bgr, dcb, dci, mct):
                 wdg.valueChanged.connect(apply)
             skip_dark.toggled.connect(apply)
-            on.toggled.connect(apply); dcv.toggled.connect(apply); mdl.currentIndexChanged.connect(apply)
+            on.toggled.connect(apply)
+            dcv.toggled.connect(apply)
             self.det_rows.addWidget(box)
 
     def preview_detection(self):
@@ -1373,26 +1436,47 @@ class MainWindow(UpdateMixin, TeachingMixin, FigureMixin, AccuracyMixin, Relocat
         H0, W0 = sl.level_shapes[0]
         x, y = max(0, x), max(0, y)
         w, h = min(w, W0 - x), min(h, H0 - y)
-        sec = Section(id=0, bbox0=(x, y, w, h), contour0=[], name="预览")
+        if w <= 0 or h <= 0:
+            self.info("请先把视野移到图片范围内。")
+            return
+        field_box = (x, y, w, h)
+        sections = []
+        for part in self.image.sections:
+            sx, sy, sw, sh = part.bbox0
+            if part.enabled and x < sx+sw and y < sy+sh and sx < x+w and sy < y+h:
+                sections.append(part)
+        if self.image.sections and not sections:
+            self.info("请将视野移到已启用的脑片上。")
+            return
+        if not sections:
+            sections = [Section(id=0, bbox0=field_box, contour0=[], name="预览")]
         path = self.image.path
         settings = self.project.detection
 
         project, image = self.project, self.image
 
         def job(task):
-            s = open_slide(path)
+            s = open_slide(path, z_mode=project.z_mode)
             try:
                 from ..core.unmix import prepare as _prepare_unmix
                 if (project.unmix or {}).get("enabled") and "coef" not in project.unmix:
                     task.report(0, 1, "第一次识别：正在估算通道串色比例…")
                 _prepare_unmix(project, s, image)
                 from ..core.field_review import effective_settings
-                from ..core.manual import section_of
-                section_name = section_of(image, x+w/2, y+h/2)
-                source = next((part for part in image.sections if part.name == section_name), None)
-                preview_settings = effective_settings(settings, image, source) if source else settings
-                return det.detect_section(s, sec, preview_settings, progress=lambda d, t: task.report(d, t, "正在预览识别…"),
-                                          cancel=task.is_cancelled)
+                frames = []
+                for part in sections:
+                    preview_settings = effective_settings(settings, image, part)
+                    active = {c: p for c, p in preview_settings.channels.items() if p.detect}
+                    task.report(0, 1, f"正在读取 {part.name} 的归一化范围…")
+                    norms = det.preview_norms(s, part, active, preview_settings.unmix,
+                                              sl.preview_norm_cache, task.is_cancelled)
+                    frame = det.detect_section(s, part, preview_settings, field_box=field_box,
+                                               norms=norms,
+                                               progress=lambda d, t: task.report(d, t, "正在预览识别…"),
+                                               cancel=task.is_cancelled)
+                    frame.attrs.clear()
+                    frames.append(frame)
+                return pd.concat(frames, ignore_index=True)
             finally:
                 s.close()
 
@@ -1412,7 +1496,8 @@ class MainWindow(UpdateMixin, TeachingMixin, FigureMixin, AccuracyMixin, Relocat
                     self.viewer.add_shapes(polys, shape_type="polygon", name=f"预览-{nm}",
                                            edge_color=self.ch_point_color(c), face_color="transparent",
                                            edge_width=max(w, h) / 800)
-            self.det_summary.setText("预览结果：" + "，".join(msg) + "。\n不满意可以调整参数后再预览一次。")
+            scope = "按脑片参数预览" if image.sections else "未拆分脑片，按当前视野归一化预览"
+            self.det_summary.setText(scope + "：" + "，".join(msg) + "。")
 
         self.run_task(job, done, label="正在预览识别…")
 
@@ -1483,8 +1568,21 @@ class MainWindow(UpdateMixin, TeachingMixin, FigureMixin, AccuracyMixin, Relocat
         layout.addWidget(QLabel("勾选本次要识别的脑片，可多选。"))
         items = QListWidget()
         layout.addWidget(items)
+        from ..core.pipeline import drop_excluded
+        from ..core.project import section_result_states
+        cells = drop_excluded(self.cells_for(self.image), self.image)
+        states = section_result_states(self.image, cells)
+        carried = set(cells.attrs.get("carried_forward_sections", [])) if cells is not None else set()
         for section in sections:
-            item = QListWidgetItem(section.name, items)
+            status = states[section.name]
+            if cells is not None and status != "未分析":
+                saved_models = cells.attrs.get("section_models", {}).get(section.name, {})
+                if not saved_models or any(key != cellpose4.MODEL_KEY for key in saved_models.values()):
+                    status += "，历史结果（可用 Cellpose 4 重跑）"
+            if section.name in carried:
+                status += "，沿用上次筛选结果"
+            item = QListWidgetItem(f"{section.name}　{status}", items)
+            item.setData(Qt.UserRole, section.name)
             item.setCheckState(Qt.Unchecked)
         all_button = QPushButton("全选")
         def select_all():
@@ -1497,7 +1595,7 @@ class MainWindow(UpdateMixin, TeachingMixin, FigureMixin, AccuracyMixin, Relocat
         start.setText("开始识别")
         start.setEnabled(False)
         def selected():
-            return [items.item(i).text() for i in range(items.count())
+            return [items.item(i).data(Qt.UserRole) for i in range(items.count())
                     if items.item(i).checkState() == Qt.Checked]
         items.itemChanged.connect(lambda _: start.setEnabled(bool(selected())))
         buttons.accepted.connect(dlg.accept)
@@ -1571,7 +1669,7 @@ class MainWindow(UpdateMixin, TeachingMixin, FigureMixin, AccuracyMixin, Relocat
                       "注意：所有通道已默认勾选“识别前去卷积”。\n"
                       "• 去卷积让厚切片中模糊的细胞边界变清楚，粘在一起的细胞更容易分开；\n"
                       "• 只用于找细胞，细胞的亮度、阳性判断和脑区平均荧光强度仍按原图测量；\n"
-                      f"• 识别会变慢（示例脑片{DECONV_SLOWDOWN}）。\n\n"
+                      "• 开启去卷积会增加处理时间。\n\n"
                       "不需要时可以在下面各通道里取消勾选。建议先放大到一块区域，"
                       "点“预览当前视野的减背景/去卷积效果”和“预览当前视野的细胞识别”检查效果，再识别全部脑片。")
         else:
@@ -1590,7 +1688,10 @@ class MainWindow(UpdateMixin, TeachingMixin, FigureMixin, AccuracyMixin, Relocat
                 if df is not None and len(df):
                     lines.append(f"{im.key}：" + ", ".join(f"{self.ch_name(c)} {int((df['channel'] == c).sum())}"
                                                          for c in range(len(project.channel_names))))
-            self.det_summary.setText(f"已按新阈值重新筛选 {n} 张图片：\n" + "\n".join(lines))
+                if df is not None and df.attrs.get("carried_forward_sections"):
+                    sections = "、".join(df.attrs["carried_forward_sections"])
+                    lines.append(f"{im.key} 的 {sections} 缺少原始缓存，沿用上次筛选结果。")
+            self.det_summary.setText(f"已更新 {n} 张图片的细胞统计。\n" + "\n".join(lines))
 
         self.run_task(lambda task: refilter_all(project, task.report), done, label="正在重新筛选…")
 
@@ -1677,19 +1778,13 @@ class MainWindow(UpdateMixin, TeachingMixin, FigureMixin, AccuracyMixin, Relocat
 
         self.run_task(lambda task: refilter_all(project, task.report), done, label="正在更新细胞和共标…")
 
-    # ---------------- 微调模型
+    # ---------------- 人工标注块
     def _ft_refresh(self):
         if self.project is None or not self.ft_ch.currentText():
             return
-        from ..core.finetune import list_patches, list_models
-        c = self.ft_ch.currentIndex()
-        n = len(list_patches(self.project, c))
-        ms = [m for m in list_models(self.project) if m.get("channel") == self.ft_ch.currentText()]
-        t = f"“{self.ft_ch.currentText()}”已有 {n} 个标注块。"
-        if ms:
-            m = ms[-1]
-            t += f"\n最近训练的模型：{m['name']}，准确率（F1）{m['f1_before']} → {m['f1_after']}。"
-        self.ft_info.setText(t)
+        from ..core.finetune import list_patches
+        n = len(list_patches(self.project, self.ft_ch.currentIndex()))
+        self.ft_info.setText(f"“{self.ft_ch.currentText()}”已保存 {n} 个标注块。")
 
     def ft_new_patch(self):
         if self.slide is None:
@@ -1704,7 +1799,7 @@ class MainWindow(UpdateMixin, TeachingMixin, FigureMixin, AccuracyMixin, Relocat
             task.report(0, 1, "正在自动识别这一块…")
             sl = open_slide(path)
             try:
-                return make_patch(project, sl, image, center, c)
+                return make_patch(project, sl, image, center, c, cancel=task.is_cancelled)
             finally:
                 sl.close()
 
@@ -1740,31 +1835,6 @@ class MainWindow(UpdateMixin, TeachingMixin, FigureMixin, AccuracyMixin, Relocat
         self._ft_patch = None
         self._ft_refresh()
         self.statusBar().showMessage(f"已保存 {p.name}（{len(np.unique(lab)) - 1} 个细胞）。", 10000)
-
-    def ft_train(self):
-        from ..core.finetune import finetune, list_patches
-        c = self.ft_ch.currentIndex()
-        n = len(list_patches(self.project, c))
-        if n < 3:
-            self.info(f"至少需要 3 个标注块（现在有 {n} 个），建议 5–10 个。"); return
-        project = self.project
-
-        def done(info):
-            self._ft_refresh(); self._sync_detection_panel()
-            better = info["f1_after"] > info["f1_before"] + 0.01
-            msg = (f"训练完成：{info['name']}\n在留出的 {info['n_val']} 个标注块上，准确率（F1，越接近 1 越好）"
-                   f"从 {info['f1_before']} 变为 {info['f1_after']}。\n\n")
-            if better:
-                msg += "新模型更准。要让“" + info["channel"] + "”通道使用新模型吗？（使用后需要重新识别）"
-                if QMessageBox.question(self, APP_NAME, msg) == QMessageBox.Yes:
-                    p = self.project.detection.channels[c]
-                    p.model = info["name"]; p.prob_thresh = round(info["prob_thresh"], 2)
-                    self.project.save(); self._sync_detection_panel()
-            else:
-                self.info(msg + "新模型没有明显变好，建议继续使用原来的模型，或者多标注几块、覆盖更多不同的区域后再训练。")
-
-        self.run_task(lambda task: finetune(project, c, progress=task.report, cancel=task.is_cancelled),
-                      done, label="正在训练识别模型…")
 
     def _man_refresh_info(self):
         if self.image is None or self.project is None:

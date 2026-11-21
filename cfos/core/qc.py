@@ -6,7 +6,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
-from .project import Project
+from .project import Project, processed_section_names
 from .slide_io import open_slide
 
 QC_UM = 4.0  # 质控图分辨率（µm/像素）
@@ -73,8 +73,9 @@ def section_qc_image(project: Project, im, sl, s, df) -> Image.Image:
     # 细胞
     from .coloc import nucleus_channel
     nuc = nucleus_channel(names)
-    if df is not None and not df.empty:
-        g = df[df["section"] == s.name]
+    processed = s.name in processed_section_names(im, df)
+    g = df[df["section"] == s.name] if processed and len(df) else None
+    if g is not None and len(g):
         r = max(1.5, 4.0 / (sl.pixel_size_um * ds))
         for c, nm in enumerate(names):
             if c == nuc and len(names) > 1:
@@ -95,9 +96,12 @@ def section_qc_image(project: Project, im, sl, s, df) -> Image.Image:
             f, zh = _font(28)
             dr.text(pts[0], roi["name"] if zh else "ROI", fill=(0, 255, 255), font=f)
     # 标题
-    cnt = "  ".join(f"{nm} {int((df[(df['section'] == s.name)]['channel'] == c).sum())}"
-                    for c, nm in enumerate(names)) if df is not None and len(df) else "未识别"
     f, zh = _font(26)
+    if processed:
+        counts = g["channel"].value_counts().to_dict() if g is not None else {}
+        cnt = "  ".join(f"{nm} {counts.get(c, 0)}" for c, nm in enumerate(names))
+    else:
+        cnt = "未分析" if zh else "not analyzed"
     st = (reg.status if reg.done else "未配准") if zh else ("registered" if reg.done else "not registered")
     dr.rectangle([0, 0, W, 40], fill=(0, 0, 0))
     dr.text((8, 6), f"{im.key}  {s.name}   {cnt}   {st}", fill=(255, 255, 255), font=f)
@@ -110,15 +114,20 @@ def section_qc_image(project: Project, im, sl, s, df) -> Image.Image:
 def export_qc(project: Project, out_dir, progress=None) -> Path:
     from .pipeline import drop_excluded
     out_dir = Path(out_dir); out_dir.mkdir(parents=True, exist_ok=True)
-    jobs = [(im, s) for im in project.images for s in im.sections if s.enabled]
-    for k, (im, s) in enumerate(jobs):
-        if progress:
-            progress(k, len(jobs), f"正在生成质控图：{im.key} {s.name}")
-        df = project.load_cells(im)
-        df = drop_excluded(df, im) if df is not None else None
+    total = sum(s.enabled for im in project.images for s in im.sections)
+    k = 0
+    for im in project.images:
+        sections = [s for s in im.sections if s.enabled]
+        if not sections:
+            continue
+        df = drop_excluded(project.load_cells(im), im)
         sl = open_slide(im.path)
         try:
-            section_qc_image(project, im, sl, s, df).save(out_dir / f"{im.key}_{s.name}.png", optimize=True)
+            for s in sections:
+                if progress:
+                    progress(k, total, f"正在生成质控图：{im.key} {s.name}")
+                section_qc_image(project, im, sl, s, df).save(out_dir / f"{im.key}_{s.name}.png", optimize=True)
+                k += 1
         finally:
             sl.close()
     return out_dir

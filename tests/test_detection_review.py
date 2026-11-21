@@ -86,7 +86,10 @@ class DetectionReview(unittest.TestCase):
             res = accuracy.check(cells.iloc[:0], 1, box, [(4, 4)], 1)
             for threshold in (3, 4):
                 self.channels[1].min_intensity = threshold
-                accuracy.record(project, image, "s", 1, box, res, "")
+                cells.attrs["section_settings"] = {"s": {
+                    "inference_settings": detection.raw_signature(settings),
+                    "filters": {1: {"min_intensity": threshold}}, "z_mode": "max"}}
+                accuracy.record(project, image, "s", 1, box, res, "Cellpose 4", cells=cells)
             summary = accuracy.summary(project)
             self.assertEqual(len(summary), 2)
             self.assertTrue((summary["F1"] == 0).all())

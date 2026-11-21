@@ -10,6 +10,20 @@
 
 面向小鼠脑切片荧光图像的一体化分析软件：脑片拆分 → 亮度/对比度 → 逐通道细胞识别 → 共标统计 → CCFv3 配准 → 分组统计 / 功能网络 → 导出 Excel。
 
+## v0.9.0 安装与升级
+
+下载 [Windows x64 安装程序](https://github.com/zjm199502/cfos-brain-slice/releases/download/v0.9.0/FosFolio-0.9.0-Windows-x64-Setup.exe) 或 [Apple 芯片 Mac 安装包](https://github.com/zjm199502/cfos-brain-slice/releases/download/v0.9.0/FosFolio-0.9.0-macOS-arm64.zip)。旧版用户可在「帮助 → 检查更新」打开新版下载页。本版使用完整安装包升级。
+
+细胞识别支持选择单张或多张脑片。单层厚切片可以先用人工标注视野比较漏检和误检，再将选定的参数应用到相应脑片。Excel 默认合并左右半脑，导出时可以选择分侧统计。详见[本版更新公告](packaging/更新公告/0.9.0.md)。
+
+### 首次使用 Cellpose 4
+
+所有启用的通道使用 Cellpose-SAM v2（`cpsam_v2`）独立生成轮廓。各通道可以分别调整 Cellpose 掩膜阈值，默认值为 0。DAPI、EGFP 和 Fos 的阳性筛选仍使用各通道的面积、亮度和局部背景设置。
+
+在「④ 细胞识别 → 安装 / 修复 Cellpose 4 运行环境」完成首次下载，再点「测试 Cellpose 设备」查看实际推理设备。Windows 上兼容的 NVIDIA 显卡使用 CUDA，Apple 芯片 Mac 使用 PyTorch MPS（Metal），也可选择「仅 CPU」。首次安装需要联网并预留数 GB 空间，模型保存在本机，以后可离线识别。已有运行环境可通过 `CFOS_CELLPOSE_PYTHON` 指向 Python 解释器，通过 `CFOS_CELLPOSE_WEIGHTS` 指向官方 `cpsam_v2` 权重文件。
+
+打开已有项目可继续查阅原始计数。再次识别使用 Cellpose 4，已有 StarDist 自训练权重及概率阈值仅适用于原模型。正式统计前可在人工评估视野复核新模型的漏检和误检。
+
 ## v0.8.4（小更新）：直接读取奥林巴斯 .vsi
 - **.vsi 读取**（`core/vsi.py` + `core/vsi_meta/`）：纯 Python，不需要 Java / Bio-Formats。像素在同名“_名字_”文件夹的 `stackN/frame_t*.ets` 里，`vsi.read_ets_index` 读图块表，图块支持不压缩 / JPEG / JPEG 2000（imagecodecs）；金字塔、拼接扫描的原点偏移、缺失图块（按 0）都处理。`VsiFile` 与 `KfbfFile` 接口相同，接在 `Slide._kf` 上。
 - **元数据**：`core/vsi_meta` 取自 bioio-vsi（BSD-3），解析通道名、发射波长、像素尺寸、维度顺序（Z / T / 通道的顺序每个文件都可能不同）。通道名看不出染料时把发射波长写进名字，`guess_role` 就能认出来。文件里有多幅图（标签、预览图、主扫描图）时用最大的主扫描图；说明信息读不懂时只靠 .ets 读图并提示。
@@ -131,9 +145,10 @@
 
 ## 安装
 
-从本仓库的 `installers` 分支下载（文件按 90 MB 分卷，下载后按该分支 README 合并）：
-- **Windows**：`cFos脑片分析_v0.5.1_Windows安装包.exe`，双击安装，不需要管理员权限，不需要联网，约 4 GB 空间。打不开时运行开始菜单里的“诊断启动（出问题时用）”。
-- **Mac（M 系列芯片，macOS 15 以上）**：`cFos脑片分析_Mac版_v0.5.1.zip`，解压后把“cFos脑片分析”拖进“应用程序”。第一次打开如果提示“无法验证开发者”，到“系统设置 → 隐私与安全性”点“仍要打开”。
+从 [GitHub Releases](https://github.com/zjm199502/cfos-brain-slice/releases/latest) 下载适合本机的完整安装包。
+
+- **Windows x64** 用户双击 Setup.exe，按安装向导操作。
+- **Apple 芯片 Mac（macOS 15 及以上）** 用户解压 macOS-arm64.zip，将应用拖入“应用程序”文件夹。升级前先退出正在运行的旧版本。
 
 ## 资源文件
 
@@ -149,7 +164,7 @@
 - `main.py`：程序入口
 - `cfos/core/`：图像读取、脑片拆分、细胞识别、共标、导出（不依赖界面，可单独测试）
 - `cfos/gui/`：界面
-- `resources/models/`：随软件附带的 StarDist 模型（避免运行时从 GitHub 下载）
+- `cfos/core/cellpose_setup.py`：按需安装独立 Cellpose 4 运行环境，下载和校验 Cellpose-SAM v2 权重
 - `resources/atlas/`：Allen CCFv3 25 µm 图谱（来自 BrainGlobe allen_mouse_25um v3.1）
 - `resources/deepslice/`：DeepSlice 小鼠模型权重和 Xception 预训练权重
 - `tests/gui_smoke.py`：无人值守地走一遍界面流程并截图

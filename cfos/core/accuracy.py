@@ -53,19 +53,31 @@ def check(cells: pd.DataFrame, channel: int, box0, manual_xy, px_um: float, matc
             "missed_xy": man[fn].tolist(), "false_xy": auto[fp].tolist(), "manual_xy": man.tolist()}
 
 
-def record(project, image, section: str, channel: int, box0, res: dict, model: str) -> dict:
+def record(project, image, section: str, channel: int, box0, res: dict, model: str, cells=None) -> dict:
     r = {"时间": _dt.datetime.now().strftime("%Y-%m-%d %H:%M"), "图片": image.key, "脑片": section,
          "通道": project.channel_names[channel] if channel < len(project.channel_names) else str(channel),
-         "模型": model or "通用模型", "方框": [float(v) for v in box0],
+         "模型": model or "模型未记录", "方框": [float(v) for v in box0],
          "人工计数": res["n_manual"], "软件识别": res["n_auto"], "配对成功": res["tp"],
          "漏检": res["fn"], "误检": res["fp"],
          "查准率": round(res["precision"], 4) if res["precision"] == res["precision"] else None,
          "查全率": round(res["recall"], 4) if res["recall"] == res["recall"] else None,
          "F1": round(res["f1"], 4) if res["f1"] == res["f1"] else None,
          "人工点": [[round(a, 1), round(b, 1)] for a, b in res["manual_xy"]]}
-    from .detection import raw_signature
-    snapshot = {"候选": json.loads(raw_signature(project.detection)),
-                "通道": project.detection.channels[channel].to_dict(), "投影": project.z_mode}
+    if cells is None:
+        cells = project.load_cells(image)
+    source = cells.attrs.get("section_settings", {}).get(section) if cells is not None else None
+    if source and channel in source["filters"]:
+        snapshot = {"候选": json.loads(source["inference_settings"]),
+                    "通道筛选": source["filters"][channel], "投影": source["z_mode"]}
+        if source.get("model_identity") is not None:
+            snapshot["识别引擎"] = source["model_identity"]
+        hardware = cells.attrs.get("section_devices", {}).get(section, {})
+        if channel in hardware:
+            snapshot["实际计算设备"] = hardware[channel]
+    else:
+        # Historical tables can be evaluated, but cannot share a configuration ID
+        # with current settings or unrelated sections of unknown provenance.
+        snapshot = {"识别参数": "历史结果未记录", "图片": image.key, "脑片": section, "通道": channel}
     encoded = json.dumps(snapshot, sort_keys=True, ensure_ascii=False)
     r["检查时参数"] = encoded
     r["参数编号"] = hashlib.sha256(encoded.encode()).hexdigest()[:12]
@@ -103,10 +115,11 @@ def summary(project) -> pd.DataFrame:
                      "查准率": p, "查全率": r, "F1": f})
     return pd.DataFrame(rows)
 
-def miss_details(project, image, channel, points, px_um):
-    """在漏检点附近查找候选；阈值按当前项目设置解释。"""
+def miss_details(project, image, channel, points, px_um, cells=None):
+    """Explain nearby candidates with saved filtering settings whenever available."""
     from .manual import section_of
     from scipy.spatial import cKDTree
+    from types import SimpleNamespace
     if not len(points):
         return []
     sections = {s.name: s for s in image.sections if s.enabled}
@@ -115,15 +128,20 @@ def miss_details(project, image, channel, points, px_um):
     from .field_review import effective_settings
     for x, y in points:
         name = section_of(image, x, y)
-        p = (effective_settings(project.detection, image, sections[name]) if name in sections
-             else project.detection).channels[channel]
         if name not in cache:
+            settings = cells.attrs.get("section_settings", {}).get(name, {}) if cells is not None else {}
+            saved = settings.get("filters", {}).get(channel)
+            if saved is not None:
+                p = SimpleNamespace(**saved)
+            else:
+                p = (effective_settings(project.detection, image, sections[name]) if name in sections
+                     else project.detection).channels[channel]
             raw = project.load_part(image, sections[name]) if name in sections else None
             candidates = raw[raw["channel"] == channel] if raw is not None else None
             tree = cKDTree(candidates[["x", "y"]]) if candidates is not None and len(candidates) else None
             tiles = raw.attrs.get("dark_tiles") if raw is not None else None
-            cache[name] = candidates, tree, tiles
-        candidates, tree, tiles = cache[name]
+            cache[name] = candidates, tree, tiles, p, saved is not None
+        candidates, tree, tiles, p, recorded = cache[name]
         nearby = tree.query_ball_point([x, y], MATCH_UM / px_um) if tree is not None else []
         if nearby:
             reasons = set()
@@ -136,8 +154,9 @@ def miss_details(project, image, channel, points, px_um):
                     failed.append("强度")
                 if p.min_contrast > 0 and row.get("contrast", np.nan) < p.min_contrast:
                     failed.append("对比度")
-                reasons.add("、".join(failed) if failed else "通过当前筛选，请查配对及人工编辑")
-            reason = "附近候选：" + " / ".join(sorted(reasons))
+                reasons.add("、".join(failed) if failed else "通过筛选，请查配对及人工编辑")
+            source = "结果保存的阈值" if recorded else "当前阈值，历史阈值未记录"
+            reason = f"附近候选（按{source}）：" + " / ".join(sorted(reasons))
         elif candidates is None:
             reason = "缺少对应脑片候选缓存"
         elif tiles is None:

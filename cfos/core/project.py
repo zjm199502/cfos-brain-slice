@@ -88,6 +88,28 @@ class ImageEntry:
         return self.storage_key or Path(self.path).stem
 
 
+def processed_section_names(image: ImageEntry, cells: pd.DataFrame | None) -> set[str]:
+    """旧版整图结果没有覆盖记录，当时一次处理全部已启用脑片。"""
+    if cells is None:
+        return set()
+    enabled = {s.name for s in image.sections if s.enabled}
+    return enabled.intersection(cells.attrs.get("processed_sections", enabled))
+
+
+def section_result_states(image: ImageEntry, cells: pd.DataFrame | None) -> dict[str, str]:
+    """根据分析覆盖范围和筛选后的细胞表列出每张启用脑片的状态。"""
+    processed = processed_section_names(image, cells)
+    positive = set(cells["section"].unique()) if cells is not None and len(cells) else set()
+    states = {}
+    for section in image.sections:
+        if section.enabled:
+            state = "未分析"
+            if section.name in processed:
+                state = "已分析（有细胞）" if section.name in positive else "已分析（零细胞）"
+            states[section.name] = state
+    return states
+
+
 DEFAULT_EXPORT_HEMISPHERE = "仅左右合并"
 EXPORT_HEMISPHERES = {
     DEFAULT_EXPORT_HEMISPHERE: ("左右合计",),
@@ -129,9 +151,8 @@ class Project:
     reserved_keys: list = field(default_factory=list)
 
     def __post_init__(self):
-        from . import slide_io, detection
+        from . import slide_io
         slide_io.Z_MODE = self.z_mode
-        detection.MODEL_ROOT = str(Path(self.folder) / "models")
 
     def import_image(self, path):
         from uuid import uuid4
@@ -243,7 +264,7 @@ class Project:
         det = d.get("detection", {})
         p.detection = DetectionSettings(
             pixel_um=det.get("pixel_um", 0.5), tile=det.get("tile", 2048), overlap=det.get("overlap", 96),
-            channels={int(k): ChannelParams(**{kk: vv for kk, vv in v.items() if kk in ChannelParams.__dataclass_fields__}) for k, v in det.get("channels", {}).items()})
+            channels={int(k): ChannelParams.from_dict(v) for k, v in det.get("channels", {}).items()})
         p.coloc = ColocParams(**{k: v for k, v in d.get("coloc", {}).items() if k in ColocParams.__dataclass_fields__})
         p.thickness = d.get("thickness", "thin")
         p.z_mode = d.get("z_mode", "max")
@@ -359,7 +380,7 @@ class Project:
             if j is None or str(j) not in chs:
                 notes.append(f"模板中没有“{nm}”通道的参数，保持原样。")
                 continue
-            self.detection.channels[i] = ChannelParams(**{k: v for k, v in chs[str(j)].items() if k in ChannelParams.__dataclass_fields__})
+            self.detection.channels[i] = ChannelParams.from_dict(chs[str(j)])
             if str(j) in d.get("display", {}):
                 self.display[i] = DisplayChannel(**{k: v for k, v in d["display"][str(j)].items()
                                                     if k in DisplayChannel.__dataclass_fields__})
@@ -448,7 +469,7 @@ class Project:
             p.bg_radius_um = 25.0 if thick else 0.0
             p.deconv = thick          # 厚切片默认识别前去卷积（亮度测量仍用原图）
             if nm == "DAPI":
-                p.gamma, p.prob_thresh, p.min_contrast = 0.5, 0.3, 0.0
+                p.gamma, p.min_contrast = 0.5, 0.0
             else:
                 p.min_contrast = 1.5 if thick else 0.0
         self.coloc.max_dist_um = 8.0 if thick else 6.0
@@ -479,7 +500,7 @@ class Project:
             self.display.setdefault(i, DisplayChannel())
             if i not in self.detection.channels:
                 if nm == "DAPI":
-                    self.detection.channels[i] = ChannelParams(min_area_um2=10, max_area_um2=200, gamma=0.5, prob_thresh=0.3)
+                    self.detection.channels[i] = ChannelParams(min_area_um2=10, max_area_um2=200, gamma=0.5)
                 else:
                     self.detection.channels[i] = ChannelParams(min_area_um2=30, max_area_um2=600)
 

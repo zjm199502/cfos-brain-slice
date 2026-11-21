@@ -22,7 +22,8 @@ class SectionSelectionTests(unittest.TestCase):
             project = Project(Path(folder), images=[image], channel_names=["Cy5"])
             slide = SimpleNamespace(pixel_size_um=1)
             cell = pd.DataFrame([dict(section="S0", channel=0, x=30., y=40., area_um2=50., mean_ch0=100.)])
-            with patch("cfos.core.detection.detect_section", side_effect=[
+            with patch("cfos.core.cellpose4.model_identity", return_value={"model": "fixture"}), \
+                    patch("cfos.core.detection.detect_section", side_effect=[
                     cell, cell.iloc[:0].copy(), cell.assign(section="S2", x=220.)]) as infer:
                 def run(*names):
                     return detect_image(project, image, sl=slide, section_names=names)

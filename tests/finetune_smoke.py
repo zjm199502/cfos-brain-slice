@@ -1,4 +1,4 @@
-"""标注和微调界面测试（少量训练轮数）。用法：xvfb-run python tests/finetune_smoke.py <项目> <截图目录>"""
+"""Cellpose 预标注、人工校正与保存测试。用法：python tests/finetune_smoke.py <项目> <截图目录>"""
 import sys, time, faulthandler; faulthandler.enable()
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -45,11 +45,11 @@ w.layer_tools.refresh(); pump(0.5)
 shot("f1_patch")
 # 模拟修改：擦掉一个细胞
 d = np.asarray(lay.data); d[d == 1] = 0; lay.data = d
+old_patches = set(F.list_patches(w.project, 1))
 w.ft_save_patch(); pump(1); print(w.ft_info.text())
-F_orig = F.finetune
-F.finetune = lambda *a, **k: F_orig(*a, **{**k, "epochs": 2, "steps_per_epoch": 5})
-import cfos.gui.main_window as MW
-w.ft_train(); wait_task()
-print(w.ft_info.text()); print("model now:", w.project.detection.channels[1].model)
-w._sync_detection_panel(); pump(1); shot("f2_after_train")
+saved, = set(F.list_patches(w.project, 1)) - old_patches
+with np.load(saved) as patch:
+    np.testing.assert_array_equal(patch["y"], d)
+w._sync_detection_panel(); pump(1); shot("f2_saved_labels")
+w.close()
 print("DONE")
