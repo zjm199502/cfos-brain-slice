@@ -23,6 +23,8 @@ from pathlib import Path
 import sys
 
 base = Path(os.environ["CFOS_BASE_APP"]) / "cfos" / "__init__.py"
+if base.resolve() == Path(__file__).resolve():
+    raise ImportError("检测到兼容补丁覆盖了安装目录。请恢复原系列的基础安装，再在“帮助 → 从文件安装补丁”中选择 ZIP。")
 for line in base.read_text(encoding="utf-8").splitlines():
     if line.startswith("__version__"):
         base_version = line.partition("=")[2].strip().strip("'\\\"")
@@ -71,12 +73,16 @@ def read_native(folder: Path, series: str):
 def build(legacy_dir: Path, current_dir: Path, out: Path):
     legacy, old_files = read_native(legacy_dir, "0.8")
     current, new_files = read_native(current_dir, "0.9")
+    if tuple(int(part) for part in current["min_base"].split(".")[:2]) < (0, 9):
+        raise ValueError("v0.9.x 原生包必须要求安装版本 ≥ 0.9.0；旧客户端依靠该门槛阻止跨系列安装。")
     version = current["version"]
     name = f"cfos-update-{legacy['version']}-and-{version}.zip"
-    notes = (f"# FosFolio 软件内更新（v{legacy['version']} / v{version}）\n\n"
-             f"点击「现在更新」即可。使用 v0.8.x 的用户重启后为 v{legacy['version']}（StarDist）；"
-             f"使用 v0.9.x 的用户重启后为 v{version}（Cellpose 4）。旧客户端标题统一显示 v{version}。\n\n"
-             + current["notes"].split("\n", 1)[1].strip())
+    notes = (f"# 按当前安装系列更新\n\n"
+             f"如果你正在用 v0.8.x，点「现在更新」只会安装 v{legacy['version']}，继续使用 StarDist。"
+             f"旧更新窗口顶部统一显示 v{version}。重启后可在「帮助 → 关于」核对实际版本。\n\n"
+             f"v0.9.x 安装版会收到 v{version}，继续使用 Cellpose 4。\n\n"
+             "两个系列均可在「⑧ 导出 Excel → 脑区范围 → 自选脑区…」搜索并勾选多个 Allen 脑区。"
+             "保存后，手动导出和一键批处理都使用本项目的清单。")
     data = {"app/cfos/__init__.py": SELECTOR.format(version=version).encode("utf-8")}
     for series, files in (("0.8", old_files), ("0.9", new_files)):
         for path, content in files.items():
@@ -90,10 +96,13 @@ def build(legacy_dir: Path, current_dir: Path, out: Path):
         for path, content in data.items():
             dest.writestr(path, content)
         dest.writestr("更新公告.md", notes)
+        dest.writestr("安装说明.txt", "请在 FosFolio 的“帮助 → 检查更新”中点击“现在更新”，或在“从文件安装补丁”中选择同系列的 ZIP。请勿解压覆盖安装目录。")
     manifest = {k: info[k] for k in ("version", "min_base", "date", "notes")}
     manifest["patch"] = {"file": name, "size": package.stat().st_size,
                          "sha256": hashlib.sha256(package.read_bytes()).hexdigest()}
-    manifest["full_installer"] = current["full_installer"]
+    # Old clients only reach this fallback when they cannot install the bridge.
+    # Link them to the legacy-only page rather than a newer runtime installer.
+    manifest["full_installer"] = legacy["full_installer"]
     (out / "latest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
 
 

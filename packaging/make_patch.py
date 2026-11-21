@@ -114,6 +114,8 @@ def main():
     ap.add_argument("--in-app-only", action="store_true", help="仅供支持软件内更新的客户端安装")
     a = ap.parse_args()
     version = updater._read_version_file(APP / "cfos" / "__init__.py")
+    if version.startswith("0.9.") and updater.vtuple(a.min_base) < (0, 9, 0):
+        ap.error("v0.9.x 原生补丁的最低安装版本须为 0.9.0 或以上，确保旧版 StarDist 客户端能拒绝此包。")
     notes_file = Path(a.notes) if a.notes else APP / "packaging" / "更新公告" / f"{version}.md"
     notes = notes_file.read_text(encoding="utf-8").strip()
     if CONTACT_MD not in notes:

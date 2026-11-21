@@ -36,6 +36,14 @@ def make_channel(parent, version, base):
 
 
 class SeriesUpdateTests(unittest.TestCase):
+    def test_current_package_must_exclude_legacy_installations(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            build = runpy.run_path(str(PACKER))["build"]
+            with self.assertRaisesRegex(ValueError, "0.9.x"):
+                build(make_channel(root, "0.8.11", "0.7"), make_channel(root, "0.9.2", "0.8"), root / "shared")
+            self.assertFalse((root / "shared").exists())
+
     def test_legacy_manifest_and_import_resolution(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp).resolve()
@@ -72,3 +80,8 @@ print(json.dumps([cfos.__version__, cfos.__file__, backend.BUILD, backend.__file
                     self.assertEqual(Path(package_file), expected / "cfos" / "__init__.py")
                     self.assertEqual(Path(module_file), expected / "cfos" / "backend.py")
                     self.assertEqual(Path(active), expected)
+            # A hand-extracted bridge must not identify its own advertising version as the base.
+            result = subprocess.run([sys.executable, "-I", "-B", "-c", probe, str(patch_app)],
+                                    env={**os.environ, "CFOS_BASE_APP": str(patch_app)}, capture_output=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn(b"ImportError", result.stderr)
