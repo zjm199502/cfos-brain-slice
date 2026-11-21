@@ -1,6 +1,9 @@
 from pathlib import Path
 import os
+import queue
+import subprocess
 import sys
+import threading
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 import unittest
@@ -23,6 +26,48 @@ class CellposeRuntimeTests(unittest.TestCase):
             with patch.object(cellpose4, "_paths", return_value=(Path(sys.executable),file)):
                 with self.assertRaisesRegex(RuntimeError, "校验失败"):
                     cellpose4.model_identity()
+
+    @unittest.skipUnless(os.name == "nt", "Windows anonymous pipe regression")
+    def test_windows_pipe_allows_native_import_and_exits_on_close(self):
+        child = """import json, queue, runpy, sys, threading, time
+listen = runpy.run_path(sys.argv[1])["listen"]
+commands = queue.Queue()
+threading.Thread(target=listen, args=(commands,), daemon=True).start()
+print("ready", flush=True)
+first = json.loads(commands.get())
+time.sleep(0.1)  # Let the listener wait for more input before loading the native extension.
+import numpy
+print(numpy.add(first, 1), flush=True)
+print(json.loads(commands.get()), flush=True)
+threading.Event().wait()  # Simulate an in-flight calculation when the parent closes stdin.
+"""
+        with subprocess.Popen([sys.executable, "-I", "-u", "-c", child, cellpose_worker.__file__],
+                              stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT) as proc:
+            replies = queue.Queue()
+
+            def collect():
+                for line in proc.stdout:
+                    replies.put(line.strip())
+
+            threading.Thread(target=collect, daemon=True).start()
+            try:
+                self.assertEqual(replies.get(timeout=10), b"ready")
+                proc.stdin.write(b"4")
+                proc.stdin.flush()
+                with self.assertRaises(queue.Empty):
+                    replies.get(timeout=0.1)
+                proc.stdin.write(b"1\n43\n")
+                proc.stdin.flush()
+                self.assertEqual(replies.get(timeout=15), b"42")
+                self.assertEqual(replies.get(timeout=5), b"43")
+            finally:
+                proc.stdin.close()
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    raise
+            self.assertEqual(proc.returncode, 0)
 
     @unittest.skipIf(os.name == "nt", "POSIX venv interpreters use symlinks")
     def test_runtime_keeps_venv_python_symlink(self):

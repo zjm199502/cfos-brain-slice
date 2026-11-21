@@ -7,6 +7,7 @@ import platform
 import queue
 import sys
 import threading
+import time
 
 
 def runtime_versions():
@@ -18,11 +19,36 @@ def runtime_versions():
     return {"cellpose": cp, "torch": version("torch")}
 
 
+def _windows_pipe_lines():
+    import _winapi
+    import msvcrt
+
+    fd = sys.stdin.fileno()
+    handle = msvcrt.get_osfhandle(fd)
+    pending = bytearray()
+    while True:
+        # A pending synchronous stdin read can stall NumPy's native imports on Windows.
+        available, _ = _winapi.PeekNamedPipe(handle, 0)
+        if not available:
+            time.sleep(0.02)
+            continue
+        block = os.read(fd, min(available, 65536))
+        if not block:
+            return
+        pending.extend(block)
+        while (end := pending.find(b"\n")) >= 0:
+            yield bytes(pending[:end + 1])
+            del pending[:end + 1]
+
+
 def listen(commands):
-    for line in sys.stdin.buffer:
-        commands.put(line)
-    # Closing the GUI or cancelling a tile must stop even an in-flight PyTorch call.
-    os._exit(0)
+    try:
+        lines = _windows_pipe_lines() if os.name == "nt" else sys.stdin.buffer
+        for line in lines:
+            commands.put(line)
+    finally:
+        # Closing the GUI or cancelling a tile must stop even an in-flight PyTorch call.
+        os._exit(0)
 
 
 def select_device(torch, pref):
