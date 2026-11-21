@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 
@@ -59,6 +60,9 @@ class ImageEntry:
     storage_key: str = ""
     review_settings: dict = field(default_factory=dict)
     field_reviews: list = field(default_factory=list)
+    scene_id: int | None = None        # Olympus 原文件的 stack 编号；旧项目未记录时沿用原来的选图规则
+    scene_name: str = ""
+    vsi_channels: list[str] = field(default_factory=list)  # ordered scanner labels, independent of user-assigned dyes
 
     def __post_init__(self):
         if self.storage_key and (self.storage_key in (".", "..") or
@@ -66,7 +70,9 @@ class ImageEntry:
             raise ValueError("项目图片标识无效")
 
     def to_dict(self):
-        return {"path": self.path, "review_settings": self.review_settings, "field_reviews": self.field_reviews, "storage_key": self.key, "rel": self.rel, "size": self.size, "status": self.status, "error": self.error,
+        return {"path": self.path, "scene_id": self.scene_id, "scene_name": self.scene_name,
+                **({"vsi_channels": self.vsi_channels} if self.vsi_channels else {}),
+                "review_settings": self.review_settings, "field_reviews": self.field_reviews, "storage_key": self.key, "rel": self.rel, "size": self.size, "status": self.status, "error": self.error,
                 "sections": [s.to_dict() for s in self.sections],
                 "exclusions": [[list(map(float, p)) for p in poly] for poly in self.exclusions],
                 "rois": [{"name": r["name"], "polygon": [list(map(float, p)) for p in r["polygon"]]} for r in self.rois],
@@ -75,7 +81,9 @@ class ImageEntry:
 
     @staticmethod
     def from_dict(d):
-        return ImageEntry(path=d["path"], review_settings=d.get("review_settings", {}),
+        return ImageEntry(path=d["path"], scene_id=d.get("scene_id"), scene_name=d.get("scene_name", ""),
+                          vsi_channels=list(d.get("vsi_channels") or []),
+                          review_settings=d.get("review_settings", {}),
                           field_reviews=d.get("field_reviews", []), storage_key=d.get("storage_key", ""), rel=d.get("rel"), size=d.get("size"),
                           status=d.get("status", "未处理"), error=d.get("error", ""),
                           sections=[Section.from_dict(s) for s in d.get("sections", [])],
@@ -86,6 +94,22 @@ class ImageEntry:
     @property
     def key(self) -> str:
         return self.storage_key or Path(self.path).stem
+
+    @property
+    def display_name(self) -> str:
+        from .relocate import file_name
+        name = file_name(self.path)
+        return f"{name} · {self.scene_name or f'stack{self.scene_id}'}" if self.scene_id is not None else name
+
+    @property
+    def source_id(self):
+        return self.path if self.scene_id is None else (self.path, self.scene_id)
+
+    def open_slide(self, z_mode: str | None = None):
+        from .slide_io import open_slide
+        if self.vsi_channels:
+            return open_slide(self.path, z_mode=z_mode, scene_id=self.scene_id, vsi_channels=self.vsi_channels)
+        return open_slide(self.path, z_mode=z_mode, scene_id=self.scene_id)
 
 
 def processed_section_names(image: ImageEntry, cells: pd.DataFrame | None) -> set[str]:
@@ -155,29 +179,104 @@ class Project:
         slide_io.Z_MODE = self.z_mode
 
     def import_image(self, path):
+        """兼容原来的单条返回值。一个 VSI 的其他扫描区也会加入项目。"""
+        entries, notes = self.import_images(path)
+        if len(entries) > 1:
+            from .vsi import list_vsi_scenes
+            by_id = {entry.scene_id: entry for entry in entries}
+            for scene in list_vsi_scenes(path):
+                if scene.scene_id in by_id:
+                    return by_id[scene.scene_id], notes
+        return entries[0], notes
+
+    def import_images(self, path):
+        """同一 VSI 的各个荧光扫描区共享原文件路径，各自保存坐标和结果。"""
         from uuid import uuid4
-        from .slide_io import open_slide
         path = Path(path).resolve()
-        for entry in self.images:
-            if Path(entry.path).resolve() == path:
-                return entry, []
-        slide = open_slide(str(path))
-        try:
-            if self.channel_names and len(slide.channels) != len(self.channel_names):
-                raise ValueError(f"通道数（{len(slide.channels)}）与项目中其他图片不同")
-            self.ensure_channels(slide.channels)
-            notes = list(getattr(slide, "notes", []))
-        finally:
-            slide.close()
+        existing = {im.scene_id: im for im in self.images if Path(im.path).resolve() == path}
+        notes = []
+        legacy = None
+        channel_order = []
+        anchor = None
+        if path.suffix.lower() == ".vsi":
+            from collections import Counter
+            from contextlib import closing
+            from .vsi import list_vsi_scenes
+            scenes = list_vsi_scenes(path, notes=notes)
+            name_counts = Counter(s.name for s in scenes)
+            choices = [(s.scene_id, s.name if name_counts[s.name] == 1 else f"{s.name} (stack{s.scene_id})")
+                       for s in sorted(scenes, key=lambda s: s.scene_id)]
+            legacy = existing.pop(None, None)
+            if legacy is not None:
+                with closing(legacy.open_slide(self.z_mode)) as old_slide:
+                    default_id = old_slide.scene_id
+                    channel_order = list(old_slide.vsi_channels)
+                existing[default_id] = legacy
+                anchor = legacy
+            elif existing:
+                anchor = next(iter(existing.values()))
+                channel_order = list(anchor.vsi_channels)
+                if not channel_order:
+                    with closing(anchor.open_slide(self.z_mode)) as original:
+                        channel_order = list(original.vsi_channels)
+        else:
+            choices = [(None, "")]
+
         used = {key.casefold() for key in self.reserved_keys}
         used.update(im.key.casefold() for im in self.images)
-        key = path.stem
-        while key.casefold() in used:
-            key = f"{path.stem}~{uuid4().hex[:12]}"
-        self.reserved_keys.append(key)
-        entry = ImageEntry(path=str(path), storage_key=key)
-        self.images.append(entry)
-        return entry, notes
+        entries, added = [], []
+        channels = None
+        channel_count = len(self.channel_names)
+        for scene_id, name in choices:
+            if scene_id in existing:
+                entries.append(existing[scene_id])
+                continue
+            base = path.stem
+            if len(choices) > 1:
+                label = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", name or "").strip(" .")[:64]
+                base += f"~{label or f'stack{scene_id}'}"
+            key = base
+            while key.casefold() in used:
+                key = f"{base}~{uuid4().hex[:12]}"
+            entry = ImageEntry(str(path), storage_key=key, scene_id=scene_id, scene_name=name or "",
+                               vsi_channels=list(channel_order))
+            try:
+                slide = entry.open_slide(self.z_mode)
+            except (ValueError, OSError) as exc:
+                if len(choices) == 1:
+                    raise
+                notes.append(f"跳过 {entry.display_name}：{exc}")
+                continue
+            try:
+                if channel_count and len(slide.channels) != channel_count:
+                    msg = f"{entry.display_name} 的通道数（{len(slide.channels)}）与项目中其他图片不同"
+                    if len(choices) == 1:
+                        raise ValueError(msg)
+                    notes.append(f"跳过：{msg}。")
+                    continue
+                channel_count = len(slide.channels)
+                if scene_id is not None and not channel_order:
+                    channel_order = list(slide.vsi_channels)
+                    entry.vsi_channels = list(channel_order)
+                if channels is None:
+                    channels = slide.channels
+                notes.extend(slide.notes)
+            finally:
+                slide.close()
+            entries.append(entry)
+            added.append(entry)
+            used.add(key.casefold())
+        if not entries:
+            raise ValueError("；".join(notes) or "没有可导入的扫描区")
+        if channels is not None:
+            self.ensure_channels(channels)
+        if legacy is not None:
+            legacy.scene_id, legacy.scene_name = default_id, dict(choices)[default_id]
+        if anchor is not None and not anchor.vsi_channels:
+            anchor.vsi_channels = list(channel_order)
+        self.images.extend(added)
+        self.reserved_keys.extend(im.key for im in added)
+        return entries, list(dict.fromkeys(notes))
 
     # ---------- 读写 ----------
     @property

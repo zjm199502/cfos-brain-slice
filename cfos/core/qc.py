@@ -7,7 +7,6 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
 from .project import Project, processed_section_names
-from .slide_io import open_slide
 
 QC_UM = 4.0  # 质控图分辨率（µm/像素）
 COLORS = {"DAPI": (80, 140, 255), "Green": (60, 220, 75), "Red": (255, 64, 64), "Far red": (255, 64, 255)}
@@ -121,7 +120,7 @@ def export_qc(project: Project, out_dir, progress=None) -> Path:
         if not sections:
             continue
         df = drop_excluded(project.load_cells(im), im)
-        sl = open_slide(im.path)
+        sl = im.open_slide()
         try:
             for s in sections:
                 if progress:

@@ -16,7 +16,6 @@ from . import registration as R
 from . import series
 from .atlas import sample_plane
 from .log import log
-from .slide_io import open_slide
 
 DICE_WARN = 0.90          # 最终轮廓重合度低于它时提示
 NEIGHBOR_WARN_MM = 0.5    # 与同一张图片里最近的另一张脑片的前后位置相差超过它时提示
@@ -42,8 +41,8 @@ def neighbor_warnings(regs: dict[str, R.Registration]) -> dict[str, str]:
 def run(project, targets, nuc, nonlinear: bool = True, refine: bool = True, unify: bool = True,
         progress=None, cancelled=None, only: dict | None = None, slides: dict | None = None) -> dict:
     """targets：要配准的图片；only={图片 key: {脑片名}} 时只配准这些脑片（批量处理里“已配准的跳过”）。
-    slides={图片路径: 已打开的 Slide} 时直接用、不关闭。
-    返回 {图片路径: {脑片名: Registration}}，并把非线性位移场存到 results/registration。不改 project。"""
+    slides={im.source_id: 已打开的 Slide} 时直接用、不关闭。
+    返回 {im.source_id: {脑片名: Registration}}，并把非线性位移场存到 results/registration。不改 project。"""
     say = progress or (lambda d, t, txt: None)
 
     def check():
@@ -59,10 +58,10 @@ def run(project, targets, nuc, nonlinear: bool = True, refine: bool = True, unif
         secs = [s for s in im.sections if s.enabled and (only is None or s.name in only.get(im.key, ()))]
         if not secs:
             continue
-        sl = (slides or {}).get(im.path)
+        sl = (slides or {}).get(im.source_id)
         own = sl is None
         if own:
-            sl = open_slide(im.path)
+            sl = im.open_slide()
         try:
             regs, thumbs = R.auto_register(sl, secs, nuc, str(project.results_dir), return_thumbs=True)
         finally:
@@ -86,7 +85,7 @@ def run(project, targets, nuc, nonlinear: bool = True, refine: bool = True, unif
                 unified.update((im.key, s.name) for im, s, _ in items)
 
     # ---- 3 + 4. 前后位置、非线性贴合
-    out: dict[str, dict] = {}
+    out = {}
     total = max(len(work), 1)
     for k, (im, s, reg, img, mask) in enumerate(work):
         check()
@@ -128,11 +127,11 @@ def run(project, targets, nuc, nonlinear: bool = True, refine: bool = True, unif
             warns.append(f"轮廓重合度偏低（{d:.2f}）")
         reg.status = f"自动配准（轮廓重合度 {d:.2f}" + "".join("；" + n for n in notes) + "）"
         reg.warnings = warns
-        out.setdefault(im.path, {})[s.name] = reg
+        out.setdefault(im.source_id, {})[s.name] = reg
 
     # ---- 5. 同一张图片里前后位置跳变（把这张图片里以前配准好的脑片也算上）
     for im in targets:
-        regs = out.get(im.path)
+        regs = out.get(im.source_id)
         if not regs:
             continue
         allr = {s.name: R.Registration.from_dict(s.registration) for s in im.sections if s.enabled}

@@ -16,7 +16,7 @@ import numpy as np
 from PIL import Image, ImageDraw
 
 from .project import Project, ImageEntry
-from .slide_io import Slide, open_slide
+from .slide_io import Slide
 from .qc import COLORS, FALLBACK, _font
 
 NICE_UM = [1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000]
@@ -611,7 +611,7 @@ def export_sections(project: Project, images: list[ImageEntry], st: FigureSettin
         if progress:
             progress(i, len(todo), f"{im.key}：{s.name} 配准图")
         try:
-            sl = open_slide(im.path)
+            sl = im.open_slide()
             try:
                 df = project.load_cells(im) if st.overlay_cells else None
                 files += export_roi(project, im, sl, section_roi(s), st, df=df, out_dir=out_dir,
@@ -636,7 +636,7 @@ def export_images(project: Project, images: list[ImageEntry], st: FigureSettings
         if progress:
             progress(i, len(todo), f"{im.key}：{roi.get('name', '')}")
         try:
-            sl = open_slide(im.path)
+            sl = im.open_slide()
             try:
                 df = project.load_cells(im) if st.overlay_cells else None
                 files += export_roi(project, im, sl, roi, st, df=df, out_dir=out_dir)

@@ -39,7 +39,9 @@ class EfiScanTests(unittest.TestCase):
             def read(self, level, box, channels):
                 x, y, bw, bh = box
                 return a[None, y:y+bh, x:x+bw]
-        thumb, ds = _tissue_image(Slide(), [0])
         expected = a[:h//8*8,:w//8*8].astype(np.float32).reshape(h//8,8,w//8,8).mean((1,3))
-        self.assertEqual(ds, 8)
-        np.testing.assert_array_equal(thumb[0], expected)
+        for selection in ([0], None):
+            with self.subTest(channels=selection):
+                thumb, ds = _tissue_image(Slide(), selection)
+                self.assertEqual(ds, 8)
+                np.testing.assert_array_equal(thumb[0], expected)

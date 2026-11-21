@@ -301,7 +301,6 @@ def _misplaced_entry(project, im, s, nuc, mask_shape, ds, cells=None) -> dict:
 
 def check_image(project, im, sl=None, redo=False, progress=None) -> dict:
     """计算（或从缓存读取）一张图片所有脑片的指标。返回 {脑片名: 指标}。"""
-    from .slide_io import open_slide
     cache = load_cache(project, im)
     secs = [s for s in im.sections if s.enabled]
     todo = [s for s in secs if redo or cache.get(s.name, {}).get("signature") != _signature(project, im, s)]
@@ -311,7 +310,7 @@ def check_image(project, im, sl=None, redo=False, progress=None) -> dict:
                and cache.get(s.name, {}).get("cells_sig") != csig]
     if todo or recells:
         own = sl is None
-        sl = sl or open_slide(im.path)
+        sl = sl or im.open_slide()
         try:
             for k, s in enumerate(todo):
                 if progress:
@@ -367,8 +366,7 @@ def _dapi_density(project):
 
 def project_pixel_um(project, im) -> float:
     if getattr(im, "_px", None) is None:
-        from .slide_io import open_slide
-        sl = open_slide(im.path); im._px = sl.pixel_size_um; sl.close()
+        sl = im.open_slide(); im._px = sl.pixel_size_um; sl.close()
     return im._px
 
 

@@ -10,6 +10,10 @@
 
 面向小鼠脑切片荧光图像的一体化分析软件：脑片拆分 → 亮度/对比度 → 逐通道细胞识别 → 共标统计 → CCFv3 配准 → 分组统计 / 功能网络 → 导出 Excel。
 
+## v0.9.1 Olympus VSI 多扫描区
+
+添加一次 `.vsi` 即可逐区导入荧光扫描。每个扫描区在“当前图片”中显示原始名称，可独立拆分脑片、识别细胞和导出统计。旧项目重新添加同一文件，即可保留原有最大扫描区的结果并补入其他区域。
+
 ## v0.9.0 安装与升级
 
 下载 [Windows x64 安装程序](https://github.com/zjm199502/cfos-brain-slice/releases/download/v0.9.0/FosFolio-0.9.0-Windows-x64-Setup.exe) 或 [Apple 芯片 Mac 安装包](https://github.com/zjm199502/cfos-brain-slice/releases/download/v0.9.0/FosFolio-0.9.0-macOS-arm64.zip)。旧版用户可在「帮助 → 检查更新」打开新版下载页。本版使用完整安装包升级。

@@ -45,6 +45,8 @@ class Slide:
     _fh: object = field(repr=False, default=None)
     _fh_lock: object = field(repr=False, default=None)
     preview_norm_cache: dict = field(repr=False, default_factory=dict)
+    scene_id: int | None = None
+    vsi_channels: tuple[str, ...] = ()  # ordered instrument channel identities for this VSI
 
     @property
     def n_levels(self) -> int:
@@ -52,6 +54,11 @@ class Slide:
 
     def downsample(self, level: int) -> float:
         return self.level_shapes[0][1] / self.level_shapes[level][1]
+
+    def vsi_source_signature(self):
+        """区分同路径下的扫描区、通道索引和外置 ETS 像素版本。"""
+        ets = Path(self._kf.index.path).stat()
+        return [self.scene_id, list(self._kf._channel_indices), ets.st_size, ets.st_mtime_ns]
 
     def level_for_pixel_size(self, target_um: float) -> int:
         """返回像素尺寸不超过 target_um 的最粗一层。"""
@@ -291,16 +298,19 @@ Z_MODE_NAMES = {"max": "最大投影（推荐，所有层中最亮的值）", "e
                 "mean": "平均投影"}
 
 
-def open_slide(path: str | Path, z_mode: str | None = None) -> Slide:
+def open_slide(path: str | Path, z_mode: str | None = None, *, scene_id: int | None = None,
+               vsi_channels: list[str] | None = None) -> Slide:
     """打开图片。z-stack（OME-TIFF 等含 Z 轴的文件）读取时按 z_mode 合成为一层。"""
     path = Path(path)
     z_mode = z_mode or Z_MODE
     if not path.exists():
         raise FileNotFoundError(f"找不到图片文件：{path}（可能被移动、改名，或移动硬盘没有插上）")
+    if scene_id is not None and path.suffix.lower() != ".vsi":
+        raise ValueError("带扫描区编号的项目图片需要对应的 .vsi 原文件")
     if path.suffix.lower() == ".kfbf":
         return _open_kfbf(path, z_mode)
     if path.suffix.lower() == ".vsi":
-        return _open_vsi(path, z_mode)
+        return _open_vsi(path, z_mode, scene_id, vsi_channels)
     if path.suffix.lower() == ".ets":
         raise ValueError("请选择 .vsi 文件，不要直接选 .ets。（.ets 是 .vsi 配套的像素文件，放在“_名字_”文件夹里。）")
     tif = tifffile.TiffFile(path)
@@ -395,12 +405,12 @@ def _open_kfbf(path: Path, z_mode: str) -> Slide:
     return slide
 
 
-def _open_vsi(path: Path, z_mode: str) -> Slide:
+def _open_vsi(path: Path, z_mode: str, scene_id: int | None = None, vsi_channels=None) -> Slide:
     """奥林巴斯 / Evident（cellSens、VS120、VS200）的 .vsi（v0.8.4 起直接读取，不需要 Java）。
     像素在同名的“_名字_”文件夹的 .ets 里；z-stack 读取时按 z_mode 合成为一层。"""
     from .vsi import VsiFile, VsiReadError
     try:
-        vf = VsiFile(path, z_mode)
+        vf = VsiFile(path, z_mode, scene_id=scene_id, channel_order=vsi_channels)
     except VsiReadError as e:
         raise ValueError(f"无法读取奥林巴斯 .vsi 文件（{path.name}）：{e}") from e
     except Exception as e:  # noqa: BLE001
@@ -414,12 +424,16 @@ def _open_vsi(path: Path, z_mode: str) -> Slide:
         channels.append(ChannelInfo(i, nm, ROLE_COLORS.get(guess_role(nm)) or _guess_color(nm, i)))
     slide = Slide(path=path, channels=channels, pixel_size_um=float(vf.pixel_size_um or 0.25),
                   level_shapes=[tuple(lv.shape) for lv in vf.levels], axes="CYX", n_z=vf.n_z, z_mode=z_mode,
-                  _kf=vf, notes=list(vf.notes))
-    while slide.n_levels > 1 and max(slide.level_shapes[-1]) <= 4096:   # 和其他格式一样，去掉全空白的最粗几层
-        a = slide.read(slide.n_levels - 1)
-        if int(a.max()) - int(a.min()) > 2:
-            break
-        slide.level_shapes.pop()
+                  _kf=vf, notes=list(vf.notes), scene_id=vf.scene_id, vsi_channels=tuple(vf.channel_ids))
+    try:
+        while slide.n_levels > 1 and max(slide.level_shapes[-1]) <= 4096:
+            a = slide.read(slide.n_levels - 1)
+            if int(a.max()) - int(a.min()) > 2:
+                break
+            slide.level_shapes.pop()
+    except Exception as exc:
+        slide.close()
+        raise ValueError(f"无法读取 {path.name} 扫描区 stack{vf.scene_id} 的缩略图：{exc}") from exc
     if not vf.pixel_size_um:
         slide.notes.append("文件里没有读到像素尺寸，暂按 0.25 µm/像素，请在“① 项目与图片”里核对。")
     return slide

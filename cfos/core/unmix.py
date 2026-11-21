@@ -356,12 +356,11 @@ def signature(d: dict) -> dict | None:
 
 def estimate_project(project, image=None, slide=None) -> dict:
     """用一张图片（默认第一张有脑片的图片）估算串色比例，写进 project.unmix（保留开关）。返回新的设置。"""
-    from .slide_io import open_slide
     im = image or next((x for x in project.images if x.sections), None) or (project.images[0] if project.images else None)
     if im is None:
         raise ValueError("项目里还没有图片。")
     own = slide is None
-    sl = slide or open_slide(im.path)
+    sl = slide or im.open_slide()
     try:
         names = list(project.channel_names)
         used = [c for c in range(len(names)) if c not in getattr(project, "unused_channels", [])]

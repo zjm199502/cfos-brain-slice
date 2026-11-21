@@ -28,7 +28,6 @@ def build_tables(project: Project, intensity: bool | None = None, *, for_excel=F
     section_info = []
     from . import registration
     from .pipeline import drop_excluded
-    from .slide_io import open_slide
     for im in project.images:
         df = drop_excluded(project.load_cells(im), im)
         enabled = processed_section_names(im, df)
@@ -58,7 +57,7 @@ def build_tables(project: Project, intensity: bool | None = None, *, for_excel=F
             continue
         df = df[df["section"].isin(enabled)]
         if len(df) and "combo" not in df.columns:
-            with closing(open_slide(im.path)) as slide:
+            with closing(im.open_slide()) as slide:
                 df = colocalize(df, slide.pixel_size_um, project.coloc, nucleus_channel(names))
         cells = merged_cells(df, len(names))
         from .grading import add_grades
@@ -89,7 +88,7 @@ def build_tables(project: Project, intensity: bool | None = None, *, for_excel=F
         reg_secs = [s_ for s_ in im.sections if s_.name in enabled and s_.registration.get("plane")]
         if not reg_secs and not im.rois:
             continue
-        with closing(open_slide(im.path)) as slide:
+        with closing(im.open_slide()) as slide:
             px = slide.pixel_size_um
             if reg_secs:
                 from .regions import assign_regions, region_summary
@@ -317,6 +316,8 @@ def params_table(project: Project) -> pd.DataFrame:
     except Exception:  # noqa: BLE001
         pass
     rows += [("图片", im.path) for im in project.images]
+    rows += [(f"VSI 扫描区（{im.key}）", f"{im.scene_name} (stack{im.scene_id})")
+             for im in project.images if im.scene_id is not None]
     return pd.DataFrame(rows, columns=["参数", "值"])
 
 

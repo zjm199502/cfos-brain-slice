@@ -82,6 +82,9 @@ def record(project, image, section: str, channel: int, box0, res: dict, model: s
     r["检查时参数"] = encoded
     r["参数编号"] = hashlib.sha256(encoded.encode()).hexdigest()[:12]
     r["原图"] = image.path
+    if image.scene_id is not None:
+        r["VSI 扫描区"] = image.scene_name
+        r["VSI stack"] = image.scene_id
     r["视野类型"] = res.get("field_type", "常规")
     r["检查面积 mm²"] = res.get("field_area_mm2")
     r["动物"] = project.samples.get(f"{image.key}/{section}", {}).get("animal", "")

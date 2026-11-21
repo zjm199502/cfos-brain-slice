@@ -78,12 +78,11 @@ def system_info() -> dict:
 
 def _image_info(project) -> list[dict]:
     rows = []
-    from .slide_io import open_slide
     for im in project.images:
         r = {"图片": im.key, "路径": im.path, "存在": Path(im.path).exists(), "脑片数": len(im.sections)}
         try:
             r["文件大小 MB"] = round(Path(im.path).stat().st_size / 2**20, 1)
-            sl = open_slide(im.path)
+            sl = im.open_slide()
             try:
                 r.update({"像素大小 µm": sl.pixel_size_um, "层数": sl.n_levels, "z 层数": sl.n_z,
                           "第0层大小": list(sl.level_shapes[0]), "通道": list(sl.channels)})

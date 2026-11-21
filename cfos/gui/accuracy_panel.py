@@ -208,7 +208,6 @@ class AccuracyMixin:
     def compare_review(self):
         from dataclasses import asdict
         from ..core.field_review import compare, effective_settings, pooled_reviews, section_key
-        from ..core.slide_io import open_slide
         from ..core import unmix
         from matplotlib.path import Path
         from matplotlib.transforms import Bbox
@@ -249,9 +248,10 @@ class AccuracyMixin:
         candidate = dict(min_contrast=self.review_contrast.value(), deconv=self.review_deconv.isChecked())
         field_type = self.acc_field.currentText()
         px = self.slide.pixel_size_um
-        norm_cache = self.slide.preview_norm_cache
+        view_slide = self.slide
+        norm_cache = view_slide.preview_norm_cache
         def job(task):
-            slide = open_slide(image.path, z_mode=project.z_mode)
+            slide = image.open_slide(z_mode=project.z_mode)
             try:
                 unmix.prepare(project, slide, image)
                 from copy import deepcopy
@@ -260,7 +260,7 @@ class AccuracyMixin:
             finally:
                 slide.close()
         def done(payload):
-            if self.project is not project or self.image is not image or self.acc_ch.currentIndex() != c:
+            if self.project is not project or self.slide is not view_slide or self.acc_ch.currentIndex() != c:
                 return
             (results, lost, gained, confirmed), settings = payload
             record = {"脑片":sec.name, "通道":project.channel_names[c], "视野":list(box), "类型":field_type,

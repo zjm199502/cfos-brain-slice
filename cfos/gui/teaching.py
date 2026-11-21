@@ -231,10 +231,7 @@ class TeachingMixin:
             shutil.copy2(src, img)
         p = Project.load(folder) if Project.is_project(folder) else Project(folder=folder)
         if not p.images:
-            from ..core.slide_io import open_slide
-            sl = open_slide(img); p.ensure_channels(sl.channels); sl.close()
-            from ..core.project import ImageEntry
-            p.images.append(ImageEntry(path=str(img)))
+            p.import_images(img)
             p.save()
         self._load_project(p)
         self.teach_cb.setChecked(True)

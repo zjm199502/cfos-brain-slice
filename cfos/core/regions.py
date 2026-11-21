@@ -114,6 +114,8 @@ def _intensity_signature(slide: Slide, section: Section, reg, warp_file, exclusi
          "reg": reg.to_dict(), "warp": stat(warp_file) if reg.nonlinear else None,
          "exclusions": [np.asarray(e, float).round(1).tolist() for e in (exclusions or [])],
          "z": getattr(slide_io, "Z_MODE", ""), "um": INTENSITY_UM, "n_ch": len(slide.channels)}
+    if getattr(slide, "scene_id", None) is not None:
+        d["vsi"] = slide.vsi_source_signature()
     um = _usable_unmix(slide, unmix_model)
     if um is not None:   # v0.8.3：去除串色的比例也决定结果；没开启时签名与 v0.8.2 相同，旧缓存照样能用
         d["unmix"] = [np.asarray(um.matrix, float).round(5).tolist(), np.asarray(um.offsets, float).round(3).tolist()]

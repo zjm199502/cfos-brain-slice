@@ -73,6 +73,8 @@ def _tissue_image(slide, channels):
     channels = _valid(slide, channels)
     if ds != 1 or step < 2 or min(h, w) < 8 * step or h * w < 8_000_000:
         return slide.read(lv, None, channels), ds
+    if channels is None:
+        channels = list(range(len(slide.channels)))
     rows, cols = h // step, w // step
     out = np.empty((len(channels), rows, cols), np.float32)
     # Keep the float32 working band near 16 MiB.

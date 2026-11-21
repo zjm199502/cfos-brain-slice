@@ -25,7 +25,6 @@ from ..core.coloc import colocalize, merged_cells, summarize, nucleus_channel
 from ..core.export import export_excel
 from ..core.project import Project, ImageEntry, STANDARD_CHANNELS, DYE_LABELS, UNUSED_LABEL, EXPORT_HEMISPHERES
 from ..core.sections import Section, find_sections, contour_in_bbox
-from ..core.slide_io import open_slide
 from .layout import fit_window, PanelScroll, ProjectLabel
 from .worker import Task
 from .registration_panel import RegistrationMixin
@@ -360,7 +359,7 @@ class MainWindow(UpdateMixin, TeachingMixin, FigureMixin, AccuracyMixin, Relocat
         w = QWidget(); L = QVBoxLayout(w)
         L.addWidget(hint("第一步：新建一个项目文件夹（用来保存设置和结果），然后添加要分析的图片。"
                          "一张图片上可以有多张脑片，下一步会自动拆分。\n"
-                         "以后可以用“打开项目”继续上次的工作。"))
+                         "Olympus VSI 的各个扫描区会分别列出。旧项目可用“添加图片”重新选择原 VSI，补齐其他扫描区。"))
         row = QHBoxLayout()
         b1 = big_button("新建项目…"); b1.clicked.connect(self.new_project)
         b2 = big_button("打开项目…"); b2.clicked.connect(self.open_project)
@@ -527,6 +526,7 @@ class MainWindow(UpdateMixin, TeachingMixin, FigureMixin, AccuracyMixin, Relocat
         attach_project(p.folder); log.info("打开项目 %s", p.folder)
         self.project = p
         self._cells_cache.clear()
+        self._reg_cache.clear()
         self.project_label.set_project(f"项目：{p.folder.name}")
         self._refresh_images()
         self._refresh_channels_form()
@@ -541,15 +541,21 @@ class MainWindow(UpdateMixin, TeachingMixin, FigureMixin, AccuracyMixin, Relocat
         files, _ = QFileDialog.getOpenFileNames(self, "选择图片（可多选）", "", IMAGE_FILTER)
         if not files:
             return
-        bad, notes = [], []
+        bad, notes, imported = [], [], []
         for f in files:
             try:
-                _, messages = self.project.import_image(f)
+                previous_count = len(self.project.images)
+                entries, messages = self.project.import_images(f)
+                added = len(self.project.images) - previous_count
+                if len(entries) > 1 and added:
+                    imported.append(f"{Path(f).name} 已加入项目的扫描区共 {len(entries)} 个，本次新增 {added} 个")
                 notes.extend(f"{Path(f).name}：{msg}" for msg in messages)
             except Exception as e:  # noqa: BLE001
                 bad.append(f"{Path(f).name}：{e}")
         self.project.save()
         self._refresh_images(); self._refresh_channels_form(); self._refresh_enabled()
+        if imported:
+            self.statusBar().showMessage("；".join(imported) + "。可在“当前图片”中切换扫描区。", 20000)
         if bad:
             self.error("以下图片无法加入：\n" + "\n".join(bad))
         if notes:
@@ -560,7 +566,7 @@ class MainWindow(UpdateMixin, TeachingMixin, FigureMixin, AccuracyMixin, Relocat
     def add_images_programmatic(self, files):
         """测试和命令行使用。"""
         for f in files:
-            self.project.import_image(f)
+            self.project.import_images(f)
         self.project.save()
         self._refresh_images(); self._refresh_channels_form(); self._refresh_enabled()
         self.image_combo.setCurrentIndex(0)
@@ -581,7 +587,7 @@ class MainWindow(UpdateMixin, TeachingMixin, FigureMixin, AccuracyMixin, Relocat
             d = QFileDialog.getExistingDirectory(self, "选择图片文件夹")
             if d:
                 path.setText(d)
-                cnt.setText(f"找到 {len(list_images(d))} 张图片。")
+                cnt.setText(f"找到 {len(list_images(d))} 个图片文件。多扫描区 VSI 会按扫描区分别处理。")
         pick.clicked.connect(choose)
         c_reg = QCheckBox("配准到脑图谱"); c_reg.setChecked(True)
         c_nl = QCheckBox("配准后做非线性贴合"); c_nl.setChecked(True)
@@ -620,17 +626,33 @@ class MainWindow(UpdateMixin, TeachingMixin, FigureMixin, AccuracyMixin, Relocat
         def done(chk):
             self._cells_cache.clear(); self._refresh_images(); self._refresh_channels_form(); self._refresh_enabled()
             self._q_levels = None; self._refresh_section_table()
-            bad = [c for c in chk if c.get("质量") == "可疑" or c["需要检查"].startswith("出错") or "未配准" in c["需要检查"]]
-            warn = [c for c in chk if c.get("质量") == "注意" and c not in bad]
-            msg = f"批量处理完成：{len(files)} 张图片，{len(chk)} 张脑片。\n结果已保存到：\n{xlsx}\n\n"
+            imports = [c for c in chk if c.get("类型") == "导入"]
+            results = [c for c in chk if c.get("类型") != "导入"]
+            bad = [c for c in results if c.get("质量") == "可疑" or c["需要检查"].startswith("出错") or "未配准" in c["需要检查"]]
+            warn = [c for c in results if (c.get("质量") == "注意" or c["需要检查"]) and c not in bad]
+            sections = [c for c in results if c.get("脑片")]
+            unchecked = sum(not c.get("质量") for c in sections)
+            msg = f"批量处理完成：{len(files)} 个图片文件，{len(sections)} 张脑片有处理记录。\n结果已保存到：\n{xlsx}\n\n"
+            import_lines = [f"• {c['图片']}：{c['需要检查']}" for c in imports]
+            if imports:
+                msg += f"导入提示（{len(imports)} 条）：\n" + "\n".join(import_lines[:8]) + "\n\n"
+                if len(imports) > 8:
+                    msg += "展开详细信息可查看全部导入提示。\n\n"
             if bad:
-                msg += "以下脑片质量“可疑”或出错，建议优先人工检查（Excel“按脑片汇总”中已标红）：\n" + "\n".join(
+                msg += "以下图片处理出错、脑片未配准或质量可疑，请优先检查：\n" + "\n".join(
                     f"• {c['图片']} {c['脑片']}：{c['需要检查']}" for c in bad[:30]) + "\n\n"
             if warn:
-                msg += f"另有 {len(warn)} 张脑片有轻微问题（标黄），可以在“② 脑片拆分”中点“检查所有脑片的质量”查看。\n"
-            if not bad and not warn:
+                msg += f"另有 {len(warn)} 张脑片需要留意，可到“② 脑片拆分”查看质量，或到“⑥ 脑图谱配准”检查位置。\n"
+            if unchecked:
+                msg += f"{unchecked} 张脑片没有自动质量评分，可在“② 脑片拆分”重新检查。\n"
+            if sections and not (imports or bad or warn or unchecked):
                 msg += "自动质量检查没有发现问题（配准、模糊、过曝、组织缺损），仍建议抽查几张。"
-            self.info(msg)
+            if len(imports) > 8:
+                dialog = QMessageBox(QMessageBox.Information, APP_NAME, msg, QMessageBox.Ok, self)
+                dialog.setDetailedText("\n".join(import_lines))
+                dialog.exec_()
+            else:
+                self.info(msg)
 
         self.run_task(job, done, label="正在批量处理…")
 
@@ -639,7 +661,7 @@ class MainWindow(UpdateMixin, TeachingMixin, FigureMixin, AccuracyMixin, Relocat
         if r < 0 or self.project is None:
             return
         im = self.project.images[r]
-        if QMessageBox.question(self, APP_NAME, f"从项目中移除 {im.key}？（不会删除原图）") != QMessageBox.Yes:
+        if QMessageBox.question(self, APP_NAME, f"从项目中移除 {im.display_name}？（不会删除原图）") != QMessageBox.Yes:
             return
         self.project.images.pop(r); self.project.save()
         self._refresh_images(); self._refresh_enabled()
@@ -650,7 +672,9 @@ class MainWindow(UpdateMixin, TeachingMixin, FigureMixin, AccuracyMixin, Relocat
         cur = self.image_combo.currentIndex()
         self.image_combo.blockSignals(True); self.image_combo.clear()
         for i, im in enumerate(p.images):
-            self.images_table.setItem(i, 0, QTableWidgetItem(Path(im.path).name))
+            item = QTableWidgetItem(im.display_name)
+            item.setToolTip(f"{im.display_name}\n{im.path}")
+            self.images_table.setItem(i, 0, item)
             self.images_table.setItem(i, 1, QTableWidgetItem(str(len(im.sections)) if im.sections else "—"))
             st = QTableWidgetItem(im.status)
             if not Path(im.path).exists():
@@ -660,19 +684,49 @@ class MainWindow(UpdateMixin, TeachingMixin, FigureMixin, AccuracyMixin, Relocat
                 st.setToolTip(im.error); st.setText(f"出错：{im.error[:40]}")
                 st.setForeground(Qt.red)
             self.images_table.setItem(i, 2, st)
-            self.image_combo.addItem(f"{i + 1}. {Path(im.path).name}")
-            self.image_combo.setItemData(i, str(im.path), Qt.ToolTipRole)
-        self.image_combo.blockSignals(False)
+            self.image_combo.addItem(f"{i + 1}. {im.display_name}")
+            self.image_combo.setItemData(i, item.toolTip(), Qt.ToolTipRole)
         if p.images:
             idx = cur if 0 <= cur < len(p.images) else 0
-            if self.image is None or self.image not in p.images:
-                self.image_combo.setCurrentIndex(idx); self._on_image_changed(idx)
-            else:
-                self.image_combo.blockSignals(True)
-                self.image_combo.setCurrentIndex(p.images.index(self.image))
-                self.image_combo.blockSignals(False)
+            current = next((i for i, im in enumerate(p.images) if im is self.image), None)
+            self.image_combo.setCurrentIndex(idx if current is None else current)
+            self.image_combo.blockSignals(False)
+            if current is None:
+                self._on_image_changed(idx)
         else:
-            self.image = None; self.viewer.layers.clear()
+            self.image_combo.blockSignals(False)
+            self.image = None
+            self._clear_image_view()
+            self._refresh_image_panel()
+
+    def _clear_image_view(self):
+        self.viewer.layers.clear()
+        self.image_layers = []
+        self._ft_patch = None
+        self._blind_context = None
+        self._drag = self._reg_lab = self._reg_bnd = None
+        self._reg_timer.stop(); self._reg_fine_timer.stop()
+        if self._reg_drag_on:
+            self._reg_set_drag_mode(False)
+        self.det_summary.clear()
+        self.z_info.clear()
+        if self.slide is not None:
+            self.slide.close()
+            self.slide = None
+
+    def _refresh_image_panel(self):
+        step = self.stack.currentIndex()
+        if step == 1:
+            self._refresh_section_table()
+            self._refresh_roi_list()
+        elif step == 2:
+            self._sync_display_panel()
+        elif step == 3:
+            self._sync_detection_panel()
+        elif step == 5:
+            self._sync_registration_panel()
+        elif step == 8:
+            self._refresh_fig_list()
 
     def _refresh_channels_form(self):
         while self.channels_form.rowCount():
@@ -748,27 +802,23 @@ class MainWindow(UpdateMixin, TeachingMixin, FigureMixin, AccuracyMixin, Relocat
     def _on_image_changed(self, idx):
         if self.project is None or not (0 <= idx < len(self.project.images)):
             return
+        self._clear_image_view()
         self.image = self.project.images[idx]
-        if self.slide is not None:
-            self.slide.close()
         if not Path(self.image.path).exists():
-            self.slide = None; self.viewer.layers.clear()
             self.statusBar().showMessage(f"找不到原图：{self.image.path}。请在“① 项目与图片”中点“重新定位找不到的图片…”。")
+            self._refresh_channels_form(); self._refresh_image_panel()
             return
         try:
-            self.slide = open_slide(self.image.path)
+            self.slide = self.image.open_slide(z_mode=self.project.z_mode)
         except Exception as e:  # noqa: BLE001
-            self.slide = None
-            self.error(f"图片无法打开：{e}")
+            self._refresh_channels_form(); self._refresh_image_panel()
+            self.error(f"{self.image.display_name} 无法打开：{e}")
             return
         self.z_info.setText(f"当前图片是 z-stack（{self.slide.n_z} 层），正在使用“{self.z_combo.currentText()}”。"
                             if self.slide.n_z > 1 else "当前图片是单层图像（或扫描仪已做景深合成），不需要设置。")
         self._refresh_channels_form()
         self._show_image()
-        if self.stack.currentIndex() == 1:
-            self._refresh_section_table()
-        if self.stack.currentIndex() == 5:
-            self._sync_registration_panel()
+        self._refresh_image_panel()
 
     # ---------------- 通道显示颜色（v0.8.3）
     def _ch_index(self, nm) -> int:
@@ -913,7 +963,7 @@ class MainWindow(UpdateMixin, TeachingMixin, FigureMixin, AccuracyMixin, Relocat
             self.project.save(); self._draw_polygons()
 
     def _edit_polygons(self, name):
-        if self.image is None:
+        if self.slide is None:
             return
         if name not in self.viewer.layers:
             self._draw_polygons()
@@ -923,7 +973,7 @@ class MainWindow(UpdateMixin, TeachingMixin, FigureMixin, AccuracyMixin, Relocat
         self.statusBar().showMessage(f"正在画“{name}”：在图上逐个点击顶点，双击结束。画完点“保存区域”。", 15000)
 
     def save_polygons(self):
-        if self.image is None:
+        if self.slide is None:
             return
         def polys(nm):
             if nm not in self.viewer.layers:
@@ -948,19 +998,25 @@ class MainWindow(UpdateMixin, TeachingMixin, FigureMixin, AccuracyMixin, Relocat
 
     def auto_sections(self, all_images: bool):
         targets = list(self.project.images) if all_images else [self.image]
+        project = self.project
+        channels = project.tissue_channels()
 
         def job(task):
             out = {}
             for i, im in enumerate(targets):
-                task.report(i, len(targets), f"正在识别脑片：{Path(im.path).name}")
-                sl = open_slide(im.path)
-                out[im.path] = find_sections(sl, channels=self.project.tissue_channels())
-                sl.close()
+                if task.is_cancelled():
+                    raise InterruptedError
+                task.report(i, len(targets), f"正在识别脑片：{im.display_name}")
+                sl = im.open_slide(z_mode=project.z_mode)
+                try:
+                    out[im.key] = find_sections(sl, channels=channels)
+                finally:
+                    sl.close()
             return out
 
         def done(res):
             for im in targets:
-                im.sections = res[im.path]
+                im.sections = res[im.key]
                 im.status = f"已拆分 {len(im.sections)} 张脑片"
             self.project.save(); self._refresh_images()
             self._draw_sections(); self._refresh_section_table()
@@ -972,7 +1028,7 @@ class MainWindow(UpdateMixin, TeachingMixin, FigureMixin, AccuracyMixin, Relocat
     def _draw_sections(self):
         if "脑片" in self.viewer.layers:
             self.viewer.layers.remove("脑片")
-        if self.image is None:
+        if self.image is None or self.slide is None:
             return
         rects, names = [], []
         for s in self.image.sections:
@@ -1450,13 +1506,12 @@ class MainWindow(UpdateMixin, TeachingMixin, FigureMixin, AccuracyMixin, Relocat
             return
         if not sections:
             sections = [Section(id=0, bbox0=field_box, contour0=[], name="预览")]
-        path = self.image.path
         settings = self.project.detection
 
         project, image = self.project, self.image
 
         def job(task):
-            s = open_slide(path, z_mode=project.z_mode)
+            s = image.open_slide(z_mode=project.z_mode)
             try:
                 from ..core.unmix import prepare as _prepare_unmix
                 if (project.unmix or {}).get("enabled") and "coef" not in project.unmix:
@@ -1481,6 +1536,8 @@ class MainWindow(UpdateMixin, TeachingMixin, FigureMixin, AccuracyMixin, Relocat
                 s.close()
 
         def done(df):
+            if self.project is not project or self.slide is not sl:
+                return
             self._sync_unmix_box()
             for nm in [l.name for l in self.viewer.layers if l.name.startswith("预览")]:
                 self.viewer.layers.remove(nm)
@@ -1527,14 +1584,16 @@ class MainWindow(UpdateMixin, TeachingMixin, FigureMixin, AccuracyMixin, Relocat
             self.info("还没有任何通道勾选“去卷积”或设置“减背景”。")
             return
         params = {c: settings.channels[c] for c in chans}
-        path = self.image.path
+        project, image = self.project, self.image
         ds = sl.downsample(lv)
         pix = sl.pixel_size_um * ds
 
         def job(task):
-            s = open_slide(path)
-            a = s.read(lv, (x, y, w, h), chans)
-            s.close()
+            s = image.open_slide(z_mode=project.z_mode)
+            try:
+                a = s.read(lv, (x, y, w, h), chans)
+            finally:
+                s.close()
             out = []
             for k, c in enumerate(chans):
                 task.report(k, len(chans), f"正在处理 {self.ch_name(c)}…")
@@ -1543,6 +1602,8 @@ class MainWindow(UpdateMixin, TeachingMixin, FigureMixin, AccuracyMixin, Relocat
             return out
 
         def done(res):
+            if self.project is not project or self.slide is not sl:
+                return
             for nm in [l.name for l in self.viewer.layers if l.name.startswith("预处理-")]:
                 self.viewer.layers.remove(nm)
             for c, im in zip(chans, res):
@@ -1628,9 +1689,9 @@ class MainWindow(UpdateMixin, TeachingMixin, FigureMixin, AccuracyMixin, Relocat
                     project.save()
                     raise
                 except Exception as e:  # noqa: BLE001  一张图出错不影响其他图片
-                    log.error("识别 %s 出错\n%s", im.path, traceback.format_exc())
+                    log.error("识别 %s (%s) 出错\n%s", im.display_name, im.path, traceback.format_exc())
                     im.error = friendly(e); im.status = "出错"
-                    errors.append(f"{Path(im.path).name}：{im.error}")
+                    errors.append(f"{im.display_name}：{im.error}")
             project.save()
             return summary, errors, reused
 
@@ -1698,7 +1759,7 @@ class MainWindow(UpdateMixin, TeachingMixin, FigureMixin, AccuracyMixin, Relocat
     # ---------------- 手动校正
     def _man_layer(self, create=True):
         nm = self.man_ch.currentText()
-        if not nm or self.image is None:
+        if not nm or self.slide is None:
             return None
         name = f"细胞-{nm}"
         if name not in self.viewer.layers:
@@ -1712,6 +1773,8 @@ class MainWindow(UpdateMixin, TeachingMixin, FigureMixin, AccuracyMixin, Relocat
         return self.viewer.layers[name]
 
     def _man_mode(self, mode):
+        if self.slide is None:
+            return
         if self.cells_for(self.image) is None:
             self.info("当前图片还没有识别结果，请先识别细胞。")
             return
@@ -1734,7 +1797,7 @@ class MainWindow(UpdateMixin, TeachingMixin, FigureMixin, AccuracyMixin, Relocat
     def save_manual(self):
         from ..core.manual import load_manual, save_manual, section_of, measure_added
         from ..core.pipeline import refilter_all
-        if self.image is None:
+        if self.slide is None:
             return
         df = self.cells_for(self.image)
         if df is None:
@@ -1793,17 +1856,19 @@ class MainWindow(UpdateMixin, TeachingMixin, FigureMixin, AccuracyMixin, Relocat
         c = self.ft_ch.currentIndex()
         cam = self.viewer.camera
         center = (cam.center[-1], cam.center[-2])
-        project, image, path = self.project, self.image, self.image.path
+        project, image, view_slide = self.project, self.image, self.slide
 
         def job(task):
             task.report(0, 1, "正在自动识别这一块…")
-            sl = open_slide(path)
+            sl = image.open_slide(z_mode=project.z_mode)
             try:
                 return make_patch(project, sl, image, center, c, cancel=task.is_cancelled)
             finally:
                 sl.close()
 
         def done(res):
+            if self.project is not project or self.slide is not view_slide:
+                return
             x, lab, meta = res
             self._ft_patch = (c, x, meta)
             for nm in ("标注块", "标注块-图像"):
@@ -1855,7 +1920,7 @@ class MainWindow(UpdateMixin, TeachingMixin, FigureMixin, AccuracyMixin, Relocat
     def _draw_cells(self):
         for nm in [l.name for l in self.viewer.layers if l.name.startswith("细胞-")]:
             self.viewer.layers.remove(nm)
-        if self.image is None:
+        if self.image is None or self.slide is None:
             return
         df = self.cells_for(self.image)
         if df is None or df.empty:

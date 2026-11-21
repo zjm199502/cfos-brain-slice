@@ -16,7 +16,6 @@ import tifffile
 from skimage.draw import polygon as skpoly
 
 from .project import Project, processed_section_names
-from .slide_io import open_slide
 
 README = """细胞 mask 说明
 ================
@@ -99,7 +98,7 @@ def export_masks(project: Project, out_dir=None, factor: int = 3, progress=None)
         if not processed:
             continue
         df = drop_excluded(df, im)
-        sl = open_slide(im.path)
+        sl = im.open_slide()
         try:
             px_used = sl.pixel_size_um * factor
         finally:

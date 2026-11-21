@@ -38,7 +38,7 @@ class VsiReadError(ValueError):
 
 
 @dataclass
-class EtsIndex:
+class _EtsHeader:
     path: str
     ndim: int
     dtype: np.dtype
@@ -51,39 +51,54 @@ class EtsIndex:
     slot_sizes: tuple            # 宽高之后各维的大小（文件头里写的）
     shift_x: int                 # 图像从存储网格的 (shift_x, shift_y) 像素开始（拼接扫描，通常是 0）
     shift_y: int
+    tabpos: int
+    ntiles: int
+
+
+@dataclass
+class EtsIndex(_EtsHeader):
     tiles: dict                  # 坐标元组 -> (文件位置, 字节数)
     cmax: tuple                  # 每个坐标的最大值
     n_levels: int
 
 
+def _ets_header(path, f) -> _EtsHeader:
+    size = os.fstat(f.fileno()).st_size
+    main = f.read(64)
+    if len(main) < 64 or main[:4] != b"SIS\x00":
+        raise VsiReadError("像素文件 .ets 的文件头不对（可能没有拷贝完整）")
+    h = _MAIN.unpack(main)
+    ndim, addpos, addsize, tabpos, ntiles = h[3], h[4], h[5], h[7], h[8]
+    f.seek(addpos)
+    sec = f.read(addsize)
+    if len(sec) < 188 or sec[:4] != b"ETS\x00":
+        raise VsiReadError("像素文件 .ets 的第二文件头不对（可能没有拷贝完整）")
+    _ver, ptype, ncomp, _cs, comp, _q, tw, th, _td = struct.unpack_from("<9I", sec, 4)
+    if ptype not in _PIXEL:
+        raise VsiReadError(f"暂不支持的像素类型（代码 {ptype}），目前支持 8 位和 16 位")
+    n_ext = struct.unpack_from("<I", sec, 184)[0]
+    if n_ext < 2 or len(sec) < 188 + 4 * n_ext:
+        raise VsiReadError("像素文件 .ets 里的图像尺寸信息不完整")
+    ext = struct.unpack_from(f"<{n_ext}I", sec, 188)
+    ox, oy = struct.unpack_from("<ii", sec, 172)
+    rec = 4 * (ndim + 5)
+    if ntiles <= 0 or tw <= 0 or th <= 0 or ndim < 3:
+        raise VsiReadError("像素文件 .ets 里没有图块")
+    if tabpos + rec * ntiles > size:
+        raise VsiReadError("像素文件 .ets 不完整（图块表超出了文件末尾），请重新拷贝")
+    if not ext[0] or not ext[1]:
+        raise VsiReadError("像素文件 .ets 里的图像宽高必须大于零")
+    return _EtsHeader(str(path), ndim, _PIXEL[ptype], ncomp, comp, tw, th, ext[0], ext[1],
+                      tuple(ext[2:]), max(0, -ox), max(0, -oy), tabpos, ntiles)
+
+
 def read_ets_index(path: str | os.PathLike) -> EtsIndex:
-    path = str(path)
-    size = os.path.getsize(path)
     with open(path, "rb") as f:
-        main = f.read(64)
-        if len(main) < 64 or main[:4] != b"SIS\x00":
-            raise VsiReadError("像素文件 .ets 的文件头不对（可能没有拷贝完整）")
-        h = _MAIN.unpack(main)
-        ndim, addpos, addsize, tabpos, ntiles = h[3], h[4], h[5], h[7], h[8]
-        f.seek(addpos)
-        sec = f.read(addsize)
-        if len(sec) < 188 or sec[:4] != b"ETS\x00":
-            raise VsiReadError("像素文件 .ets 的第二文件头不对（可能没有拷贝完整）")
-        _ver, ptype, ncomp, _cs, comp, _q, tw, th, _td = struct.unpack_from("<9I", sec, 4)
-        if ptype not in _PIXEL:
-            raise VsiReadError(f"暂不支持的像素类型（代码 {ptype}），目前支持 8 位和 16 位")
-        n_ext = struct.unpack_from("<I", sec, 184)[0]
-        if n_ext < 2 or len(sec) < 188 + 4 * n_ext:
-            raise VsiReadError("像素文件 .ets 里的图像尺寸信息不完整")
-        ext = struct.unpack_from(f"<{n_ext}I", sec, 188)
-        ox, oy = struct.unpack_from("<ii", sec, 172)
-        rec = 4 * (ndim + 5)
-        if ntiles <= 0 or tw <= 0 or th <= 0 or ndim < 3:
-            raise VsiReadError("像素文件 .ets 里没有图块")
-        if tabpos + rec * ntiles > size:
-            raise VsiReadError("像素文件 .ets 不完整（图块表超出了文件末尾），请重新拷贝")
-        f.seek(tabpos)
-        tab = np.frombuffer(f.read(rec * ntiles), dtype=np.dtype(
+        header = _ets_header(path, f)
+        size = os.fstat(f.fileno()).st_size
+        ndim = header.ndim
+        f.seek(header.tabpos)
+        tab = np.frombuffer(f.read(4 * (ndim + 5) * header.ntiles), dtype=np.dtype(
             [("u0", "<u4"), ("c", "<i4", (ndim,)), ("off", "<u8"), ("len", "<u4"), ("u1", "<u4")]))
     coords = tab["c"]
     ok = (tab["off"].astype(np.int64) + tab["len"] <= size) & (coords >= 0).all(axis=1)
@@ -95,10 +110,7 @@ def read_ets_index(path: str | os.PathLike) -> EtsIndex:
     if not tiles:
         raise VsiReadError("像素文件 .ets 不完整（图块都在文件末尾之外），请重新拷贝")
     cmax = tuple(int(v) for v in coords[ok].max(axis=0))
-    return EtsIndex(path=path, ndim=ndim, dtype=_PIXEL[ptype], ncomp=int(ncomp), compression=int(comp),
-                    tile_w=int(tw), tile_h=int(th), width=int(ext[0]), height=int(ext[1]),
-                    slot_sizes=tuple(int(v) for v in ext[2:]), shift_x=max(0, -int(ox)), shift_y=max(0, -int(oy)),
-                    tiles=tiles, cmax=cmax, n_levels=cmax[-1] + 1)
+    return EtsIndex(**vars(header), tiles=tiles, cmax=cmax, n_levels=cmax[-1] + 1)
 
 
 def _decode(raw, compression: int, dtype: np.dtype, shape: tuple) -> np.ndarray:
@@ -147,38 +159,128 @@ def companion_dir(vsi_path: Path) -> Path:
     return vsi_path.parent / f"_{vsi_path.stem}_"
 
 
-def _stack_ets(vsi_path: Path) -> list[Path]:
-    d = companion_dir(vsi_path)
-    out = []
-    if d.is_dir():
-        for s in sorted(d.iterdir()):
-            if s.is_dir() and s.name.lower().startswith("stack"):
-                out += sorted(p for p in s.iterdir() if p.name.lower().startswith("frame_t") and p.suffix.lower() == ".ets")
-    return out
+@dataclass(frozen=True)
+class VsiScene:
+    scene_id: int                 # The on-disk stack number, stable when the file is moved.
+    name: str
+    width: int
+    height: int
+
+
+def _scene_candidates(path, scene_id=None, notes=None):
+    from . import vsi_meta
+
+    folder = companion_dir(path)
+    stacks = {}
+    if folder.is_dir():
+        for child in folder.iterdir():
+            number = child.name[5:]
+            if child.name[:5].lower() != "stack" or not number.isascii() or not number.isdigit() or not child.is_dir():
+                continue
+            # Split time series can have multiple ETS files in one stack. Use one
+            # time point, matching the metadata reader, never a new scene per frame.
+            frames = sorted(p for p in child.iterdir() if p.name.lower().startswith("frame_t") and p.suffix.lower() == ".ets")
+            if frames:
+                stacks[int(number)] = frames[0]
+    if not stacks:
+        raise VsiReadError(f"没有找到像素文件夹“{folder.name}”里的 stack…/frame_t….ets。"
+                           "请将 .vsi 和配套的像素文件夹一起拷贝到同一目录。")
+
+    why = None
+    missing_external = []
+    try:
+        tree = vsi_meta.load_tree(str(path))
+        metas, problems = vsi_meta.parse_all_images(tree, missing_external=missing_external)
+        types = vsi_meta.stack_image_types(tree) if problems else {}
+        if problems and not metas:
+            why = problems[0]
+    except Exception as exc:  # Some cellSens versions have unreadable metadata but intact ETS scans.
+        metas, types, why = [], {}, str(exc)
+    by_id = {m.stack_id: m for m in metas}
+    candidates, errors = [], []
+    for number in missing_external:
+        if number in stacks or types.get(number) in _AUX_TYPES or scene_id not in (None, number):
+            continue
+        issue = f"扫描区 stack{number} 声明了外部像素文件，但未找到 {folder.name}/stack{number}/frame_t*.ets。"
+        errors.append(issue)
+        if notes is not None:
+            notes.append(issue)
+    for number, ets in sorted(stacks.items()):
+        if scene_id is not None and number != scene_id:
+            continue
+        meta = by_id.get(number)
+        if (meta.image_type if meta else types.get(number)) in _AUX_TYPES:
+            continue
+        try:
+            with ets.open("rb") as f:
+                header = _ets_header(ets, f)
+            if header.ncomp != 1:
+                errors.append(f"stack{number} 是明场 RGB 彩色扫描，本软件只分析荧光图。")
+                continue
+            if header.compression not in COMPRESSION_NAMES:
+                raise VsiReadError(f"暂不支持的压缩方式（代码 {header.compression}）")
+        except (OSError, VsiReadError) as exc:
+            issue = f"未能读取扫描区 stack{number}（{ets.name}）：{exc}"
+            errors.append(issue)
+            if notes is not None:
+                notes.append(issue)
+            continue
+        if notes is not None and meta is None:
+            notes.append(f"扫描区 stack{number} 已按 ETS 数据读取，请手动核对扫描区、通道名和像素尺寸。")
+        name = (meta.name if meta else None) or f"stack{number}"
+        scene = VsiScene(number, name, header.width, header.height)
+        candidates.append((scene, meta, ets))
+    if not candidates:
+        if errors:
+            raise VsiReadError("；".join(errors))
+        if scene_id is not None:
+            raise VsiReadError(f"未找到可分析的扫描区 stack{scene_id}。请检查 .vsi 及配套的像素文件夹。")
+        raise VsiReadError("这个 .vsi 没有可分析的荧光扫描区。")
+    # Legacy open without a selector prefers a metadata-backed main scan, then
+    # the largest area. The stack number breaks ties independently of filenames.
+    def rank(candidate):
+        scene, meta, _ = candidate
+        area = (meta.width * meta.height) if meta else (scene.width * scene.height)
+        return meta is None, -area, scene.scene_id
+
+    candidates.sort(key=rank)
+    return candidates, why
+
+
+def list_vsi_scenes(path: str | Path, *, notes: list[str] | None = None) -> list[VsiScene]:
+    """List fluorescence scenes in legacy selection order from headers alone."""
+    candidates, _ = _scene_candidates(Path(path), notes=notes)
+    return [scene for scene, _, _ in candidates]
 
 
 class VsiFile:
-    """一个 .vsi 里要分析的那幅荧光图。接口和 kfbf.KfbfFile 一样（levels、n_channels、read、close），
-    z-stack 在 read 里按 z_mode 合成为一层。"""
+    """读取一个稳定 stack ID 对应的荧光扫描区。旧项目未记录 ID 时选择原来的最大主扫描图。"""
 
-    def __init__(self, path: str | Path, z_mode: str = "max"):
+    def __init__(self, path: str | Path, z_mode: str = "max", scene_id: int | None = None,
+                 channel_order: list[str] | None = None):
         self.path = Path(path)
         self.z_mode = z_mode
-        self.notes: list[str] = []        # 给用户看的提示（例如文件里有几幅图、用了哪一幅）
-        ets_files = _stack_ets(self.path)
-        if not ets_files:
-            d = companion_dir(self.path)
-            raise VsiReadError(
-                f"没有找到像素文件夹“{d.name}”（应和 .vsi 放在同一个文件夹里，里面是 stack…/frame_t….ets）。"
-                ".vsi 本身只有几百 KB 的说明信息，真正的图像在这个文件夹里，拷贝时要把两者一起拷。")
-        meta, idx = self._choose(ets_files)
-        if idx.ncomp != 1:
-            raise VsiReadError("这是明场 RGB 彩色扫描，不是多通道荧光图；本软件只分析荧光图。")
-        if idx.compression not in COMPRESSION_NAMES:
-            raise VsiReadError(f"暂不支持的压缩方式（代码 {idx.compression}）")
+        self.notes: list[str] = []
+        candidates, why = _scene_candidates(self.path, scene_id)
+        errors = []
+        for scene, meta, ets in candidates:
+            try:
+                idx = read_ets_index(ets)
+                break
+            except (VsiReadError, OSError) as exc:
+                errors.append(f"stack{scene.scene_id}：{exc}")
+        else:
+            raise VsiReadError("；".join(errors))
+        self.scene_id = scene.scene_id
+        if meta is None:
+            self.notes.append("没能读懂这个扫描区的 .vsi 说明信息" + (f"（{why}）" if why else "")
+                              + "，请手动核对扫描区、通道名和像素尺寸。")
+        if scene_id is None and len(candidates) > 1:
+            self.notes.append(f"这个 .vsi 里有 {len(candidates)} 幅扫描图，当前使用“{scene.name}”（stack{scene.scene_id}）。")
         self.index = idx
         self.dtype = idx.dtype
         self._layout(meta, idx)
+        self._order_channels(channel_order)
         self.pixel_size_um = None
         self.image_name = None
         if meta is not None:
@@ -193,60 +295,15 @@ class VsiFile:
                 break
             self.levels.append(_Level((hh, ww)))
         self._fh = open(idx.path, "rb")
-        self._mm = mmap.mmap(self._fh.fileno(), 0, access=mmap.ACCESS_READ)
+        try:
+            self._mm = mmap.mmap(self._fh.fileno(), 0, access=mmap.ACCESS_READ)
+        except Exception:
+            self._fh.close()
+            raise
         from .tileread import TileCache
         self.cache = TileCache()
 
     # ------------------------------------------------------------------ 选图、定维度
-    def _choose(self, ets_files: list[Path]):
-        """文件里可能有多幅图（标签、预览图、一幅或多幅主扫描图）：选最大的那幅主扫描荧光图。"""
-        metas, why = [], None
-        try:
-            from . import vsi_meta
-            metas, problems = vsi_meta.parse_all_images(vsi_meta.load_tree(str(self.path)))
-            if problems and not metas:
-                why = problems[0]
-        except Exception as e:  # noqa: BLE001  元数据读不懂时仍然尝试只靠 .ets 读图
-            why = str(e)
-        cands = []
-        for m in metas:
-            if not m.ets_path or m.image_type in _AUX_TYPES:
-                continue
-            cands.append(m)
-        cands.sort(key=lambda m: (-m.width * m.height, m.stack_id))
-        errs = []
-        for m in cands:
-            try:
-                idx = read_ets_index(m.ets_path)
-            except VsiReadError as e:
-                errs.append(str(e))
-                continue
-            if idx.ncomp != 1 and any(True for _ in cands[1:]):
-                errs.append("明场 RGB")
-                continue
-            if len(cands) > 1:
-                names = "、".join(str(c.name or f"stack{c.stack_id}") for c in cands)
-                self.notes.append(f"这个 .vsi 里有 {len(cands)} 幅扫描图（{names}），"
-                                  f"使用最大的一幅“{m.name or f'stack{m.stack_id}'}”。")
-            return m, idx
-        # 元数据不可用：直接用最大的 .ets
-        best = None
-        for p in ets_files:
-            try:
-                idx = read_ets_index(p)
-            except VsiReadError as e:
-                errs.append(str(e))
-                continue
-            if idx.ncomp == 1 and (best is None or idx.width * idx.height > best.width * best.height):
-                best = idx
-        if best is None:
-            if errs and all(e == "明场 RGB" for e in errs) or (not errs and ets_files):
-                raise VsiReadError("这是明场 RGB 彩色扫描，不是多通道荧光图；本软件只分析荧光图。")
-            raise VsiReadError(errs[0] if errs else "没有找到可读的像素文件")
-        self.notes.append("没能读懂 .vsi 里的说明信息" + (f"（{why}）" if why else "")
-                          + "，通道名和像素尺寸需要手动核对。")
-        return None, best
-
     def _layout(self, meta, idx: EtsIndex):
         """确定通道 / Z / 时间各在第几个坐标上。"""
         n_slots = idx.ndim - 3
@@ -270,12 +327,32 @@ class VsiFile:
         self.n_channels, self.n_z, self.n_t = size("c"), size("z"), size("t")
         if self.n_t > 1:
             self.notes.append(f"这是时间序列（{self.n_t} 个时间点），只使用第 1 个时间点。")
-        self.channel_names = []
+        self.channel_names, self.channel_ids, self.emission_nm = [], [], []
         for i in range(self.n_channels):
-            nm = names[i] if i < len(names) else ""
-            em = emis[i] if i < len(emis) else None
-            self.channel_names.append(nm or f"通道{i + 1}")
-        self.emission_nm = [emis[i] if i < len(emis) else None for i in range(self.n_channels)]
+            name = names[i] if i < len(names) else ""
+            emission = emis[i] if i < len(emis) else None
+            label = name or f"通道{i + 1}"
+            # A wavelength can identify an unnamed channel even when its position changes.
+            identity = f"{emission:g} nm" if not name and emission else label
+            self.channel_names.append(label)
+            self.channel_ids.append(identity)
+            self.emission_nm.append(emission)
+
+    def _order_channels(self, expected):
+        self._channel_indices = list(range(self.n_channels))
+        if not expected:
+            return
+        raw = [name.strip().casefold() for name in self.channel_ids]
+        wanted = [name.strip().casefold() for name in expected]
+        if raw == wanted:
+            return
+        if len(raw) != len(wanted) or set(raw) != set(wanted) or len(set(raw)) != len(raw):
+            raise VsiReadError(f"扫描区 stack{self.scene_id} 无法按通道名唯一匹配。"
+                               f"当前通道为 {', '.join(self.channel_ids)}，同一原图的参照顺序为 {', '.join(expected)}。")
+        self._channel_indices = [raw.index(name) for name in wanted]
+        self.channel_ids = list(expected)
+        self.channel_names = [self.channel_names[i] for i in self._channel_indices]
+        self.emission_nm = [self.emission_nm[i] for i in self._channel_indices]
 
     # ------------------------------------------------------------------ 读取
     def _tile(self, level: int, c: int, z: int, tx: int, ty: int):
@@ -325,7 +402,8 @@ class VsiFile:
         chs = list(range(self.n_channels)) if channels is None else list(channels)
         out = np.zeros((len(chs), h, w), self.dtype)
         mode = self.z_mode or "max"
-        for k, c in enumerate(chs):
+        for k, logical in enumerate(chs):
+            c = self._channel_indices[logical]
             if self.n_z <= 1:
                 out[k] = self._plane(level, c, 0, x0, y0, w, h)
             elif mode.startswith("z") and mode[1:].isdigit():

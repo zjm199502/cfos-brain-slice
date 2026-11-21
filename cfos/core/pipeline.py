@@ -16,7 +16,6 @@ from .coloc import colocalize, nucleus_channel
 from .log import log, friendly
 from .project import Project, ImageEntry, processed_section_names
 from .sections import find_sections
-from .slide_io import open_slide
 
 IMAGE_EXTS = (".qptiff", ".tif", ".tiff", ".kfbf", ".vsi")
 
@@ -55,7 +54,7 @@ def rebuild_cells(project: Project, im: ImageEntry, pixel_um0: float | None = No
     if not parts and not carried:
         return None
     if pixel_um0 is None:
-        slide = open_slide(im.path)
+        slide = im.open_slide()
         try:
             pixel_um0 = slide.pixel_size_um
         finally:
@@ -141,7 +140,7 @@ def detect_image(project: Project, im: ImageEntry, sl=None, redo=False, report=N
     所以中途取消、死机或断电后，再点一次就从没做完的脑片继续。返回 {"reused": n, "done": n}。"""
     own = sl is None
     if own:
-        sl = open_slide(im.path, z_mode=project.z_mode)
+        sl = im.open_slide(z_mode=project.z_mode)
     try:
         if not im.sections and section_names is None:
             im.sections = find_sections(sl, channels=project.tissue_channels())
@@ -158,10 +157,12 @@ def detect_image(project: Project, im: ImageEntry, sl=None, redo=False, report=N
         import json
         src = Path(im.path).stat()
         identity = [det.cellpose4.model_identity(), project.z_mode, src.st_size, src.st_mtime_ns, sl.pixel_size_um]
+        if getattr(sl, "scene_id", None) is not None:
+            identity.append(sl.vsi_source_signature())
         frames = []
         a, b = progress_range
         reused = done = 0
-        name = Path(im.path).name
+        name = im.display_name
         for k, s in enumerate(secs):
             if cancel is not None and cancel():
                 raise InterruptedError
@@ -223,27 +224,27 @@ def run_batch(project: Project, files, do_register=True, do_nonlinear=True, redo
         if cancel is not None and cancel():
             raise InterruptedError
 
-    existing = {Path(im.path).resolve(): im for im in project.images}
-    checklist = []
-    for f in files:
-        if Path(f).resolve() not in existing:
-            try:
-                im, _ = project.import_image(f)
-            except Exception as e:  # noqa: BLE001
-                log.error("无法打开 %s\n%s", f, traceback.format_exc())
-                checklist.append({"图片": Path(f).name, "脑片": "", "配准": "", "需要检查": f"出错：{friendly(e)}"})
-                continue
-            existing[Path(f).resolve()] = im
+    targets, checklist = [], []
+    for f in dict.fromkeys(Path(f).resolve() for f in files):
+        check_cancel()
+        try:
+            entries, notes = project.import_images(f)
+        except Exception as e:  # noqa: BLE001
+            log.error("无法打开 %s\n%s", f, traceback.format_exc())
+            checklist.append({"类型": "导入", "图片": f.name, "脑片": "", "配准": "", "需要检查": f"出错：{friendly(e)}"})
+            continue
+        targets.extend(entries)
+        for note in notes:
+            checklist.append({"类型": "导入", "图片": f.name, "脑片": "", "配准": "", "需要检查": note})
     project.save()
-    targets = [existing[Path(f).resolve()] for f in files if Path(f).resolve() in existing]
     nuc = nucleus_channel(project.channel_names)
     total = len(targets) * 100
     for i, im in enumerate(targets):
         check_cancel()
         base = i * 100
-        name = Path(im.path).name
+        name = im.display_name
         try:
-            sl = open_slide(im.path)
+            sl = im.open_slide()
         except Exception as e:  # noqa: BLE001
             log.error("无法打开 %s\n%s", im.path, traceback.format_exc())
             im.error = friendly(e); im.status = "出错"
@@ -264,9 +265,9 @@ def run_batch(project: Project, files, do_register=True, do_nonlinear=True, redo
                     say(base + 78, total, f"{name}：配准")
                     from . import autoreg
                     regs = autoreg.run(project, [im], nuc, nonlinear=do_nonlinear, cancelled=cancel,
-                                       only={im.key: {s.name for s in todo}}, slides={im.path: sl},
+                                       only={im.key: {s.name for s in todo}}, slides={im.source_id: sl},
                                        progress=lambda d, t, txt: say(base + 78 + int(17 * d / max(t, 1)), total,
-                                                                      f"{name}：{txt}")).get(im.path, {})
+                                                                      f"{name}：{txt}")).get(im.source_id, {})
                     for s in todo:
                         if s.name in regs:
                             s.registration = regs[s.name].to_dict()

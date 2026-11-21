@@ -1,10 +1,10 @@
 """奥林巴斯 / Evident cellSens .vsi 元数据解析（.vsi 文件里的树形结构：图像尺寸、维度顺序、通道名、发射波长、像素尺寸、z 位置）。
 
 本目录的代码取自 bioio-vsi（https://github.com/szarma/bioio-vsi ，提交 2dd575b，2026-10-16，BSD-3-Clause，
-版权和许可见 LICENSE.txt），只做了两处改动：导入路径改为相对导入；新增 parse_all_images（文件里有多幅图时逐幅解析，
-单幅解析失败不影响其他图），并在同一 stack 有多个 .ets 时取第一个。像素读取（.ets 图块）在 cfos/core/vsi.py 里另写。"""
+版权和许可见 LICENSE.txt）。本项目使用相对导入，逐幅解析各扫描区的元数据、图像类型及外部像素文件，
+同一 stack 有多个时间点时取第一个。像素读取（.ets 图块）在 cfos/core/vsi.py 里另写。"""
 from ._tree import load_tree  # noqa: F401
-from ._vsi import ImageVolumeMeta, parse_all_images  # noqa: F401
+from ._vsi import ImageVolumeMeta, parse_all_images, stack_image_types  # noqa: F401
 from .errors import VsiError  # noqa: F401
 
 # ---- bioio-vsi 的许可（BSD-3-Clause），与 LICENSE.txt 相同，随代码一起分发 ----

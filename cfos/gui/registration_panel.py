@@ -13,7 +13,6 @@ from ..core import registration as R
 from ..core.atlas import load_atlas, region_boundaries, region_colors
 from ..core.coloc import nucleus_channel
 from ..core.regions import _thumb_geometry
-from ..core.slide_io import open_slide
 
 REG_DISPLAY_UPSCALE = 3   # 脑区边界显示时放大的倍数（越大越顺滑，也越慢）
 
@@ -158,7 +157,7 @@ class RegistrationMixin:
 
         def done(res):
             for im in targets:
-                regs = res.get(im.path, {})
+                regs = res.get(im.source_id, {})
                 for s in im.sections:
                     if s.name in regs:
                         s.registration = regs[s.name].to_dict()
@@ -199,7 +198,7 @@ class RegistrationMixin:
         R.preload_elastix()    # 后台提前加载非线性贴合组件（首次约 10 秒），点“自动配准”时不用再等
         self.reg_sec_combo.blockSignals(True)
         self.reg_sec_combo.clear()
-        secs = self.image.sections if self.image else []
+        secs = self.image.sections if self.image and self.slide else []
         for s in secs:
             reg = R.Registration.from_dict(s.registration)
             self.reg_sec_combo.addItem(self._reg_combo_text(s, reg))
@@ -207,16 +206,19 @@ class RegistrationMixin:
         if secs:
             self.reg_sec_combo.setCurrentIndex(0)
             self._reg_section_changed(0)
+        else:
+            self.reg_status.clear()
+            self.reg_ok_btn.setVisible(False)
 
     def _reg_current(self):
         i = self.reg_sec_combo.currentIndex()
-        if self.image is None or not (0 <= i < len(self.image.sections)):
+        if self.slide is None or self.image is None or not (0 <= i < len(self.image.sections)):
             return None, None
         s = self.image.sections[i]
         return s, R.Registration.from_dict(s.registration)
 
     def _reg_geometry(self, s):
-        key = (self.image.path, s.name, tuple(s.bbox0))
+        key = (self.image.key, s.name, tuple(s.bbox0))
         if key not in self._reg_cache:
             ds, (H, W), _ = _thumb_geometry(self.slide, s)
             warp = None
@@ -602,23 +604,26 @@ class RegistrationMixin:
         if s is None or not reg.done:
             return
         nuc = nucleus_channel(self.project.channel_names)
-        path, key, results = self.image.path, self.image.key, self.project.results_dir
+        project, image = self.project, self.image
 
         def job(task):
-            sl = open_slide(path)
-            img, mask, ds = R.section_thumbnail(sl, s, nuc)
-            sl.close()
+            sl = image.open_slide(z_mode=project.z_mode)
+            try:
+                img, mask, ds = R.section_thumbnail(sl, s, nuc)
+            finally:
+                sl.close()
             r0 = R.Registration.from_dict(reg.to_dict()); r0.control_points = []
             w = R.nonlinear_fit(r0, R.orient(mask, reg.orientation), R.orient(img, reg.orientation))
-            np.save(R.warp_path(results, key, s.name), np.stack(w))
+            np.save(R.warp_path(project.results_dir, image.key, s.name), np.stack(w))
             reg.nl_method = r0.nl_method
             return True
 
         def done(_):
             reg.nonlinear = True
-            s.registration = reg.to_dict(); self.project.save()
+            s.registration = reg.to_dict(); project.save()
             self._reg_cache.clear()
-            self._reg_section_changed(self.reg_sec_combo.currentIndex())
+            if self.image is image and self._reg_current()[0] is s:
+                self._reg_section_changed(self.reg_sec_combo.currentIndex())
 
         self.run_task(job, done, label="正在非线性贴合…")
 
@@ -658,12 +663,12 @@ class RegistrationMixin:
             for i, (im, s_) in enumerate(items):
                 reg = R.Registration.from_dict(s_.registration)
                 if rows:
-                    vals = [im.key, s_.name] + list(rows[i].values())
+                    vals = [im.display_name, s_.name] + list(rows[i].values())
                 elif reg.done:
                     ml, dv = series.angles(reg)
-                    vals = [im.key, s_.name, f"{R.adjusted_plane(reg).ap_mm():+.2f}", f"{ml:.1f}", f"{dv:.1f}", reg.status]
+                    vals = [im.display_name, s_.name, f"{R.adjusted_plane(reg).ap_mm():+.2f}", f"{ml:.1f}", f"{dv:.1f}", reg.status]
                 else:
-                    vals = [im.key, s_.name, "未配准", "", "", ""]
+                    vals = [im.display_name, s_.name, "未配准", "", "", ""]
                 for j, v in enumerate(vals):
                     table.setItem(i, j, QTableWidgetItem(str(v)))
             table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
@@ -678,16 +683,17 @@ class RegistrationMixin:
         b_close.clicked.connect(dlg.reject)
 
         def refit(items):
-            nuc = nucleus_channel(self.project.channel_names)
-            results = self.project.results_dir
+            project = self.project
+            nuc = nucleus_channel(project.channel_names)
+            results = project.results_dir
 
             def job(task):
                 for k, (im, s_) in enumerate(items):
                     reg = R.Registration.from_dict(s_.registration)
                     if not reg.done:
                         continue
-                    task.report(k, len(items), f"正在非线性贴合 {im.key} {s_.name}…")
-                    sl = open_slide(im.path)
+                    task.report(k, len(items), f"正在非线性贴合 {im.display_name} {s_.name}…")
+                    sl = im.open_slide(z_mode=project.z_mode)
                     try:
                         img, mask, ds = R.section_thumbnail(sl, s_, nuc)
                     finally:
