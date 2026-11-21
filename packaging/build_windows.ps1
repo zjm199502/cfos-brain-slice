@@ -4,6 +4,7 @@
     [Parameter(Mandatory)][string]$OutputDirectory,
     [Parameter(Mandatory)][string]$VCRedistDirectory,
     [string]$DeepSliceDirectory,
+    [string]$OfflineCellposeDirectory,
     [string]$Compiler = "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe"
 )
 $ErrorActionPreference = 'Stop'
@@ -71,6 +72,23 @@ New-Item -Type Directory "$appDir\resources\deepslice" | Out-Null
 foreach ($weight in $weights) {
     foreach ($ext in @('onnx','sig')) { Copy-Item -LiteralPath "$models\$weight.$ext" -Destination "$appDir\resources\deepslice" }
 }
-& $Compiler /Q "/DAppVersion=$version" "/DStage=$stage" "/O$output" "$PSScriptRoot\windows.iss"
+$flags = @('/Q', "/DAppVersion=$version", "/DStage=$stage", "/O$output")
+$artifactName = "FosFolio-$version-Windows-x64-Setup"
+if ($OfflineCellposeDirectory) {
+    $bundle = (Resolve-Path -LiteralPath $OfflineCellposeDirectory).Path
+    foreach ($item in @('manifest.json','cpsam_v2','wheels')) {
+        if (!(Test-Path -LiteralPath (Join-Path $bundle $item))) { throw "Missing offline component: $item" }
+    }
+    $manifest = Get-Content -LiteralPath "$bundle\manifest.json" -Raw -Encoding UTF8 | ConvertFrom-Json
+    if ($manifest.format -ne 1 -or $manifest.platform -ne 'win-amd64') { throw 'Expected a Windows x64 Cellpose bundle.' }
+    $flags += "/DCellposeBundle=$bundle"
+    $artifactName = "FosFolio-$version-Windows-x64-Offline-Setup"
+}
+& $Compiler @flags "$PSScriptRoot\windows.iss"
 if ($LASTEXITCODE) { throw "Inno Setup exited with $LASTEXITCODE." }
-Get-Item -LiteralPath "$output\FosFolio-$version-Windows-x64-Setup.exe"
+Get-Item -LiteralPath "$output\$artifactName.exe"
+if ($OfflineCellposeDirectory) {
+    Get-ChildItem -LiteralPath $output -File -Filter "$artifactName-*.bin"
+    & $python -I "$PSScriptRoot\windows_offline_media.py" "$output\$artifactName.exe" $stage $bundle
+    if ($LASTEXITCODE) { throw 'Offline installation media verification failed.' }
+}

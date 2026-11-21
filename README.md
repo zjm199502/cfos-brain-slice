@@ -18,6 +18,8 @@
 
 ### 首次使用 Cellpose 4
 
+**完整离线包**包含 Cellpose 4.2.1、平台对应的 PyTorch、全部 Python 依赖和 Cellpose-SAM v2 权重。Windows 用户把离线压缩包完整解压，保留安装程序与所有分卷在同一目录，运行 Setup.exe。Apple 芯片 Mac 用户解压后，先把应用拖入“应用程序”，打开并同意首次离线配置。两端都可以在「④ 细胞识别」从随包文件修复环境和测试设备。安装程序会校验文件，在真实模型推理通过后启用环境。以下首次下载步骤适用于常规安装包。
+
 所有启用的通道使用 Cellpose-SAM v2（`cpsam_v2`）独立生成轮廓。各通道可以分别调整 Cellpose 掩膜阈值，默认值为 0。DAPI、EGFP 和 Fos 的阳性筛选仍使用各通道的面积、亮度和局部背景设置。
 
 在「④ 细胞识别 → 安装 / 修复 Cellpose 4 运行环境」完成首次下载，再点「测试 Cellpose 设备」查看实际推理设备。Windows 上兼容的 NVIDIA 显卡使用 CUDA，Apple 芯片 Mac 使用 PyTorch MPS（Metal），也可选择「仅 CPU」。首次安装需要联网并预留数 GB 空间，模型保存在本机，以后可离线识别。已有运行环境可通过 `CFOS_CELLPOSE_PYTHON` 指向 Python 解释器，通过 `CFOS_CELLPOSE_WEIGHTS` 指向官方 `cpsam_v2` 权重文件。

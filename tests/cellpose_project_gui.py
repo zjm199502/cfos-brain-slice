@@ -15,6 +15,7 @@ from qtpy.QtWidgets import QDoubleSpinBox, QFormLayout, QMessageBox, QPushButton
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from cfos.core import cellpose4
 from cfos.core.project import Project
+from cfos.gui.device_panel import DetectionDeviceBox
 from cfos.gui.main_window import MainWindow
 
 
@@ -29,6 +30,18 @@ def main():
 
     with TemporaryDirectory() as tmp, patch("cfos.core.log.attach_project"):
         root = Path(tmp)
+        offline_settings = QSettings(str(root / "offline.ini"), QSettings.IniFormat)
+        with patch("cfos.gui.device_panel.QSettings", return_value=offline_settings), \
+                patch("cfos.core.cellpose_setup.offline_bundle", return_value=root), \
+                patch("cfos.core.cellpose_setup.offline_ready", return_value=False), \
+                patch.object(QMessageBox, "question", return_value=QMessageBox.No) as prompt:
+            offline_box = DetectionDeviceBox(lambda *args: None)
+            assert "离线" in offline_box.install.text()
+            offline_box.offer_offline_setup()
+            offline_box.offer_offline_setup()
+            prompt.assert_called_once()
+            assert "从本地文件" in prompt.call_args.args[2]
+            offline_box.close()
         source = root / "input.tif"
         tifffile.imwrite(source, np.ones((80, 96), np.uint16))
         project = Project(root / "project")
@@ -65,7 +78,7 @@ def main():
                 "cfos.core.cellpose_setup.install") as install:
             win.device_box.install.click()
             install.assert_not_called()
-        def installing(report, cancel):
+        def installing(report, cancel, *, require_offline):
             report("正在下载测试")
             while not cancel():
                 time.sleep(.01)

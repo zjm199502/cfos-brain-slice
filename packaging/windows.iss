@@ -17,7 +17,13 @@ DisableProgramGroupPage=yes
 DisableDirPage=no
 UsePreviousLanguage=no
 WizardStyle=modern
+#ifdef CellposeBundle
+OutputBaseFilename=FosFolio-{#AppVersion}-Windows-x64-Offline-Setup
+DiskSpanning=yes
+DiskSliceSize=2000000000
+#else
 OutputBaseFilename=FosFolio-{#AppVersion}-Windows-x64-Setup
+#endif
 SetupIconFile={#Stage}\app\cfos.ico
 UninstallDisplayIcon={app}\app\cfos.ico
 Compression=lzma2/fast
@@ -38,6 +44,12 @@ zh.Diagnostic=诊断启动（出问题时用）
 en.Diagnostic=Diagnostic startup
 zh.DesktopShortcut=创建桌面快捷方式
 en.DesktopShortcut=Create a desktop shortcut
+#ifdef CellposeBundle
+zh.CellposeInstalling=正在从安装包配置 Cellpose 4 与模型并进行推理测试，首次安装可能需要数分钟…
+en.CellposeInstalling=Installing Cellpose 4 and its model from local media and running an inference test. This can take several minutes.
+zh.CellposeFailure=FosFolio 已安装。Cellpose 4 离线配置失败。请在软件的“④ 细胞识别”中重新安装或修复 Cellpose 4 运行环境。
+en.CellposeFailure=FosFolio is installed. Cellpose 4 offline setup failed. Open Cell Detection in FosFolio and use Install / Repair Cellpose 4 to retry from the installed files.
+#endif
 
 [Tasks]
 Name: desktopicon; Description: "{cm:DesktopShortcut}"
@@ -45,6 +57,9 @@ Name: desktopicon; Description: "{cm:DesktopShortcut}"
 [Files]
 Source: "{#Stage}\python\*"; DestDir: "{app}\python"; Flags: recursesubdirs createallsubdirs ignoreversion
 Source: "{#Stage}\app\*"; DestDir: "{app}\app"; Flags: recursesubdirs createallsubdirs ignoreversion
+#ifdef CellposeBundle
+Source: "{#CellposeBundle}\*"; DestDir: "{app}\app\resources\cellpose4"; Flags: recursesubdirs ignoreversion nocompression
+#endif
 
 [Icons]
 Name: "{code:StartMenuFolder}\{#ProductName}"; Filename: "{app}\python\pythonw.exe"; Parameters: """{app}\app\main.py"""; WorkingDir: "{app}\app"; IconFilename: "{app}\app\cfos.ico"
@@ -65,6 +80,37 @@ Type: filesandordirs; Name: "{app}\app\cfos"
 Type: dirifempty; Name: "{app}\app"
 
 [Code]
+#ifdef CellposeBundle
+var
+  CellposeFailed: Boolean;
+
+procedure SetupCellpose;
+var
+  ResultCode: Integer;
+  AppDir, PythonPath: String;
+begin
+  AppDir := ExpandConstant('{app}\app');
+  PythonPath := ExpandConstant('{app}\python\python.exe');
+  WizardForm.StatusLabel.Caption := CustomMessage('CellposeInstalling');
+  CellposeFailed := True;
+  try
+    if ExecAndLogOutput(PythonPath, '-u "' + AppDir + '\main.py" --install-cellpose-offline',
+        AppDir, SW_HIDE, ewWaitUntilTerminated, ResultCode, nil) then
+      CellposeFailed := ResultCode <> 0;
+    Log(Format('Cellpose offline setup result: %d', [ResultCode]));
+  except
+    Log(GetExceptionMessage);
+  end;
+  if CellposeFailed then
+    SuppressibleMsgBox(CustomMessage('CellposeFailure'), mbError, MB_OK, IDOK);
+end;
+
+function GetCustomSetupExitCode: Integer;
+begin
+  if CellposeFailed then Result := 10 else Result := 0;
+end;
+#endif
+
 function AcceptanceMode: Boolean;
 begin
   Result := ExpandConstant('{param:FOSFOLIOTEST|}') = '1';
@@ -107,4 +153,7 @@ begin
     RegDeleteKeyIncludingSubkeys(HKCU, Key);
     DeleteFile(LegacyUninstaller);
   end;
+#ifdef CellposeBundle
+  SetupCellpose;
+#endif
 end;

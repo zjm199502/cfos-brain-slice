@@ -215,7 +215,8 @@ def skip_version(v: str):
 
 
 def auto_check_enabled() -> bool:
-    return _load_state().get("auto_check", True)
+    default = not (base_app_dir() / "resources" / "cellpose4").is_dir()
+    return _load_state().get("auto_check", default)
 
 
 def set_auto_check(on: bool):

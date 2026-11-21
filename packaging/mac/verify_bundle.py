@@ -3,7 +3,9 @@ import os
 from pathlib import Path
 import platform
 import runpy
+import subprocess
 import sys
+import tempfile
 
 
 def report(message):
@@ -59,10 +61,14 @@ def verify_app(app):
     assert seen == [True], "GUI did not show the FosFolio main window"
 
 
-def verify_cellpose():
+def verify_cellpose(offline=False):
     from cfos.core import cellpose4, cellpose_setup
 
-    print(cellpose_setup.install(report=lambda message: print(message, flush=True)))
+    if offline:
+        launcher = Path(os.environ["CFOS_BASE_APP"]).parents[1] / "MacOS/cfos"
+        subprocess.run([launcher, "--install-cellpose-offline"], check=True)
+    else:
+        print(cellpose_setup.install(report=lambda message: print(message, flush=True)))
     cellpose4.set_pref("cpu")
     cpu = cellpose4.probe_device()
     assert "CPU" in cpu, cpu
@@ -91,5 +97,19 @@ if __name__ == "__main__":
         verify_app(app)
     elif phase == "cellpose":
         verify_cellpose()
+    elif phase == "cellpose-offline":
+        # Run both the CLI installer and inference with network access denied.
+        with tempfile.TemporaryDirectory(prefix="fosfolio-offline-") as testing:
+            env = os.environ.copy()
+            for key in ("CFOS_CELLPOSE_PYTHON", "CFOS_CELLPOSE_WEIGHTS"):
+                env.pop(key, None)
+            env["CFOS_COMPONENTS_DIR"] = str(Path(testing) / "components")
+            env["CFOS_UPDATES_DIR"] = str(Path(testing) / "updates")
+            subprocess.run(
+                ["/usr/bin/sandbox-exec", "-p", "(version 1)(allow default)(deny network*)",
+                 sys.executable, __file__, bundle, "cellpose-offline-isolated"], check=True, env=env
+            )
+    elif phase == "cellpose-offline-isolated":
+        verify_cellpose(offline=True)
     else:
         raise ValueError(phase)
