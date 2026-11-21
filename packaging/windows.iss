@@ -18,7 +18,12 @@ DisableDirPage=no
 UsePreviousLanguage=no
 WizardStyle=modern
 #ifdef CellposeBundle
+#ifdef CompactWheelParts
+OutputBaseFilename=FosFolio-{#AppVersion}-Windows-x64-Offline-Compact-Setup
+ExtraDiskSpaceRequired={#CompactRestoredBytes}
+#else
 OutputBaseFilename=FosFolio-{#AppVersion}-Windows-x64-Offline-Setup
+#endif
 DiskSpanning=yes
 DiskSliceSize=2000000000
 #else
@@ -26,7 +31,11 @@ OutputBaseFilename=FosFolio-{#AppVersion}-Windows-x64-Setup
 #endif
 SetupIconFile={#Stage}\app\cfos.ico
 UninstallDisplayIcon={app}\app\cfos.ico
+#ifdef CompactWheelParts
+Compression=lzma2/max
+#else
 Compression=lzma2/fast
+#endif
 SolidCompression=yes
 LZMANumBlockThreads=4
 CloseApplications=yes
@@ -49,6 +58,12 @@ zh.CellposeInstalling=正在从安装包配置 Cellpose 4 与模型并进行推�
 en.CellposeInstalling=Installing Cellpose 4 and its model from local media and running an inference test. This can take several minutes.
 zh.CellposeFailure=FosFolio 已安装。Cellpose 4 离线配置失败。请在软件的“④ 细胞识别”中重新安装或修复 Cellpose 4 运行环境。
 en.CellposeFailure=FosFolio is installed. Cellpose 4 offline setup failed. Open Cell Detection in FosFolio and use Install / Repair Cellpose 4 to retry from the installed files.
+#ifdef CompactWheelParts
+zh.RestoreFailure=无法还原离线安装文件。请确保安装磁盘有足够的空间，并使用完整的安装分卷重新运行安装程序。
+en.RestoreFailure=Could not restore the offline files. Check available disk space and rerun Setup with all media files together.
+zh.Restoring=正在还原并校验官方 PyTorch 和 Cellpose 模型文件…
+en.Restoring=Restoring and verifying the official PyTorch and Cellpose model files...
+#endif
 #endif
 
 [Tasks]
@@ -58,7 +73,16 @@ Name: desktopicon; Description: "{cm:DesktopShortcut}"
 Source: "{#Stage}\python\*"; DestDir: "{app}\python"; Flags: recursesubdirs createallsubdirs ignoreversion
 Source: "{#Stage}\app\*"; DestDir: "{app}\app"; Flags: recursesubdirs createallsubdirs ignoreversion
 #ifdef CellposeBundle
+#ifdef CompactWheelParts
+Source: "{#CellposeBundle}\*"; DestDir: "{app}\app\resources\cellpose4"; Excludes: "cpsam_v2"; Flags: ignoreversion
+Source: "{#CellposeBundle}\wheels\*"; DestDir: "{app}\app\resources\cellpose4\wheels"; Excludes: "{#CompactWheelName}"; Flags: ignoreversion nocompression
+Source: "{#CompactWheelParts}\*"; DestDir: "{tmp}\fosfolio-compact\wheel"; Flags: ignoreversion deleteafterinstall solidbreak
+Source: "{#CompactModel}"; DestDir: "{tmp}\fosfolio-compact"; DestName: "cpsam_v2.fsp"; Flags: ignoreversion deleteafterinstall nocompression
+Source: "windows_compact_wheel.py"; DestDir: "{tmp}\fosfolio-compact"; Flags: ignoreversion deleteafterinstall
+Source: "offline_model_transport.py"; DestDir: "{tmp}\fosfolio-compact"; Flags: ignoreversion deleteafterinstall
+#else
 Source: "{#CellposeBundle}\*"; DestDir: "{app}\app\resources\cellpose4"; Flags: recursesubdirs ignoreversion nocompression
+#endif
 #endif
 
 [Icons]
@@ -74,6 +98,12 @@ Root: HKCU; Subkey: "Software\{code:ApplicationId}"; ValueType: string; ValueNam
 Filename: "{app}\python\pythonw.exe"; Parameters: """{app}\app\main.py"""; WorkingDir: "{app}\app"; Description: "{cm:Launch}"; Flags: nowait postinstall skipifsilent
 
 [UninstallDelete]
+#ifdef CompactWheelParts
+Type: files; Name: "{app}\app\resources\cellpose4\wheels\{#CompactWheelName}"
+Type: files; Name: "{app}\app\resources\cellpose4\cpsam_v2"
+Type: dirifempty; Name: "{app}\app\resources\cellpose4\wheels"
+Type: dirifempty; Name: "{app}\app\resources\cellpose4"
+#endif
 ; Python creates caches at runtime. Application projects, components and update history live outside these directories.
 Type: filesandordirs; Name: "{app}\python"
 Type: filesandordirs; Name: "{app}\app\cfos"
@@ -94,12 +124,30 @@ begin
   WizardForm.StatusLabel.Caption := CustomMessage('CellposeInstalling');
   CellposeFailed := True;
   try
+#ifdef CompactWheelParts
+    WizardForm.StatusLabel.Caption := CustomMessage('Restoring');
+    if not ExecAndLogOutput(PythonPath, '-I "' + ExpandConstant('{tmp}\fosfolio-compact\windows_compact_wheel.py') +
+        '" restore "' + AppDir + '\resources\cellpose4" "' + ExpandConstant('{tmp}\fosfolio-compact\wheel') + '"',
+        AppDir, SW_HIDE, ewWaitUntilTerminated, ResultCode, nil) or (ResultCode <> 0) then
+      RaiseException(CustomMessage('RestoreFailure'));
+    DelTree(ExpandConstant('{tmp}\fosfolio-compact\wheel'), True, True, True);
+    if not ExecAndLogOutput(PythonPath, '-I "' + ExpandConstant('{tmp}\fosfolio-compact\offline_model_transport.py') +
+        '" restore "' + ExpandConstant('{tmp}\fosfolio-compact\cpsam_v2.fsp') + '" "' + AppDir + '\resources\cellpose4\cpsam_v2"',
+        AppDir, SW_HIDE, ewWaitUntilTerminated, ResultCode, nil) or (ResultCode <> 0) then
+      RaiseException(CustomMessage('RestoreFailure'));
+    DeleteFile(ExpandConstant('{tmp}\fosfolio-compact\cpsam_v2.fsp'));
+    WizardForm.StatusLabel.Caption := CustomMessage('CellposeInstalling');
+#endif
     if ExecAndLogOutput(PythonPath, '-u "' + AppDir + '\main.py" --install-cellpose-offline',
         AppDir, SW_HIDE, ewWaitUntilTerminated, ResultCode, nil) then
       CellposeFailed := ResultCode <> 0;
     Log(Format('Cellpose offline setup result: %d', [ResultCode]));
   except
     Log(GetExceptionMessage);
+#ifdef CompactWheelParts
+    SuppressibleMsgBox(GetExceptionMessage, mbError, MB_OK, IDOK);
+    exit;
+#endif
   end;
   if CellposeFailed then
     SuppressibleMsgBox(CustomMessage('CellposeFailure'), mbError, MB_OK, IDOK);

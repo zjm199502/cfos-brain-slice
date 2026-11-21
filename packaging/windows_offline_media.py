@@ -22,6 +22,9 @@ def package(setup, stage, bundle):
         with zipfile.ZipFile(path) as wheel:
             wheel_bytes += sum(item.file_size for item in wheel.infolist())
     guide = setup.parent / "Windows离线安装说明.txt"
+    compact_note = ("精简离线包需要先展开临时文件并还原官方软件包，请在临时目录所在磁盘预留 6 GiB。"
+                    "首次安装的准备时间会更长，完成后自动清理临时文件。\n"
+                    if "-Compact-" in setup.stem else "")
     guide.write_text(
         f"FosFolio Windows x64 离线安装\n\n"
         f"1. 把 ZIP 完整解压到同一文件夹，保留所有 .bin 分卷的原名。\n"
@@ -30,6 +33,7 @@ def package(setup, stage, bundle):
         f"首次配置可能需要数分钟，可全程断网。\n"
         f"4. 打开「④ 细胞识别」，可点「测试 Cellpose 设备」核对 CPU 或兼容的 NVIDIA GPU。"
         f"软件可从安装目录内的离线组件修复运行环境。\n\n"
+        f"{compact_note}"
         f"安装目录文件合计约 {installed_bytes / 1024**3:.1f} GiB。当前用户组件目录另需约 "
         f"{wheel_bytes / 1024**3:.1f} GiB 来展开依赖，并需预留安装临时空间。\n",
         encoding="utf-8-sig")

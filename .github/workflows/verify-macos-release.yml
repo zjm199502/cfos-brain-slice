@@ -7,6 +7,13 @@ on:
         description: Numeric GitHub release ID (published release or draft)
         required: true
         type: string
+      package:
+        description: macOS package to verify (compact requires a published asset)
+        type: choice
+        default: standard
+        options:
+          - standard
+          - compact-offline
   release:
     types: [published]
 
@@ -23,12 +30,14 @@ jobs:
     outputs:
       version: ${{ steps.fetch.outputs.version }}
       sha256: ${{ steps.fetch.outputs.sha256 }}
+      public_url: ${{ steps.fetch.outputs.public_url }}
     steps:
       - name: Fetch the official release asset
         id: fetch
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_ID: ${{ inputs.release_id || github.event.release.id }}
+          PACKAGE: ${{ inputs.package || 'standard' }}
         run: |
           set -euo pipefail
           fail() { echo "::error::$1"; exit 1; }
@@ -39,16 +48,25 @@ jobs:
           tag=$(jq -er .tag_name "$RUNNER_TEMP/release.json")
           [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail 'Release tag must use vX.Y.Z.'
           name="FosFolio-${tag#v}-macOS-arm64.zip"
+          if [[ "$PACKAGE" == compact-offline ]]; then
+            jq -e '.draft == false' "$RUNNER_TEMP/release.json" >/dev/null || fail 'Compact verification requires a published release.'
+            name="FosFolio-${tag#v}-macOS-arm64-Offline-Compact.tar.xz"
+          fi
           metadata=$(jq -ec --arg name "$name" '.assets[] | select(.name == $name and .state == "uploaded")' "$RUNNER_TEMP/release.json") || fail "Uploaded asset $name is missing from release $RELEASE_ID."
           asset_id=$(jq -er .id <<< "$metadata")
           digest=$(jq -er '.digest | select(type == "string") | ltrimstr("sha256:")' <<< "$metadata") || fail "No SHA-256 digest found for asset $asset_id."
           [[ "$digest" =~ ^[0-9a-f]{64}$ ]] || fail "Invalid SHA-256 digest for asset $asset_id."
+          printf 'version=%s\nsha256=%s\n' "${tag#v}" "$digest" >> "$GITHUB_OUTPUT"
+          if [[ "$PACKAGE" == compact-offline ]]; then
+            printf 'public_url=https://github.com/%s/releases/download/%s/%s\n' "$repo" "$tag" "$name" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           cd "$RUNNER_TEMP"
           echo "Downloading $name, asset $asset_id"
           gh api -H 'Accept: application/octet-stream' "repos/$repo/releases/assets/$asset_id" > bundle.zip || fail "Failed to download asset $asset_id."
           printf '%s  bundle.zip\n' "$digest" | sha256sum -c -
-          printf 'version=%s\nsha256=%s\n' "${tag#v}" "$digest" >> "$GITHUB_OUTPUT"
       - name: Transfer the verified ZIP
+        if: inputs.package != 'compact-offline'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: macos-release-zip
@@ -73,10 +91,12 @@ jobs:
           persist-credentials: false
           sparse-checkout: packaging/mac
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        if: inputs.package != 'compact-offline'
         with:
           name: macos-release-zip
           path: ${{ runner.temp }}
       - name: Check digest and unpack on macOS
+        if: inputs.package != 'compact-offline'
         env:
           digest: ${{ needs.fetch.outputs.sha256 }}
         run: |
@@ -85,6 +105,30 @@ jobs:
           printf '%s  bundle.zip\n' "$digest" | shasum -a 256 --check
           ditto -x -k bundle.zip "$RUNNER_TEMP/fosfolio"
           printf 'BUNDLE=%s\n' "$RUNNER_TEMP/fosfolio/FosFolio脑片图册.app" >> "$GITHUB_ENV"
+      - name: Download and unpack the public compact offline release on Apple Silicon
+        if: inputs.package == 'compact-offline'
+        env:
+          PUBLIC_URL: ${{ needs.fetch.outputs.public_url }}
+          EXPECTED_DIGEST: ${{ needs.fetch.outputs.sha256 }}
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          curl --fail --location --retry 3 --output bundle.tar.xz "$PUBLIC_URL"
+          printf '%s  bundle.tar.xz\n' "$EXPECTED_DIGEST" | shasum -a 256 --check
+          mkdir -p fosfolio
+          /usr/bin/tar -xf bundle.tar.xz -C fosfolio
+          rm bundle.tar.xz
+          printf 'BUNDLE=%s\n' "$RUNNER_TEMP/fosfolio/FosFolio脑片图册.app" >> "$GITHUB_ENV"
+          printf 'Verified compact release SHA-256: `%s`\n' "$EXPECTED_DIGEST" >> "$GITHUB_STEP_SUMMARY"
+      - name: Install offline and run native Cellpose CPU and available MPS inference with network denied
+        if: inputs.package == 'compact-offline'
+        run: |
+          set -euo pipefail
+          py="$BUNDLE/Contents/Resources/python/bin/python3"
+          "$py" packaging/mac/verify_bundle.py "$BUNDLE" cellpose-offline
+          # The isolated verifier discards its temporary venv. Record the already-seen
+          # prompt for the separate GUI smoke test so it can close unattended.
+          "$py" -c 'from qtpy.QtCore import QSettings; s = QSettings("cfos", "cfos脑片分析"); s.setValue("cellposeOfflineSetupOffered", True); s.sync()'
       - name: Validate native launcher, GUI, demo and DeepSlice inference
         run: |
           set -euo pipefail
@@ -96,6 +140,7 @@ jobs:
           grep -F "$EXPECTED_VERSION" "$RUNNER_TEMP/launcher.txt"
           "$py" packaging/mac/verify_bundle.py "$BUNDLE" app
       - name: Install Cellpose, run CPU inference and test MPS when available
+        if: inputs.package != 'compact-offline'
         run: |
           set -euo pipefail
           "$BUNDLE/Contents/Resources/python/bin/python3" packaging/mac/verify_bundle.py "$BUNDLE" cellpose
