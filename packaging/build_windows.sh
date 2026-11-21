@@ -6,13 +6,13 @@
 set -euo pipefail
 W=${1:?工作目录}; APP=$(cd "$(dirname "$0")/.." && pwd); PIP=/home/user/venv/bin/pip; PY=/home/user/venv/bin/python
 PY_URL="https://github.com/astral-sh/python-build-standalone/releases/download/20261020/cpython-3.13.16+20261020-x86_64-pc-windows-msvc-install_only.tar.gz"
-# 通用模型提前转换为 ONNX 随包带上（安装目录不可写，用户电脑上不再转换）
+# 图谱配准使用 DeepSlice ONNX，细胞识别在本机安装 Cellpose 原生运行环境。
 "$PY" "$APP/packaging/make_onnx.py"
 mkdir -p "$W" && cd "$W"
 [ -f py.tar.gz ] || curl -sL -o py.tar.gz "$PY_URL"
 # 排除：开发用的、只有 Linux 的、以及本软件用不到的组件（见 packaging/不打包的组件.txt）
-EXCLUDE="^(-e|nvidia|triton|tensorflow==|sympy|mpmath|pyflakes|typing==|$(tr '\n' '|' < "$APP/packaging/不打包的组件.txt" | sed 's/|$//'))"
-$PIP freeze | grep -viE "$EXCLUDE" > constraints.txt
+EXCLUDE="^(-e|stardist==|csbdeep==|cellpose==|torch==|torchvision==|nvidia|triton|tensorflow==|sympy|mpmath|pyflakes|typing==|$(tr '\n' '|' < "$APP/packaging/不打包的组件.txt" | sed 's/|$//'))"
+$PIP freeze | grep -viE "$EXCLUDE|^onnxruntime[-_](gpu|directml)==" > constraints.txt
 grep -vE "^tensorflow; " "$APP/requirements.txt" | sed 's/; sys_platform.*//; s/ *#.*//' > req_win.txt
 PLAT=(--platform win_amd64 --python-version 3.13 --implementation cp --abi cp313 --only-binary=:all:)
 $PIP download "${PLAT[@]}" -r req_win.txt -c constraints.txt -d wheels
@@ -22,6 +22,7 @@ rm -f wheels/typing-3*.whl
 $PY - "$APP/packaging/不打包的组件.txt" wheels <<'PYEOF'
 import pathlib, re, sys
 names = {re.sub(r"[-_.]+", "-", n.strip().lower()) for n in open(sys.argv[1], encoding="utf-8") if n.strip()}
+names.update({"onnxruntime-directml", "onnxruntime-gpu", "stardist", "csbdeep"})
 total = 0
 for f in sorted(pathlib.Path(sys.argv[2]).glob("*.whl")):
     if re.sub(r"[-_.]+", "-", f.name.split("-")[0].lower()) in names:
@@ -42,6 +43,7 @@ print(f"共 {total / 2**20:.0f} MB 的组件改为训练时再下载")
 PYEOF
 rm -rf stage && mkdir -p stage && tar -xzf py.tar.gz -C stage
 find stage/python -name "*.pdb" -delete
+"$PY" "$APP/packaging/copy_windows_crt.py" "${VC_REDIST_DIRECTORY:?Specify the release x64 Microsoft.VC*.CRT directory}" stage/python
 $PIP install -q --no-deps --no-compile --target stage/python/Lib/site-packages "${PLAT[@]}" wheels/*.whl
 SP=stage/python/Lib/site-packages
 rm -rf $SP/clang $SP/tensorflow/include $SP/include $SP/PySide6/Qt6WebEngine* $SP/PySide6/QtWebEngine* $SP/PySide6/resources \
@@ -52,11 +54,14 @@ rm -rf $SP/DeepSlice/metadata/weights
 find $SP/PySide6/translations -type f ! -name "*zh_CN*" -delete
 mkdir -p stage/app/resources
 cp -r "$APP"/cfos "$APP"/main.py "$APP"/README.md "$APP"/THIRD_PARTY.md "$APP"/requirements.txt stage/app/
-cp -r "$APP"/resources/{atlas,models,demo,teaching} stage/app/resources/
+cp -r "$APP"/resources/{atlas,demo,teaching} stage/app/resources/
 # DeepSlice 只带 ONNX 版本（v0.8.1 起不用 TensorFlow 定位；原来的 h5 权重只有设置 CFOS_NET=tf 时才用）
 mkdir -p stage/app/resources/deepslice && cp "$APP"/resources/deepslice/deepslice_*.{onnx,sig} stage/app/resources/deepslice/
 cp "$APP"/packaging/cfos.ico stage/app/
+VERSION=$("$PY" -c 'import sys;sys.path.insert(0,sys.argv[1]);from cfos import __version__;print(__version__)' "$APP")
+cp "$APP/packaging/更新公告/$VERSION.md" "stage/app/更新公告.md"
 cp "$APP"/packaging/诊断启动（出问题时用）.bat stage/
 find stage -name "__pycache__" -type d -prune -exec rm -rf {} +
+find stage/python -type f -name direct_url.json -delete
 # 注意：NSIS 的数据块不能超过 2 GB，所以不能用 /SOLID 压缩
-LANG=C.UTF-8 LC_ALL=C.UTF-8 makensis -V2 -INPUTCHARSET UTF8 "-DSTAGE=$PWD/stage" "-DOUTFILE=$PWD/FosFolio脑片图册_v0.8.6_Windows安装包.exe" "$APP/packaging/installer.nsi"
+LANG=C.UTF-8 LC_ALL=C.UTF-8 makensis -V2 -INPUTCHARSET UTF8 "-DVERSION=$VERSION" "-DSTAGE=$PWD/stage" "-DOUTFILE=$PWD/FosFolio-$VERSION-Windows-x64-Setup.exe" "$APP/packaging/installer.nsi"

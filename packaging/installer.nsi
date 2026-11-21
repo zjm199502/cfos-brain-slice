@@ -3,12 +3,14 @@ Unicode true
 !define APPNAME "cFos脑片分析"     ; 安装目录和注册表键沿用旧名：旧版升级、补丁手动安装脚本都靠它找到安装位置
 !define DISPNAME "FosFolio 脑片图册"
 !define OLDDISP "cFos 脑片分析"
-!define VERSION "0.8.6"
+!ifndef VERSION
+  !error "Pass the application version with -DVERSION=..."
+!endif
 !ifndef STAGE
   !define STAGE "stage"
 !endif
 !ifndef OUTFILE
-  !define OUTFILE "FosFolio脑片图册_v0.8.6_Windows安装包.exe"
+  !define OUTFILE "FosFolio-${VERSION}-Windows-x64-Setup.exe"
 !endif
 
 Name "${DISPNAME} ${VERSION}"
@@ -25,7 +27,7 @@ ManifestDPIAware true
 !define MUI_ICON "${STAGE}\app\cfos.ico"
 !define MUI_UNICON "${STAGE}\app\cfos.ico"
 !define MUI_WELCOMEPAGE_TITLE "欢迎安装 ${DISPNAME} ${VERSION}"
-!define MUI_WELCOMEPAGE_TEXT "这个程序会把 ${DISPNAME} 安装到你的电脑上。$\r$\n$\r$\n安装不需要联网，也不需要管理员权限，约需 4 GB 磁盘空间、3–8 分钟。$\r$\n$\r$\n软件只使用 CPU，不需要独立显卡。"
+!define MUI_WELCOMEPAGE_TEXT "这个程序会把 ${DISPNAME} 安装到你的电脑上。$\r$\n$\r$\n安装主程序无需联网或管理员权限。首次识别细胞时，在软件内安装 Cellpose 4 组件，可使用 NVIDIA CUDA 或 CPU。"
 !define MUI_FINISHPAGE_RUN
 !define MUI_FINISHPAGE_RUN_FUNCTION LaunchApp
 !define MUI_FINISHPAGE_RUN_TEXT "现在启动 ${DISPNAME}"

@@ -6,13 +6,14 @@
 set -euo pipefail
 W=${1:?工作目录}; APP=$(cd "$(dirname "$0")/.." && pwd); PY=/home/user/venv/bin/python; PIP=/home/user/venv/bin/pip
 PY_URL="https://github.com/astral-sh/python-build-standalone/releases/download/20261020/cpython-3.13.16+20261020-aarch64-apple-darwin-install_only.tar.gz"
-NAME="FosFolio脑片图册"; VER=0.8.6
-# 通用模型提前转换为 ONNX 随包带上（安装目录不可写，用户电脑上不再转换）
+NAME="FosFolio脑片图册"
+VER=$(PYTHONPATH="$APP" "$PY" -c 'from cfos import __version__; print(__version__)')
+# 图谱配准使用 DeepSlice ONNX，细胞识别在本机安装 Cellpose 原生运行环境。
 "$PY" "$APP/packaging/make_onnx.py"
 mkdir -p "$W" && cd "$W"
 [ -f py.tar.gz ] || curl -sL -o py.tar.gz "$PY_URL"
 # Mac 上用完整版 tensorflow（没有 tensorflow-cpu）
-EXCLUDE="^(-e|nvidia|triton|tensorflow|tensorflow_cpu|sympy|mpmath|pyflakes|typing==|$(tr '\n' '|' < "$APP/packaging/不打包的组件.txt" | sed 's/|$//'))"
+EXCLUDE="^(-e|stardist==|csbdeep==|cellpose==|torch==|torchvision==|nvidia|triton|tensorflow|tensorflow_cpu|sympy|mpmath|pyflakes|typing==|$(tr '\n' '|' < "$APP/packaging/不打包的组件.txt" | sed 's/|$//'))"
 $PIP freeze | grep -viE "$EXCLUDE" > constraints.txt
 echo "tensorflow==2.21.0" >> constraints.txt
 PLAT=(--platform macosx_15_0_arm64 --python-version 3.13 --implementation cp --abi cp313 --only-binary=:all:)
@@ -83,10 +84,19 @@ B="stage/$NAME.app/Contents"
 mkdir -p "$B/MacOS" "$B/Resources/app/resources"
 mv stage/python "$B/Resources/python"
 cp -r "$APP"/cfos "$APP"/main.py "$APP"/README.md "$APP"/THIRD_PARTY.md "$APP"/requirements.txt "$B/Resources/app/"
-cp -r "$APP"/resources/{atlas,models,demo,teaching} "$B/Resources/app/resources/"
+mkdir -p "$B/Resources/app/packaging/更新公告"
+cp "$APP/packaging/更新公告/$VER.md" "$B/Resources/app/packaging/更新公告/"
+cp "$APP/packaging/更新公告/$VER.md" stage/更新公告.md
+cp -r "$APP"/resources/{atlas,demo,teaching} "$B/Resources/app/resources/"
 # DeepSlice 只带 ONNX 版本（v0.8.1 起不用 TensorFlow 定位；原来的 h5 权重只有设置 CFOS_NET=tf 时才用）
 mkdir -p "$B/Resources/app/resources/deepslice" && cp "$APP"/resources/deepslice/deepslice_*.{onnx,sig} "$B/Resources/app/resources/deepslice/"
-cp "$APP"/packaging/mac/Info.plist "$B/"
+"$PY" - "$APP/packaging/mac/Info.plist" "$B/Info.plist" "$VER" <<'PYEOF'
+import pathlib, plistlib, sys
+source, dest, version = sys.argv[1:]
+info = plistlib.loads(pathlib.Path(source).read_bytes())
+info.update(CFBundleVersion=version, CFBundleShortVersionString=version)
+pathlib.Path(dest).write_bytes(plistlib.dumps(info))
+PYEOF
 cp "$APP"/packaging/mac/cfos.icns "$B/Resources/"
 cp "$APP"/packaging/mac/launcher.sh "$B/MacOS/cfos"
 cp "$APP"/packaging/mac/诊断启动.command stage/
@@ -101,6 +111,6 @@ cat > stage/安装说明.txt <<'EOT'
    在页面下方找到“仍要打开”，点它，输入开机密码确认。以后就可以直接双击打开。
 3. 如果打不开，双击“诊断启动.command”，把终端窗口里的文字截图发给开发者。
 EOT
-rm -f "${NAME}_Mac版_v${VER}.zip"
-(cd stage && zip -qry -9 "../${NAME}_Mac版_v${VER}.zip" "$NAME.app" 诊断启动.command 安装说明.txt)
-ls -la "${NAME}_Mac版_v${VER}.zip"
+rm -f "FosFolio-${VER}-macOS-arm64.zip"
+(cd stage && zip -qry -9 "../FosFolio-${VER}-macOS-arm64.zip" "$NAME.app" 诊断启动.command 安装说明.txt 更新公告.md)
+ls -la "FosFolio-${VER}-macOS-arm64.zip"
