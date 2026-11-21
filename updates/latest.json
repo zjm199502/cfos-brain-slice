@@ -2,11 +2,11 @@
  "version": "0.9.2",
  "min_base": "0.7",
  "date": "2026-11-21",
- "notes": "# FosFolio 软件内更新（v0.8.11 / v0.9.2）\n\n点击「现在更新」即可。使用 v0.8.x 的用户重启后为 v0.8.11（StarDist）；使用 v0.9.x 的用户重启后为 v0.9.2（Cellpose 4）。旧客户端标题统一显示 v0.9.2。\n\n## Excel 导出支持自选脑区\n\n在「⑧ 导出 Excel」的「脑区范围」选择「自选脑区」，按缩写、英文名、已收录的中文名或 Allen ID 搜索。勾选多个脑区后点击「应用」。项目会记住选择，手动导出和一键批量处理都使用这份清单。\n\n「按脑区×脑片」只列所选且在切片上有组织覆盖的脑区。选中上级脑区会导出包含下属区域的汇总；要同时查看亚区，请也勾选该亚区。父区与亚区的结果有重叠。半脑导出仍可单独设置，所选脑区可在「分析参数」中核对。\n\nv0.9.x 系列的补丁也包含 v0.9.1 的 Olympus VSI 多扫描区修复。\n\n在「帮助 → 检查更新」中点击「现在更新」，完成后重启软件。\n\n新用户下载 v0.9.0 完整安装包时，推荐优先使用[腾讯云 CNB 下载页](https://cnb.cool/fosfolio/cfos-brain-slice/-/releases/tag/v0.9.0)。\n\n联系方式：zjm199502@163.com，https://github.com/zjm199502/cfos-brain-slice",
+ "notes": "# 按当前安装系列更新\n\n如果你正在用 v0.8.x，点「现在更新」只会安装 v0.8.11，继续使用 StarDist。旧更新窗口顶部统一显示 v0.9.2。重启后可在「帮助 → 关于」核对实际版本。\n\nv0.9.x 安装版会收到 v0.9.2，继续使用 Cellpose 4。\n\n两个系列均可在「⑧ 导出 Excel → 脑区范围 → 自选脑区…」搜索并勾选多个 Allen 脑区。保存后，手动导出和一键批处理都使用本项目的清单。",
  "patch": {
   "file": "cfos-update-0.8.11-and-0.9.2.zip",
-  "size": 851719,
-  "sha256": "64afcb7cf5a178e77c9d99a938d780930c032f4727e10636adf02fa1cf84e184"
+  "size": 851403,
+  "sha256": "5661cf4ca3d13f0c0484013909a03f0c77982e071fab5b746f3a290641388e75"
  },
- "full_installer": "https://cnb.cool/fosfolio/cfos-brain-slice/-/releases/tag/v0.9.0"
+ "full_installer": "https://github.com/zjm199502/cfos-brain-slice/blob/installers/updates/v0.8/README.md"
 }
