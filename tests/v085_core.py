@@ -40,7 +40,7 @@ if len(sys.argv) > 1:
     both = reg[reg["半脑"] == "左右合计"]
     root = both.loc[both["脑区缩写"] == "root", cnt].sum()
     grey = both.loc[both["脑区缩写"] == "grey", cnt].sum()
-    for m in RS.MODE_LABEL:
+    for m, _, _ in RS.MODES:
         f = RS.filter_table(reg, m, 6)
         fb = f[f["半脑"] == "左右合计"]
         print(f"{m:14s} 行数 {len(f):5d}  {cnt} 合计（左右合计行）{int(fb[cnt].sum())}")

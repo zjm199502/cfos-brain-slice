@@ -131,7 +131,9 @@ def colocalize(df: pd.DataFrame, pixel_um0: float, params: ColocParams,
 def merged_cells(df: pd.DataFrame, n_channels: int) -> pd.DataFrame:
     """每个合并后的细胞一行：位置、各通道是否阳性。"""
     if df.empty:
-        return pd.DataFrame(columns=["section", "merged_id", "x", "y"] + [f"pos_ch{c}" for c in range(n_channels)])
+        dtypes = {"section": "object", "merged_id": "int64", "x": "float64", "y": "float64"}
+        dtypes.update({f"pos_ch{c}": "bool" for c in range(n_channels)})
+        return pd.DataFrame({name: pd.Series(dtype=dtype) for name, dtype in dtypes.items()})
     g = df.groupby("merged_id")
     out = g.agg(section=("section", "first"), x=("x", "mean"), y=("y", "mean"))
     if "combo" in df.columns:
@@ -238,7 +240,7 @@ def summarize(cells: pd.DataFrame, channel_names: list[str], group_cols=("sectio
             for combo in combinations(range(n), k):
                 m = np.ones(len(g), bool)
                 for c in combo:
-                    m &= g[f"pos_ch{c}"].to_numpy()
+                    m &= g[f"pos_ch{c}"].to_numpy(dtype=bool)
                 row["+".join(channel_names[c] for c in combo) + " 共标"] = int(m.sum())
         if excluded is not None:
             ex = excluded

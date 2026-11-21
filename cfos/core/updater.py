@@ -26,13 +26,15 @@ from pathlib import Path
 
 REPO = "zjm199502/cfos-brain-slice"
 BRANCH = "installers"
+SERIES = "0.8"
+CHANNEL = f"updates/v{SERIES}"
 MANIFEST_URLS = [
-    f"https://raw.githubusercontent.com/{REPO}/{BRANCH}/updates/latest.json",
-    f"https://cdn.jsdelivr.net/gh/{REPO}@{BRANCH}/updates/latest.json",      # 国内访问 GitHub 不稳定时
-    f"https://fastly.jsdelivr.net/gh/{REPO}@{BRANCH}/updates/latest.json",
+    f"https://raw.githubusercontent.com/{REPO}/{BRANCH}/{CHANNEL}/latest.json",
+    f"https://cdn.jsdelivr.net/gh/{REPO}@{BRANCH}/{CHANNEL}/latest.json",
+    f"https://fastly.jsdelivr.net/gh/{REPO}@{BRANCH}/{CHANNEL}/latest.json",
 ]
-DOWNLOAD_PAGE = f"https://github.com/{REPO}/tree/{BRANCH}/updates"
-FULL_PAGE = f"https://github.com/{REPO}/tree/{BRANCH}"
+DOWNLOAD_PAGE = f"https://github.com/{REPO}/tree/{BRANCH}/{CHANNEL}"
+FULL_PAGE = "https://cnb.cool/fosfolio/cfos-brain-slice/-/releases/tag/v0.9.0"
 SOURCE_URL = f"https://github.com/{REPO}"
 CONTACT = "zjm199502@163.com，" + SOURCE_URL
 MAX_FAILED_STARTS = 2
@@ -104,12 +106,17 @@ def active_patch() -> dict | None:
     if not v or not d or st.get("disabled"):
         return None
     app = updates_dir() / d / "app"
+    # 旧客户端共用一个清单。通过这个入口安装时，版本号和路径取自本系列的原生补丁。
+    series_app = app / "_series" / SERIES
+    if (series_app / "cfos" / "__init__.py").is_file():
+        app = series_app
+        v = _read_version_file(app / "cfos" / "__init__.py")
     if not (app / "cfos" / "__init__.py").exists():
         return None
     bv = base_version()
     if vtuple(v) <= vtuple(bv) or vtuple(st.get("min_base", "0")) > vtuple(bv):
         return None
-    return {**st, "app": str(app)}
+    return {**st, "version": v, "app": str(app)}
 
 
 def current_version() -> str:

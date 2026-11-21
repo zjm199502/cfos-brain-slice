@@ -127,6 +127,7 @@ class Project:
     unmix: dict = field(default_factory=dict)  # 识别前去除通道串色的设置（unmix.UnmixSettings 的字典）（v0.8.2）
 
     reserved_keys: list = field(default_factory=list)
+    export_region_ids: list[int] = field(default_factory=list)  # Excel 自选的 Allen 结构 ID
 
     def __post_init__(self):
         from . import slide_io, detection
@@ -189,6 +190,7 @@ class Project:
             "thickness": self.thickness, "z_mode": self.z_mode,
             "export_skip_layers": self.export_skip_layers, "export_max_depth": self.export_max_depth,
             "export_region_set": self.export_region_set,
+            "export_region_ids": self.export_region_ids,
             "export_hemisphere": self.export_hemisphere,
             "export_intensity": self.export_intensity,
             "samples": self.samples, "stats": self.stats, "grading": self.grading, "network": self.network,
@@ -250,6 +252,9 @@ class Project:
         p.export_skip_layers = bool(d.get("export_skip_layers", False))
         p.export_max_depth = int(d.get("export_max_depth", 0))
         p.export_region_set = str(d.get("export_region_set", "") or "")
+        region_ids = d.get("export_region_ids", [])
+        if isinstance(region_ids, list):
+            p.export_region_ids = list(dict.fromkeys(i for i in region_ids if type(i) is int and i > 0))
         mode = d.get("export_hemisphere")
         if isinstance(mode, str) and mode in EXPORT_HEMISPHERES:
             p.export_hemisphere = mode
