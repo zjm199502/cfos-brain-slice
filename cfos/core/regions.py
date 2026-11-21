@@ -232,7 +232,8 @@ def dense_regions() -> set:
     return out
 
 
-def region_summary(cells: pd.DataFrame, areas: pd.DataFrame, channel_names, group_cols, require_nucleus=True):
+def region_summary(cells: pd.DataFrame, areas: pd.DataFrame, channel_names, group_cols, require_nucleus=True,
+                   *, include_allen_id=False):
     """返回按 (分组, 脑区, 半脑) 汇总的表，脑区包括所有上级脑区（每个细胞同时计入它的所有上级）。"""
     from .coloc import summarize
     st = load_atlas().structures.set_index("index")
@@ -267,6 +268,8 @@ def region_summary(cells: pd.DataFrame, areas: pd.DataFrame, channel_names, grou
     t.insert(len(group_cols), "脑区缩写", t["region"].map(st["acronym"]))
     t.insert(len(group_cols) + 1, "脑区名称", t["region"].map(st["name"]))
     t.insert(len(group_cols) + 2, "层级", t["region"].map(lambda i: len(anc.get(i, [])) - 1))
+    if include_allen_id:
+        t.insert(len(group_cols), "Allen ID", t["region"].map(st["id"]))
     t["面积 (mm²)"] = t.pop("area_mm2")
     for nm in channel_names:
         col = f"{nm}+"

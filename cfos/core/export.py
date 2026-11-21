@@ -15,9 +15,14 @@ from .project import EXPORT_HEMISPHERES, Project, processed_section_names, secti
 from .. import APP_NAME
 
 
-def build_tables(project: Project, intensity: bool | None = None, *, for_excel=False) -> dict[str, pd.DataFrame]:
+def build_tables(project: Project, intensity: bool | None = None, *, for_excel=False, all_regions=False) -> dict[str, pd.DataFrame]:
     """intensity：是否统计脑区 / 自定义区域的平均荧光强度（要按原始分辨率读原图，较慢）。
-    None = 按项目设置（“⑧ 导出 Excel”里的勾选框）；组间统计、行为相关、功能网络用不到，传 False。"""
+    None = 按项目设置（“⑧ 导出 Excel”里的勾选框）。组间统计等内部分析可用 all_regions 读取完整脑区表。"""
+    from . import region_sets as RS
+    custom = not all_regions and project.export_region_set == RS.CUSTOM
+    selected_ids = getattr(project, "export_region_ids", [])
+    if custom:
+        RS.custom_regions(selected_ids)
     if intensity is None:
         intensity = bool(getattr(project, "export_intensity", False))
     names = project.channel_names
@@ -96,7 +101,8 @@ def build_tables(project: Project, intensity: bool | None = None, *, for_excel=F
                                               intensity=intensity, unmix_model=um)
                 areas["图片"] = im.key
                 rcells = cells[cells["section"].isin({s_.name for s_ in reg_secs})]
-                region_sec.append(region_summary(rcells, areas, names, ("图片", "section"), project.coloc.require_nucleus))
+                region_sec.append(region_summary(rcells, areas, names, ("图片", "section"), project.coloc.require_nucleus,
+                                                 include_allen_id=custom))
             if im.rois:
                 from .pipeline import inside_any
                 for r in im.rois:
@@ -125,9 +131,13 @@ def build_tables(project: Project, intensity: bool | None = None, *, for_excel=F
         out["按脑片汇总"] = t.reset_index(drop=True)
         if region_sec:
             t = pd.concat(region_sec, ignore_index=True).rename(columns={"section": "脑片"})
-            from .region_sets import filter_table
-            t = filter_table(t, project.export_region_set, project.export_max_depth, project.export_skip_layers)
+            if not all_regions:
+                t = RS.filter_table(t, project.export_region_set, project.export_max_depth, project.export_skip_layers,
+                                    region_ids=selected_ids)
             out["按脑区×脑片"] = t
+        elif custom and for_excel:
+            out["按脑区×脑片"] = pd.DataFrame(columns=["图片", "脑片", "Allen ID", "脑区缩写", "脑区名称", "层级",
+                                                   "半脑", "面积 (mm²)", *(f"{name}+" for name in names)])
         if roi_rows:  # 只有画了自定义区域时才有这张表
             out["按自定义区域"] = pd.concat(roi_rows, ignore_index=True)
     return _drop_unused(out, project)
@@ -277,7 +287,12 @@ def params_table(project: Project) -> pd.DataFrame:
         on = m is not None and not np.allclose(m.matrix, np.eye(len(m.matrix)))
         rows.append(("脑区平均荧光强度", "按去除串色后的图测量（与细胞识别一致）" if on else "按原图测量"))
     from . import region_sets as RS
-    rows.append(("导出的脑区范围", RS.describe(project.export_region_set, project.export_max_depth, project.export_skip_layers)))
+    region_ids = getattr(project, "export_region_ids", [])
+    rows.append(("导出的脑区范围", RS.describe(project.export_region_set, project.export_max_depth,
+                                              project.export_skip_layers, region_ids=region_ids)))
+    if project.export_region_set == RS.CUSTOM:
+        for region in RS.custom_regions(region_ids).itertuples(index=False):
+            rows.append((f"自选脑区（Allen ID {region.id}）", " · ".join(x for x in (region.acronym, region.zh, region.name) if x)))
     rows.append(("脑区表半脑导出方式", project.export_hemisphere))
     rows.append(("脑区类别说明", RS.CATEGORY_HELP))
     tc = project.tissue_channels()
@@ -379,6 +394,10 @@ def export_excel(project: Project, path: str | Path, masks: bool = True, progres
         fields = pd.DataFrame(project.accuracy)
         tables["准确率视野"] = fields.drop(columns=["人工点", "漏检线索"], errors="ignore")
     tables["分析参数"] = params_table(project)
+    from .region_sets import CUSTOM
+    if project.export_region_set == CUSTOM and tables["按脑区×脑片"].empty:
+        tables["分析参数"].loc[len(tables["分析参数"])] = [
+            "自选脑区导出结果", "当前已分析并配准的脑片在所选半脑中没有覆盖所选脑区，脑区表为空。"]
     try:
         _write_xlsx(tables, path)
     except PermissionError:

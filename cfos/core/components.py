@@ -92,7 +92,13 @@ def manifest_urls() -> list[str]:
     env = os.environ.get("CFOS_COMPONENTS_URL")
     if env:
         return [env.rstrip("/") + "/" + MANIFEST]
-    return [u.rsplit("/", 1)[0] + "/" + MANIFEST for u in updater.manifest_urls()]
+    urls = []
+    for url in updater.manifest_urls():
+        folder = url.rsplit("/", 1)[0]
+        if folder.endswith(f"/{updater.CHANNEL}"):
+            folder = folder.rsplit("/", 1)[0]  # 组件仍在两个版本共用的 updates 目录
+        urls.append(f"{folder}/{MANIFEST}")
+    return urls
 
 
 def fetch_manifest() -> tuple[dict, str]:

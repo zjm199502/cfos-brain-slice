@@ -238,10 +238,7 @@ class MainWindow(UpdateMixin, TeachingMixin, FigureMixin, AccuracyMixin, Relocat
         if i == 6:
             self._sync_groups_panel()
         if i == 7 and self.project:
-            self.exp_scope.set_values(self.project.export_region_set, self.project.export_max_depth,
-                                      self.project.export_skip_layers)
-            self.exp_intensity.setChecked(self.project.export_intensity)
-            self.exp_hemisphere.setCurrentText(self.project.export_hemisphere)
+            self._sync_export_panel()
         if i == 8:
             self._sync_figure_panel()
 
@@ -264,12 +261,23 @@ class MainWindow(UpdateMixin, TeachingMixin, FigureMixin, AccuracyMixin, Relocat
     def info(self, text):
         QMessageBox.information(self, APP_NAME, text)
 
-    def run_task(self, fn, on_done, *args, label="正在处理…"):
+    def run_task(self, fn, on_done, *args, label="正在处理…", lock_export=False):
         if self.task is not None and self.task.isRunning():
             self.info("上一个任务还在运行，请等待完成或点击“取消”。")
             return
         self.task = Task(fn, *args)
         task = self.task
+        if lock_export:
+            export_task = self.task
+            self._export_task = export_task
+            self.stack.widget(7).setEnabled(False)
+
+            def unlock_export():
+                if self._export_task is export_task:
+                    self._export_task = None
+                    self.stack.widget(7).setEnabled(True)
+
+            export_task.finished.connect(unlock_export)
         self.device_box.set_busy(True)
         self.progress.setRange(0, 0); self.progress.show(); self.cancel_btn.show()
         self.statusBar().showMessage(label)
@@ -525,6 +533,7 @@ class MainWindow(UpdateMixin, TeachingMixin, FigureMixin, AccuracyMixin, Relocat
         from ..core.log import attach_project, log
         attach_project(p.folder); log.info("打开项目 %s", p.folder)
         self.project = p
+        self._sync_export_panel()
         self._cells_cache.clear()
         self._reg_cache.clear()
         self.project_label.set_project(f"项目：{p.folder.name}")
@@ -654,7 +663,7 @@ class MainWindow(UpdateMixin, TeachingMixin, FigureMixin, AccuracyMixin, Relocat
             else:
                 self.info(msg)
 
-        self.run_task(job, done, label="正在批量处理…")
+        self.run_task(job, done, label="正在批量处理…", lock_export=True)
 
     def remove_image(self):
         r = self.images_table.currentRow()
@@ -2078,13 +2087,13 @@ class MainWindow(UpdateMixin, TeachingMixin, FigureMixin, AccuracyMixin, Relocat
         ob = QGroupBox("导出选项"); of = QVBoxLayout(ob)
         from .region_scope import RegionScopeBox
         rb = QGroupBox("“按脑区×脑片”表里列出哪些脑区"); rl = QVBoxLayout(rb)
-        self.exp_scope = RegionScopeBox(with_layers=True); rl.addWidget(self.exp_scope)
+        self.exp_scope = RegionScopeBox(with_layers=True, allow_custom=True); rl.addWidget(self.exp_scope)
+        self.exp_scope.changed.connect(self._save_export_scope)
         rl.addWidget(QLabel("半脑导出方式"))
         self.exp_hemisphere = QComboBox()
         self.exp_hemisphere.addItems(list(EXPORT_HEMISPHERES))
         rl.addWidget(self.exp_hemisphere)
-        rl.addWidget(hint("没列出的细分脑区不会漏数：它们的细胞已经计入所属的脑区和大脑区。\n"
-                          "表里另有“脑区中文名”“所属大脑区”“脑区类别”三列，可以在 Excel 里按它们筛选。"))
+        rl.addWidget(hint("一个父脑区的行包括它下面所有子区的细胞和面积。若同时列出父区和子区，请分别解读这两行。"))
         self.exp_masks = QCheckBox("同时保存细胞 mask（1/3 分辨率）"); self.exp_masks.setChecked(True)
         self.exp_qc = QCheckBox("同时生成每张脑片的质控图（PNG，方便快速检查）"); self.exp_qc.setChecked(True)
         self.exp_intensity = QCheckBox("统计每个脑区的平均荧光强度（较慢）")
@@ -2105,15 +2114,39 @@ class MainWindow(UpdateMixin, TeachingMixin, FigureMixin, AccuracyMixin, Relocat
         L.addStretch(1)
         return w
 
+    def _sync_export_panel(self):
+        p = self.project
+        self.exp_scope.blockSignals(True)
+        try:
+            self.exp_scope.set_values(p.export_region_set, p.export_max_depth, p.export_skip_layers, p.export_region_ids)
+        finally:
+            self.exp_scope.blockSignals(False)
+        self.exp_intensity.setChecked(p.export_intensity)
+        self.exp_hemisphere.setCurrentText(p.export_hemisphere)
+
+    def _save_export_scope(self):
+        if self.project is None or getattr(self, "_export_task", None) is not None:
+            return
+        p = self.project
+        p.export_region_set = self.exp_scope.mode()
+        p.export_region_ids = self.exp_scope.region_ids()
+        p.export_skip_layers = self.exp_scope.skip_layers()
+        p.export_max_depth = self.exp_scope.max_depth()
+        p.save()
+
     def export(self):
+        from ..core.region_sets import CUSTOM
+        if self.task is not None and self.task.isRunning():
+            self.info("上一个任务还在运行，请等待完成或点击“取消”。")
+            return
+        if self.exp_scope.mode() == CUSTOM and not self.exp_scope.region_ids():
+            self.info("请在“编辑已选脑区”中勾选至少一个脑区，或切换到其他导出范围。")
+            return
         default = str(self.project.folder / "细胞统计结果.xlsx")
         f, _ = QFileDialog.getSaveFileName(self, "保存 Excel", default, "Excel 文件 (*.xlsx)")
         if not f:
             return
         project = self.project
-        project.export_region_set = self.exp_scope.mode()
-        project.export_skip_layers = self.exp_scope.skip_layers()
-        project.export_max_depth = self.exp_scope.max_depth()
         project.export_intensity = self.exp_intensity.isChecked()
         project.export_hemisphere = self.exp_hemisphere.currentText()
         project.save()
@@ -2128,7 +2161,7 @@ class MainWindow(UpdateMixin, TeachingMixin, FigureMixin, AccuracyMixin, Relocat
             self.info(f"已导出：\n{p}\n\n同一文件夹中还有：\n" + "\n".join(extra) if extra else f"已导出：\n{p}")
 
         self.run_task(lambda task: export_excel(project, f, masks=masks, qc=qc, progress=task.report),
-                      done, label="正在导出 Excel…")
+                      done, label="正在导出 Excel…", lock_export=True)
 
     def _open_folder(self, path):
         path = str(path)

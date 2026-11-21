@@ -403,12 +403,7 @@ def run_network_analysis(project, out_dir, params: NetParams, region_sec=None, p
     if region_sec is None:
         if progress:
             progress(0, 1, "正在统计每张脑片的脑区结果…")
-        skip, depth, rset = project.export_skip_layers, project.export_max_depth, project.export_region_set
-        project.export_skip_layers, project.export_max_depth, project.export_region_set = False, 0, "all"
-        try:
-            region_sec = build_tables(project, intensity=False).get("按脑区×脑片")
-        finally:
-            project.export_skip_layers, project.export_max_depth, project.export_region_set = skip, depth, rset
+        region_sec = build_tables(project, intensity=False, all_regions=True).get("按脑区×脑片")
     if region_sec is None or region_sec.empty:
         raise ValueError("还没有按脑区的结果。请先完成细胞识别和“⑥ 脑图谱配准”。")
     from .stats import check_samples

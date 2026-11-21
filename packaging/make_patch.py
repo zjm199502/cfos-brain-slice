@@ -111,6 +111,7 @@ def main():
     ap.add_argument("out")
     ap.add_argument("--min-base", required=True, help="需要的完整安装包最低版本，例如 0.7")
     ap.add_argument("--notes", help="这个版本的更新公告（Markdown）")
+    ap.add_argument("--in-app-only", action="store_true", help="仅供支持软件内更新的客户端安装")
     a = ap.parse_args()
     version = updater._read_version_file(APP / "cfos" / "__init__.py")
     notes_file = Path(a.notes) if a.notes else APP / "packaging" / "更新公告" / f"{version}.md"
@@ -134,10 +135,13 @@ def main():
         z.writestr(_zinfo("patch.json"), json.dumps(info, ensure_ascii=False, indent=1))
         for k, v in files.items():
             z.writestr(_zinfo(k), v)
-        z.writestr(_zinfo("安装说明.txt"), fill(README).replace("\n", "\r\n"))
+        how = (f"在 FosFolio 的「帮助 → 从文件安装补丁」中选择此 ZIP，完成后重启软件。\n版本：v{version}。"
+               if a.in_app_only else fill(README))
+        z.writestr(_zinfo("安装说明.txt"), how.replace("\n", "\r\n"))
         z.writestr(_zinfo("更新公告.md"), notes)
-        z.writestr(_zinfo("手动安装（Windows 旧版本用）.bat"), fill(WIN_BAT).replace("\n", "\r\n"))
-        z.writestr(_zinfo("手动安装（Mac 旧版本用）.command", 0o755), fill(MAC_CMD))
+        if not a.in_app_only:
+            z.writestr(_zinfo("手动安装（Windows 旧版本用）.bat"), fill(WIN_BAT).replace("\n", "\r\n"))
+            z.writestr(_zinfo("手动安装（Mac 旧版本用）.command", 0o755), fill(MAC_CMD))
     data = zp.read_bytes()
     # 检查更新时显示的公告：这一版 + 之前的小更新（补丁是整套代码，用户可能跳过了中间几版，
     # 例如 0.8 直接升到 0.8.2，也要能看到 0.8.1 改了什么）。只列比 min_base 新的版本。
