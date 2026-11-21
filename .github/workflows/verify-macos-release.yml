@@ -1,0 +1,61 @@
+name: Verify macOS release
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_id:
+        description: Numeric GitHub release ID (published release or draft)
+        required: true
+        type: string
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: macos-15
+    timeout-minutes: 60
+    env:
+      PIP_NO_CACHE_DIR: "1"
+      PYTHONNOUSERSITE: "1"
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+          sparse-checkout: packaging/mac
+      - name: Download and verify the Mac release asset
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ inputs.release_id || github.event.release.id }}
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_ID" =~ ^[0-9]+$ ]]
+          gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" > "$RUNNER_TEMP/release.json"
+          tag=$(jq -er .tag_name "$RUNNER_TEMP/release.json")
+          [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          name="FosFolio-${tag#v}-macOS-arm64.zip"
+          metadata=$(jq -ec --arg name "$name" '.assets[] | select(.name == $name and .state == "uploaded")' "$RUNNER_TEMP/release.json")
+          asset_id=$(jq -er .id <<< "$metadata")
+          digest=$(jq -er '.digest | select(startswith("sha256:")) | ltrimstr("sha256:")' <<< "$metadata")
+          cd "$RUNNER_TEMP"
+          gh api -H 'Accept: application/octet-stream' "repos/$GITHUB_REPOSITORY/releases/assets/$asset_id" > bundle.zip
+          printf '%s  bundle.zip\n' "$digest" | shasum -a 256 --check
+          ditto -x -k bundle.zip "$RUNNER_TEMP/fosfolio"
+          printf 'EXPECTED_VERSION=%s\n' "${tag#v}" >> "$GITHUB_ENV"
+          printf 'BUNDLE=%s\n' "$RUNNER_TEMP/fosfolio/FosFolio脑片图册.app" >> "$GITHUB_ENV"
+      - name: Validate native launcher, GUI, demo and DeepSlice inference
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = arm64
+          py="$BUNDLE/Contents/Resources/python/bin/python3"
+          lipo -verify_arch arm64 "$py"
+          test "$(plutil -extract CFBundleShortVersionString raw -o - "$BUNDLE/Contents/Info.plist")" = "$EXPECTED_VERSION"
+          "$BUNDLE/Contents/MacOS/cfos" --version | tee "$RUNNER_TEMP/launcher.txt"
+          grep -F "$EXPECTED_VERSION" "$RUNNER_TEMP/launcher.txt"
+          "$py" packaging/mac/verify_bundle.py "$BUNDLE" app
+      - name: Install Cellpose, run CPU inference and test MPS when available
+        run: |
+          set -euo pipefail
+          "$BUNDLE/Contents/Resources/python/bin/python3" packaging/mac/verify_bundle.py "$BUNDLE" cellpose
