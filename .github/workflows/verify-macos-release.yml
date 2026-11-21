@@ -90,7 +90,7 @@ jobs:
           set -euo pipefail
           test "$(uname -m)" = arm64
           py="$BUNDLE/Contents/Resources/python/bin/python3"
-          lipo -verify_arch arm64 "$py"
+          lipo "$py" -verify_arch arm64
           test "$(plutil -extract CFBundleShortVersionString raw -o - "$BUNDLE/Contents/Info.plist")" = "$EXPECTED_VERSION"
           "$BUNDLE/Contents/MacOS/cfos" --version | tee "$RUNNER_TEMP/launcher.txt"
           grep -F "$EXPECTED_VERSION" "$RUNNER_TEMP/launcher.txt"
