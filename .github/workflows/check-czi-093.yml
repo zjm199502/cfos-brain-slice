@@ -1,0 +1,33 @@
+name: Verify CZI patch on the released Apple Silicon app
+on:
+  push:
+    branches: [codex/qa-czi-arm64]
+permissions:
+  contents: read
+jobs:
+  installed-app:
+    runs-on: macos-15
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+          sparse-checkout: qa-czi
+      - name: Download the released arm64 runtime and a two-scene ZEISS scan
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          curl -fsSL --retry 3 -o release.zip 'https://github.com/zjm199502/cfos-brain-slice/releases/download/v0.9.0/FosFolio-0.9.0-macOS-arm64.zip'
+          echo '141ead9ec5e363786298f13c5c083264e344670e056d6b4fcde57efa7250e50a  release.zip' | shasum -a 256 -c -
+          ditto -x -k release.zip unpacked
+          curl -fsSL --retry 3 -o two-wells.czi 'https://raw.githubusercontent.com/zeiss-microscopy/OAD/781ce14954946366524b96347e7767cefb11a2c8/jupyter_notebooks/pylibCZIrw/images/S%3D2_CH%3D2_well_A1%2BA2_zstd.czi'
+          echo 'f6d056b0da75416815be6e6ab702fda23b547137e7cda0863395185963b80879  two-wells.czi' | shasum -a 256 -c -
+      - name: Install the native patch and compare both scenes to independent libCZI pixel hashes
+        shell: bash
+        run: |
+          set -euo pipefail
+          py="$RUNNER_TEMP/unpacked/FosFolio脑片图册.app/Contents/Resources/python/bin/python3"
+          test "$(uname -m)" = arm64
+          lipo "$py" -verify_arch arm64
+          "$py" qa-czi/verify.py
