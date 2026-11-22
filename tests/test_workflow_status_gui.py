@@ -1,3 +1,4 @@
+from contextlib import ExitStack
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
@@ -16,7 +17,7 @@ class WorkflowStatusGuiTests(unittest.TestCase):
         from napari.qt import get_qapp
         from cfos.gui.main_window import MainWindow, STEPS
         app = get_qapp()
-        with TemporaryDirectory() as temp:
+        with TemporaryDirectory() as temp, ExitStack() as headless:
             base = Path(temp)
             project = Project(base / "project")
             for folder in ["A", "B"]:
@@ -29,6 +30,11 @@ class WorkflowStatusGuiTests(unittest.TestCase):
                                    channel=[0], x=[4.], y=[4.]))
             project.save_cells(project.images[0], df)
             project.save()
+            if app.platformName() in {"offscreen", "minimal"}:
+                # The project table is also exercised on CI machines without a GL context.
+                headless.enter_context(patch("napari._vispy.canvas.get_max_texture_sizes",
+                                             return_value=(2048, 256)))
+                headless.enter_context(patch.object(MainWindow, "_show_image"))
             window = MainWindow()
             try:
                 with patch("cfos.core.log.attach_project"), patch(
