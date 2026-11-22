@@ -1,0 +1,15 @@
+{
+  "version": "0.9.6+mac.1",
+  "public_version": "0.9.6",
+  "mac_build": 1,
+  "qt": "6.12.0",
+  "min_base": "0.9.0",
+  "notes": "修复 Apple Silicon Mac 辅助功能查询期间界面闪退。安装后请重启应用。",
+  "page": "https://github.com/zjm199502/cfos-brain-slice/tree/mac-client-updates",
+  "patch": {
+    "url": "https://raw.githubusercontent.com/zjm199502/cfos-brain-slice/mac-client-updates/fos-0.9.6-mac-build1.zip",
+    "file": "fos-0.9.6-mac-build1.zip",
+    "size": 951384,
+    "sha256": "7be24aed95e0c87f113dd485992e02f727d9befe8082c6c2429713116b5f6171"
+  }
+}
