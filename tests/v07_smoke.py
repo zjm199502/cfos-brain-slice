@@ -93,8 +93,9 @@ print(row.to_string()); assert len(row) == 1
 # ---------------------------------------------------------------- 2. 平滑边界显示（⑥）
 w.steps.setCurrentRow(5); pump(2)
 lay = w.viewer.layers["脑区轮廓"]
-print("boundary layer", lay.data.shape, "thumb", w._reg_lab[2].shape)
-assert lay.data.shape[0] == 3 * w._reg_lab[2].shape[0]
+from cfos.gui.atlas_outline import AtlasOutline
+assert lay.data.shape[:2] == w._reg_lab[2].shape
+assert any(isinstance(n, AtlasOutline) and n.visible for n in w.qt_viewer.canvas.layer_to_visual[lay].node.children)
 w.viewer.reset_view(); pump(0.5)
 shot("v3_smooth_boundaries")
 

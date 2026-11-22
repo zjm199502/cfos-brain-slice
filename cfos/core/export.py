@@ -106,15 +106,21 @@ def build_tables(project: Project, intensity: bool | None = None, *, for_excel=F
             if im.rois:
                 from .pipeline import inside_any
                 for r in im.rois:
+                    boxes = getattr(project, "scope_boxes", {}).get(im.key)
+                    area = _roi_area_mm2(r["polygon"], im.exclusions, px, boxes=boxes)
                     inn = inside_any(cells["x"].to_numpy(float), cells["y"].to_numpy(float), [r["polygon"]])
+                    if boxes is not None:
+                        inn &= _in_boxes(cells["x"].to_numpy(float), cells["y"].to_numpy(float), boxes)
+                        if not area and not inn.any():
+                            continue
                     sub = cells[inn].copy()
                     sub["区域"] = r["name"]
                     t = summarize(sub, names, group_cols=("图片", "区域"), require_nucleus=project.coloc.require_nucleus) \
                         if len(sub) else pd.DataFrame({"图片": [im.key], "区域": [r["name"]]})
-                    area = _roi_area_mm2(r["polygon"], im.exclusions, px)
                     t["面积 (mm²)"] = round(area, 4)
                     if intensity:
-                        for nm, v in zip(names, roi_mean_intensity(slide, r["polygon"], im.exclusions, unmix_model=um)):
+                        for nm, v in zip(names, roi_mean_intensity(slide, r["polygon"], im.exclusions, unmix_model=um,
+                                                                   boxes=boxes)):
                             t[f"{nm} 平均荧光强度"] = round(v, 1) if v == v else None
                     for nm in names:
                         if f"{nm}+" in t.columns and area > 0:
@@ -154,7 +160,14 @@ def _drop_unused(tables: dict, project: Project) -> dict:
     return {k: v.loc[:, [c for c in v.columns if not unused(c)]] for k, v in tables.items()}
 
 
-def roi_mean_intensity(slide, polygon, exclusions, target_um: float = 0.0, unmix_model=None) -> list[float]:
+def _in_boxes(x, y, boxes):
+    inside = np.zeros(np.broadcast_shapes(x.shape, y.shape), dtype=bool)
+    for left, top, width, height in boxes:
+        inside |= (x >= left) & (x < left + width) & (y >= top) & (y < top + height)
+    return inside
+
+
+def roi_mean_intensity(slide, polygon, exclusions, target_um: float = 0.0, unmix_model=None, *, boxes=None) -> list[float]:
     """自定义区域内（去掉排除区域）每个通道的平均荧光强度，原始灰度值。
     开启了串色校正时（unmix_model），先逐像素去除串色再求平均（v0.8.3）。"""
     from .regions import _usable_unmix
@@ -168,6 +181,15 @@ def roi_mean_intensity(slide, polygon, exclusions, target_um: float = 0.0, unmix
     ds = slide.downsample(lv)
     x0, y0 = a[:, 0].min(), a[:, 1].min()
     bb = (int(x0), int(y0), int(np.ceil(a[:, 0].max() - x0)) + 1, int(np.ceil(a[:, 1].max() - y0)) + 1)
+    if boxes is not None:
+        cuts = [(max(bb[0], x), max(bb[1], y), min(bb[0]+bb[2], x+w), min(bb[1]+bb[3], y+h))
+                for x, y, w, h in boxes]
+        cuts = [c for c in cuts if c[0] < c[2] and c[1] < c[3]]
+        if not cuts:
+            return [float("nan")] * n_ch
+        x0 = min(c[0] for c in cuts)
+        y0 = min(c[1] for c in cuts)
+        bb = (x0, y0, max(c[2] for c in cuts) - x0, max(c[3] for c in cuts) - y0)
     sums, n = np.zeros(n_ch), 0
     ox, oy = int(bb[0] / ds) * ds, int(bb[1] / ds) * ds
     full = None
@@ -180,6 +202,8 @@ def roi_mean_intensity(slide, polygon, exclusions, target_um: float = 0.0, unmix
             H, W = img.shape
             m = np.zeros((H, W), bool)
             rr, cc = skpoly((a[:, 1] - oy) / ds, (a[:, 0] - ox) / ds, (H, W)); m[rr, cc] = True
+            if boxes is not None:
+                m &= _in_boxes(ox + np.arange(W)[None, :] * ds, oy + np.arange(H)[:, None] * ds, boxes)
             for e in exclusions or []:
                 e = np.asarray(e, float)
                 if len(e) >= 3:
@@ -190,7 +214,7 @@ def roi_mean_intensity(slide, polygon, exclusions, target_um: float = 0.0, unmix
     return [s / n if n else float("nan") for s in sums]
 
 
-def _roi_area_mm2(polygon, exclusions, px_um) -> float:
+def _roi_area_mm2(polygon, exclusions, px_um, *, boxes=None) -> float:
     """自定义区域面积（减去与排除区域重叠的部分），在 10 µm 网格上估算。"""
     import numpy as np
     from .pipeline import inside_any
@@ -201,6 +225,8 @@ def _roi_area_mm2(polygon, exclusions, px_um) -> float:
     gx, gy = np.meshgrid(xs, ys)
     gx, gy = gx.ravel(), gy.ravel()
     inn = inside_any(gx, gy, [polygon])
+    if boxes is not None:
+        inn &= _in_boxes(gx, gy, boxes)
     if exclusions:
         inn &= ~inside_any(gx, gy, exclusions)
     return float(inn.sum()) * (10.0 / 1000.0) ** 2
@@ -354,6 +380,13 @@ def add_quality(table: pd.DataFrame, q: pd.DataFrame) -> pd.DataFrame:
     return t[cols[:k] + front + cols[k:] + metrics]
 
 
+def companion_dir(project: Project, path: str | Path, prefix: str) -> Path:
+    path = Path(path)
+    tag = getattr(project, "scope_tag", "")
+    suffix = f"_范围_{tag}" if tag else ""
+    return path.parent / f"{prefix}_{path.stem}{suffix}"
+
+
 def export_excel(project: Project, path: str | Path, masks: bool = True, progress=None, qc: bool = True,
                  quality: bool = True) -> Path:
     path = Path(path)
@@ -406,12 +439,14 @@ def export_excel(project: Project, path: str | Path, masks: bool = True, progres
         _write_xlsx(tables, path)
     except PermissionError:
         raise PermissionError(13, "Excel 文件正在被打开，无法覆盖。请在 Excel 中关闭它，或换一个文件名", str(path))
+    from .workflow_status import record_table_output
+    record_table_output(project, "excel", tables["按脑片汇总"])
     if masks:
         from .masks import export_masks
-        export_masks(project, path.parent / f"细胞mask_{path.stem}", progress=progress)
+        export_masks(project, companion_dir(project, path, "细胞mask"), progress=progress)
     if qc:
         from .qc import export_qc
-        export_qc(project, path.parent / f"质控图_{path.stem}", progress=progress)
+        export_qc(project, companion_dir(project, path, "质控图"), progress=progress)
     return path
 
 

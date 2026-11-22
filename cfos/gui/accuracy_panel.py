@@ -47,12 +47,12 @@ class AccuracyMixin:
         r.addWidget(QLabel("视野类型")); r.addWidget(self.acc_field)
         gl.addLayout(r)
         r = QHBoxLayout()
-        b = QPushButton("放一个检查框"); b.clicked.connect(self.acc_new_box); r.addWidget(b)
-        b = QPushButton("计算准确率"); b.clicked.connect(self.acc_compute); r.addWidget(b)
+        b = QPushButton("放一个检查框"); b.clicked.connect(lambda: self._require_scope() and self.acc_new_box()); r.addWidget(b)
+        b = QPushButton("计算准确率"); b.clicked.connect(lambda: self._require_scope() and self.acc_compute()); r.addWidget(b)
         gl.addLayout(r)
         r = QHBoxLayout()
-        b = QPushButton("查看所有检查记录"); b.clicked.connect(self.acc_show_all); r.addWidget(b)
-        b = QPushButton("删除最后一条记录"); b.clicked.connect(self.acc_delete_last); r.addWidget(b)
+        b = QPushButton("查看所有检查记录"); b.clicked.connect(lambda: self._require_scope() and self.acc_show_all()); r.addWidget(b)
+        b = QPushButton("删除最后一条记录"); b.clicked.connect(lambda: self._require_scope() and self.acc_delete_last()); r.addWidget(b)
         gl.addLayout(r)
         gl.addWidget(QLabel("按脑片盲评：放框并点出阳性中心，再锁定人工点比较两种参数。"))
         row = QHBoxLayout()
@@ -62,8 +62,8 @@ class AccuracyMixin:
         self.review_contrast.setSingleStep(.1); row.addWidget(self.review_contrast)
         self.review_deconv = QCheckBox("候选去卷积"); row.addWidget(self.review_deconv)
         gl.addLayout(row)
-        b = QPushButton("锁定人工点，比较当前与候选参数"); b.clicked.connect(self.compare_review); gl.addWidget(b)
-        b = QPushButton("本图盲评记录与脑片参数"); b.clicked.connect(self.review_history); gl.addWidget(b)
+        b = QPushButton("锁定人工点，比较当前与候选参数"); b.clicked.connect(lambda: self._require_scope() and self.compare_review()); gl.addWidget(b)
+        b = QPushButton("本图盲评记录与脑片参数"); b.clicked.connect(lambda: self._require_scope() and self.review_history()); gl.addWidget(b)
         self.acc_info = QLabel(""); self.acc_info.setWordWrap(True); gl.addWidget(self.acc_info)
         layout.addWidget(g)
 
@@ -82,7 +82,7 @@ class AccuracyMixin:
         self._acc_summary_text()
 
     def _acc_summary_text(self):
-        s = A.summary(self.project) if self.project else None
+        s = A.summary(self._view_project()) if self.project else None
         if s is None or s.empty:
             self.acc_info.setText("还没有检查记录。")
             return
@@ -139,6 +139,10 @@ class AccuracyMixin:
         from ..core.manual import section_of
         from ..core.project import processed_section_names
         sec = section_of(self.image, box[0] + box[2] / 2, box[1] + box[3] / 2)
+        allowed = (self._processing_scope or {}).get(self.image.key)
+        if allowed is not None and sec not in allowed:
+            self.info("请把检查框放在所选脑片上。")
+            return
         if sec not in processed_section_names(self.image, df):
             self.info("检查框所在脑片尚无识别结果。可使用下方的盲评比较。"); return
         models = df.attrs.get("section_models", {}).get(sec)
@@ -185,7 +189,7 @@ class AccuracyMixin:
         if not self.project or not self.project.accuracy:
             self.info("还没有检查记录。")
             return
-        df = pd.DataFrame(self.project.accuracy).drop(columns=["人工点", "方框"], errors="ignore")
+        df = pd.DataFrame(self._view_project().accuracy).drop(columns=["人工点", "方框"], errors="ignore")
         dlg = QDialog(self); dlg.setWindowTitle("识别准确率检查记录"); fit_window(dlg, 900, 400)
         L = QVBoxLayout(dlg)
         t = QTableWidget(len(df), len(df.columns)); t.setHorizontalHeaderLabels(list(df.columns))
@@ -200,8 +204,11 @@ class AccuracyMixin:
         dlg.show(); self._acc_dlg = dlg
 
     def acc_delete_last(self):
-        if self.project and self.project.accuracy:
-            self.project.accuracy.pop()
+        eligible = self._view_project().accuracy if self.project else []
+        if eligible:
+            last = eligible[-1]
+            i = next(i for i in reversed(range(len(self.project.accuracy))) if self.project.accuracy[i] == last)
+            del self.project.accuracy[i]
             self.project.save()
             self._acc_summary_text()
 
@@ -224,7 +231,7 @@ class AccuracyMixin:
         def contains(sec):
             sx, sy, sw, sh = sec.bbox0
             return sec.enabled and sx <= x and sy <= y and x+w <= sx+sw and y+h <= sy+sh
-        sections = [sec for sec in image.sections if contains(sec)]
+        sections = [sec for sec in image.sections if self._section_in_scope(image, sec) and contains(sec)]
         if len(sections) != 1 or w <= 0 or h <= 0:
             self.info("请先拆分脑片，并把整个检查框放在一张已启用脑片内。"); return
         sec = sections[0]
@@ -310,13 +317,16 @@ class AccuracyMixin:
         im = self.image
         dlg = QMessageBox(self); dlg.setWindowTitle("本图盲评记录与脑片参数")
         lines = []
-        for sec in im.sections:
+        chosen = [sec for sec in im.sections if self._section_in_scope(im, sec)]
+        for sec in chosen:
             for ch, values in im.review_settings.get(section_key(sec), {}).items():
                 lines.append(f"{sec.name} · {self.ch_name(int(ch))}：局部对比度 {values['min_contrast']:g}，"
                              f"去卷积{'开' if values['deconv'] else '关'}")
         dlg.setText("\n".join(lines) or "各脑片使用项目参数。")
         history = []
         for r in im.field_reviews:
+            if r["脑片"] not in {s.name for s in chosen}:
+                continue
             a,b = r["当前计数"], r["候选计数"]
             history.append(f"{r['脑片']} · {r['通道']} · {_model_name(r['当前'].get('model'))} · {r['类型']} · 框 {r['视野']}\n"
                            f"当前 TP/FP/FN {a['tp']}/{a['fp']}/{a['fn']}；候选 {b['tp']}/{b['fp']}/{b['fn']}；"
@@ -324,9 +334,11 @@ class AccuracyMixin:
         if history:
             dlg.setDetailedText("\n".join(history))
         dlg.addButton("关闭",QMessageBox.RejectRole)
-        reset = dlg.addButton("恢复本图所有脑片的项目参数…",QMessageBox.ActionRole) if lines else None
+        reset = dlg.addButton("恢复本图所选脑片的项目参数…",QMessageBox.ActionRole) if lines else None
         dlg.exec_()
         if reset is not None and dlg.clickedButton() is reset and QMessageBox.question(
-                self,"恢复项目参数","恢复本图所有脑片的识别参数并重新识别？") == QMessageBox.Yes:
-            im.review_settings.clear(); im.status = "参数已恢复，待重新识别"
+                self,"恢复项目参数","恢复本图所选脑片的识别参数并重新识别？") == QMessageBox.Yes:
+            for sec in chosen:
+                im.review_settings.pop(section_key(sec), None)
+            im.status = "参数已恢复，待重新识别"
             self.project.save(); self.run_detection(False)

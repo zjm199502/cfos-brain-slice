@@ -307,10 +307,10 @@ def _misplaced_entry(project, im, s, nuc, mask_shape, ds, cells=None) -> dict:
             "cells_sig": _cells_signature(project, im)}
 
 
-def check_image(project, im, sl=None, redo=False, progress=None) -> dict:
+def check_image(project, im, sl=None, redo=False, progress=None, *, section_names=None) -> dict:
     """计算（或从缓存读取）一张图片所有脑片的指标。返回 {脑片名: 指标}。"""
     cache = load_cache(project, im)
-    secs = [s for s in im.sections if s.enabled]
+    secs = [s for s in im.sections if s.enabled and (section_names is None or s.name in section_names)]
     todo = [s for s in secs if redo or cache.get(s.name, {}).get("signature") != _signature(project, im, s)]
     # 只有识别结果变了：只重算“阳性细胞落在白质 / 脑室”这一项（快）
     csig = _cells_signature(project, im)
@@ -446,7 +446,16 @@ def quality_table(project, progress=None, redo=False):
     df = pd.DataFrame(rows)
     summ = {f"{r['图片']}/{r['脑片']}": {"level": r["质量"], "why": r["需要检查的问题"],
                                        "signature": allm[(r["图片"], r["脑片"])].get("signature")} for r in rows}
-    _summary_path(project).write_text(json.dumps(summ, ensure_ascii=False, indent=1), encoding="utf-8")
+    path = _summary_path(project)
+    if getattr(project, "scope_tag", "") and path.exists():
+        try:
+            previous = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            previous = {}
+        summ = {**previous, **summ}
+    if rows:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(summ, ensure_ascii=False, indent=1), encoding="utf-8")
     return df
 
 

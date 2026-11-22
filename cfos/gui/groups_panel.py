@@ -65,7 +65,7 @@ class GroupsMixin:
         f.addRow("比较的指标", self.st_metric); f.addRow("统计方法", self.st_test); f.addRow("对照组", self.st_ctrl)
         f.addRow("半脑", self.st_hemi); f.addRow("最小面积", self.st_area); f.addRow("比较哪些脑区", self.st_scope)
         L.addWidget(box)
-        b = big_button("计算组间统计并画图"); b.clicked.connect(lambda: self.run_stats()); L.addWidget(b)
+        b = big_button("计算组间统计并画图"); b.clicked.connect(lambda: self._require_scope() and self.run_stats()); L.addWidget(b)
         self.st_summary = QLabel(""); self.st_summary.setWordWrap(True); L.addWidget(self.st_summary)
         self.st_preview = QLabel(); self.st_preview.setAlignment(Qt.AlignCenter); L.addWidget(self.st_preview)
         self.st_open = QPushButton("打开统计结果文件夹"); self.st_open.hide(); L.addWidget(self.st_open)
@@ -88,7 +88,7 @@ class GroupsMixin:
         self.bh_group.setToolTip("几个组放在一起算时，相关可能只是反映组间差异；建议再分别看每个组。")
         f.addRow("行为指标名称", self.bh_name); f.addRow("用哪些动物", self.bh_group)
         L.addWidget(box)
-        b = big_button_local("计算脑区与行为相关"); b.clicked.connect(lambda: self.run_behavior()); L.addWidget(b)
+        b = big_button_local("计算脑区与行为相关"); b.clicked.connect(lambda: self._require_scope() and self.run_behavior()); L.addWidget(b)
         self.bh_summary = QLabel(""); self.bh_summary.setWordWrap(True); L.addWidget(self.bh_summary)
         self.bh_preview = QLabel(); self.bh_preview.setAlignment(Qt.AlignCenter); L.addWidget(self.bh_preview)
         self.bh_open = QPushButton("打开行为相关结果文件夹"); self.bh_open.hide(); L.addWidget(self.bh_open)
@@ -112,8 +112,8 @@ class GroupsMixin:
                             max_depth=sp.max_depth, region_set=sp.region_set, behavior_name=self.bh_name.text().strip() or "行为分数",
                             group=self.bh_group.currentText() or "全部动物")
         self.project.behavior_params = bp.to_dict(); self.project.save()
-        project = self.project
-        out = project.folder / f"行为相关_{_dt.datetime.now():%Y%m%d_%H%M}"
+        project = self._view_project()
+        out = project.folder / f"行为相关_{_dt.datetime.now():%Y%m%d_%H%M%S_%f}"
 
         def done(res):
             self._bh_out, summary, figs = res
@@ -146,7 +146,7 @@ class GroupsMixin:
         f.addRow("脑区粒度：第几级", self.net_depth); f.addRow("相关方法", self.net_method)
         f.addRow("主阈值 r ≥", self.net_thr); f.addRow(self.net_pos); f.addRow("置换次数", self.net_perm)
         L.addWidget(box)
-        b = big_button_local("计算功能网络并画图"); b.clicked.connect(lambda: self.run_network()); L.addWidget(b)
+        b = big_button_local("计算功能网络并画图"); b.clicked.connect(lambda: self._require_scope() and self.run_network()); L.addWidget(b)
         self.net_summary = QLabel(""); self.net_summary.setWordWrap(True); L.addWidget(self.net_summary)
         self.net_preview = QLabel(); self.net_preview.setAlignment(Qt.AlignCenter); L.addWidget(self.net_preview)
         self.net_open = QPushButton("打开网络分析结果文件夹"); self.net_open.hide(); L.addWidget(self.net_open)
@@ -170,8 +170,8 @@ class GroupsMixin:
                         main_threshold=round(self.net_thr.value(), 2), positive_only=self.net_pos.isChecked(),
                         n_perm=self.net_perm.value())
         self.project.network = np_.to_dict(); self.project.save()
-        project = self.project
-        out = project.folder / f"功能网络_{_dt.datetime.now():%Y%m%d_%H%M}"
+        project = self._view_project()
+        out = project.folder / f"功能网络_{_dt.datetime.now():%Y%m%d_%H%M%S_%f}"
 
         def done(res):
             self._net_out, summary, figs = res
@@ -188,7 +188,7 @@ class GroupsMixin:
         p = self.project
         if p is None:
             return
-        rows = p.sample_rows()
+        rows = self._view_project().sample_rows() if self._processing_scope is not None else []
         t = self.grp_table
         t.blockSignals(True)
         t.setRowCount(len(rows))
@@ -239,7 +239,7 @@ class GroupsMixin:
     def _refresh_behavior_cells(self):
         """同一只动物的所有行显示同一个行为分数。"""
         t = self.grp_table
-        rows = {r["key"]: r for r in self.project.sample_rows()}
+        rows = {r["key"]: r for r in self._view_project().sample_rows()}
         t.blockSignals(True)
         for i in range(t.rowCount()):
             it = t.item(i, 4)
@@ -250,7 +250,7 @@ class GroupsMixin:
 
     def _refresh_ctrl_groups(self):
         cur = self.st_ctrl.currentText()
-        groups = sorted({r["组别"] for r in self.project.sample_rows() if r["组别"]})
+        groups = sorted({r["组别"] for r in self._view_project().sample_rows() if r["组别"]})
         self.st_ctrl.clear(); self.st_ctrl.addItems(groups)
         if cur in groups:
             self.st_ctrl.setCurrentText(cur)
@@ -270,14 +270,22 @@ class GroupsMixin:
         self.project.save(); self._sync_groups_panel()
 
     def _grp_guess(self):
-        n = self.project.guess_animals(); self.project.save(); self._sync_groups_panel()
+        if not self._require_scope():
+            return
+        rows = [r for r in self._view_project().sample_rows() if not r["动物"]]
+        for r in rows:
+            self.project.set_sample(r["key"], animal=r["图片"])
+        n = len(rows)
+        self.project.save(); self._sync_groups_panel()
         self.statusBar().showMessage(f"已为 {n} 张脑片填写动物编号（= 图片名）。一张玻片上有多只动物时请手动修改。", 10000)
 
     def _grp_export(self):
+        if not self._require_scope():
+            return
         f, _ = QFileDialog.getSaveFileName(self, "导出分组表", str(self.project.folder / "分组表.xlsx"), "Excel 文件 (*.xlsx)")
         if not f:
             return
-        df = pd.DataFrame(self.project.sample_rows()).drop(columns=["key"]).rename(columns={"动物": "动物编号"})
+        df = pd.DataFrame(self._view_project().sample_rows(), columns=["图片", "脑片", "动物", "组别", "行为分数"]).rename(columns={"动物": "动物编号"})
         try:
             df.to_excel(f, index=False)
         except PermissionError:
@@ -287,6 +295,8 @@ class GroupsMixin:
                   "不要修改“图片”和“脑片”两列。")
 
     def _grp_import(self):
+        if not self._require_scope():
+            return
         f, _ = QFileDialog.getOpenFileName(self, "导入分组表", str(self.project.folder), "表格 (*.xlsx *.xls *.csv)")
         if not f:
             return
@@ -300,7 +310,7 @@ class GroupsMixin:
             self.error("分组表必须包含“图片”“脑片”两列（建议先用“导出分组表”生成）。")
             return
         df = df.fillna("")
-        keys = {r["key"] for r in self.project.sample_rows()}
+        keys = {r["key"] for r in self._view_project().sample_rows()}
         n, miss, bad = 0, [], []
         for _, r in df.iterrows():
             k = f"{r['图片']}/{r['脑片']}"
@@ -334,8 +344,8 @@ class GroupsMixin:
         if not isinstance(region_sec, pd.DataFrame):  # 按钮信号会传入 checked=False
             region_sec = None
         sp = self._stats_params()
-        project = self.project
-        out = project.folder / f"组间统计_{_dt.datetime.now():%Y%m%d_%H%M}"
+        project = self._view_project()
+        out = project.folder / f"组间统计_{_dt.datetime.now():%Y%m%d_%H%M%S_%f}"
 
         def done(res):
             self._st_out, summary, figs = res

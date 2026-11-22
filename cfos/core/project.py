@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 import re
 import unicodedata
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field, asdict, replace
 from pathlib import Path
 
 import pandas as pd
@@ -84,6 +84,8 @@ class ImageEntry:
     czi_channels: list[str] = field(default_factory=list)
     czi_time_index: int | None = None
     czi_time_count: int | None = None
+    display_overrides: dict = field(default_factory=dict)
+    section_display: dict = field(default_factory=dict)  # section name → channel → changed display fields
 
     def __post_init__(self):
         if self.storage_key and (self.storage_key in (".", "..") or
@@ -94,6 +96,8 @@ class ImageEntry:
         return {"path": self.path, "scene_id": self.scene_id, "scene_name": self.scene_name,
                 **({"vsi_channels": self.vsi_channels} if self.vsi_channels else {}),
                 **({"czi_channels": self.czi_channels} if self.czi_channels else {}),
+                **({"display_overrides": self.display_overrides} if self.display_overrides else {}),
+                **({"section_display": self.section_display} if self.section_display else {}),
                 **({"czi_time_index": self.czi_time_index, "czi_time_count": self.czi_time_count}
                    if self.czi_time_index is not None else {}),
                 "review_settings": self.review_settings, "field_reviews": self.field_reviews, "storage_key": self.key, "rel": self.rel, "size": self.size, "status": self.status, "error": self.error,
@@ -108,6 +112,8 @@ class ImageEntry:
         return ImageEntry(path=d["path"], scene_id=d.get("scene_id"), scene_name=d.get("scene_name", ""),
                           vsi_channels=list(d.get("vsi_channels") or []),
                           czi_channels=list(d.get("czi_channels") or []),
+                          display_overrides=d.get("display_overrides") or {},
+                          section_display=d.get("section_display") or {},
                           czi_time_index=d.get("czi_time_index"), czi_time_count=d.get("czi_time_count"),
                           review_settings=d.get("review_settings", {}),
                           field_reviews=d.get("field_reviews", []), storage_key=d.get("storage_key", ""), rel=d.get("rel"), size=d.get("size"),
@@ -574,10 +580,46 @@ class Project:
         return notes
 
     # ---------- 显示颜色（v0.8.3） ----------
-    def custom_color(self, c: int) -> tuple[int, int, int] | None:
+    def channel_display(self, c: int, image=None, section=None) -> DisplayChannel:
+        """Resolve one channel from project defaults, image and section overrides."""
+        values = {}
+        if image is not None:
+            values.update(image.display_overrides.get(str(c), {}))
+            if section is not None:
+                values.update(image.section_display.get(section.name, {}).get(str(c), {}))
+        base = self.display.get(c)
+        return replace(base if base is not None else DisplayChannel(high=0), **values)
+
+    def update_display(self, selection, c: int, **changes):
+        """Apply only the edited fields. Whole-image edits supersede those fields on its sections."""
+        if selection is None:
+            self.display[c] = replace(self.display.get(c, DisplayChannel()), **changes)
+            return
+        key = str(c)
+        for image in self.images:
+            if image.key not in selection:
+                continue
+            names = selection[image.key]
+            if names is None:
+                image.display_overrides.setdefault(key, {}).update(changes)
+                for name, overrides in list(image.section_display.items()):
+                    channel = overrides.get(key, {})
+                    for attr in changes:
+                        channel.pop(attr, None)
+                    if not channel:
+                        overrides.pop(key, None)
+                    if not overrides:
+                        del image.section_display[name]
+            else:
+                for section in image.sections:
+                    if section.name in names:
+                        overrides = image.section_display.setdefault(section.name, {})
+                        overrides.setdefault(key, {}).update(changes)
+
+    def custom_color(self, c: int, image=None, section=None) -> tuple[int, int, int] | None:
         """用户选的（或沿用显微镜的）显示颜色；没有设置时返回 None，由调用处按通道名用默认颜色。"""
-        d = self.display.get(c)
-        if d is None or not d.color or len(d.color) < 3:
+        d = self.channel_display(c, image, section)
+        if not d.color or len(d.color) < 3:
             return None
         return tuple(int(max(0, min(255, v))) for v in d.color[:3])
 
@@ -698,7 +740,10 @@ class Project:
 
     def save_cells(self, image: ImageEntry, df: pd.DataFrame):
         from .contours import pack
-        self._dump(self.cells_path(image), pack(df))
+        from .workflow_status import save_cell_summary
+        path = self.cells_path(image)
+        self._dump(path, pack(df))
+        save_cell_summary(path, df)
         old = self._old_cells_path(image)
         if old.exists():
             old.unlink()

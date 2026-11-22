@@ -82,10 +82,10 @@ def auto_length_um(width_um: float) -> float:
     return float(min(NICE_UM, key=lambda v: abs(np.log(v) - np.log(max(target, 1e-6)))))
 
 
-def channel_color(name: str, idx: int, project: Project | None = None) -> tuple[int, int, int]:
+def channel_color(name: str, idx: int, project: Project | None = None, image=None, section=None) -> tuple[int, int, int]:
     """通道显示颜色：项目里选过的颜色（v0.8.3）优先，否则按通道名的默认颜色。"""
     if project is not None:
-        c = project.custom_color(idx)
+        c = project.custom_color(idx, image, section)
         if c is not None:
             return c
     return tuple(COLORS.get(name, FALLBACK[idx % len(FALLBACK)]))
@@ -117,22 +117,22 @@ def section_for(im: ImageEntry, x: float, y: float):
 
 
 # ------------------------------------------------------------------ 渲染
-def render_rgb(project: Project, sl: Slide, bbox0, lv: int, channels: list[int]) -> np.ndarray:
+def render_rgb(project: Project, sl: Slide, bbox0, lv: int, channels: list[int], image=None, section=None) -> np.ndarray:
     """按 ③ 的亮度/伽马和通道颜色合成 RGB（float 0–1）。"""
     names = project.channel_names
     a = sl.read(lv, bbox0, channels).astype(np.float32)
     H, W = a.shape[1:]
     rgb = np.zeros((H, W, 3), np.float32)
     for k, c in enumerate(channels):
-        d = project.display.get(c)
-        if d is not None and d.high > d.low:
+        d = project.channel_display(c, image, section)
+        if d.high > d.low:
             lo, hi, gm = d.low, d.high, d.gamma
         else:
             lo, hi = np.percentile(a[k], [0.5, 99.7]); gm = 1.0
         x = np.clip((a[k] - lo) / max(hi - lo, 1e-6), 0, 1)
         if gm != 1.0:
             x = x ** gm
-        col = np.array(channel_color(names[c] if c < len(names) else "", c, project), np.float32) / 255
+        col = np.array(channel_color(names[c] if c < len(names) else "", c, project, image, section), np.float32) / 255
         rgb += x[..., None] * col
     return np.clip(rgb, 0, 1)
 
@@ -239,11 +239,11 @@ def draw_scale_bar(img: Image.Image, pix_um: float, sb: ScaleBar) -> dict:
             "text": text, "text_x": tx, "text_y": y_text, "font_px": font_px, "color": sb.color}
 
 
-def make_inset(project: Project, sl: Slide, s, bbox0, channels, width_px: int) -> Image.Image:
+def make_inset(project: Project, sl: Slide, s, bbox0, channels, width_px: int, image=None) -> Image.Image:
     """定位小图：整张脑片缩略图 + 红框标出截图位置。"""
     lv = sl.level_for_pixel_size(8.0)
     ds = sl.downsample(lv)
-    rgb = render_rgb(project, sl, s.bbox0, lv, channels)
+    rgb = render_rgb(project, sl, s.bbox0, lv, channels, image, s)
     im = Image.fromarray((rgb * 255).astype(np.uint8))
     x, y, w, h = bbox0
     bx, by = s.bbox0[0], s.bbox0[1]
@@ -367,6 +367,7 @@ def render_roi(project: Project, im: ImageEntry, sl: Slide, roi: dict, st: Figur
     chans = [c for c in chans if c < n_ch] or list(range(n_ch))
     bbox0 = clamp_roi(roi, sl.level_shapes[0])
     x, y, w, h = bbox0
+    sec = section_for(im, x + w / 2, y + h / 2)
     st2 = st if max_side is None else FigureSettings.from_dict({**st.to_dict(), "max_side": max_side})
     lv = choose_level(sl, w, h, st2)
     ds = sl.downsample(lv)
@@ -375,14 +376,13 @@ def render_roi(project: Project, im: ImageEntry, sl: Slide, roi: dict, st: Figur
         W0, H0 = int(np.ceil(w / ds)), int(np.ceil(h / ds))
         img = Image.new("RGB", (W0, H0), (255, 255, 255))
     else:
-        rgb = render_rgb(project, sl, bbox0, lv, chans)
+        rgb = render_rgb(project, sl, bbox0, lv, chans, im, sec)
         img = Image.fromarray((rgb * 255).astype(np.uint8))
     W, H = img.size
     dr = ImageDraw.Draw(img)
     meta = {"image": im.key, "roi": roi.get("name", ""), "x": x, "y": y, "w": w, "h": h,
             "pixel_um": pix, "width_um": W * pix, "height_um": H * pix, "level": lv, "out_w": W, "out_h": H,
             "channels": [] if st.outline_only else [names[c] if c < len(names) else str(c) for c in chans]}
-    sec = section_for(im, x + w / 2, y + h / 2)
     # 细胞
     if st.overlay_cells and df is not None and not df.empty and not st.outline_only:
         from .coloc import nucleus_channel
@@ -393,7 +393,7 @@ def render_roi(project: Project, im: ImageEntry, sl: Slide, roi: dict, st: Figur
         for c in chans:
             if c == nuc and len(chans) > 1:
                 continue
-            col = channel_color(names[c] if c < len(names) else "", c, project)
+            col = channel_color(names[c] if c < len(names) else "", c, project, im, sec)
             col = tuple(min(255, int(v * 0.5 + 128)) for v in col)
             gc = g[g["channel"] == c]
             for cx, cy in zip((gc["x"].to_numpy() - x) / ds, (gc["y"].to_numpy() - y) / ds):
@@ -430,7 +430,7 @@ def render_roi(project: Project, im: ImageEntry, sl: Slide, roi: dict, st: Figur
     inset = None
     if st.inset and sec is not None:
         try:
-            ins = make_inset(project, sl, sec, bbox0, chans, max(80, int(W * 0.25)))
+            ins = make_inset(project, sl, sec, bbox0, chans, max(80, int(W * 0.25)), im)
             m = max(6, int(round(min(W, H) * 0.02)))
             img.paste(ins, (m, m))
             inset = (ins, m, m)
@@ -614,8 +614,12 @@ def export_sections(project: Project, images: list[ImageEntry], st: FigureSettin
             sl = im.open_slide()
             try:
                 df = project.load_cells(im) if st.overlay_cells else None
-                files += export_roi(project, im, sl, section_roi(s), st, df=df, out_dir=out_dir,
+                output = export_roi(project, im, sl, section_roi(s), st, df=df, out_dir=out_dir,
                                     base_name=f"{im.key}_{safe_name(s.name)}_配准图")
+                if output:
+                    from .workflow_status import record_output
+                    files.extend(output)
+                    record_output(project, "figure", [(im, s)])
             finally:
                 sl.close()
         except Exception as e:  # noqa: BLE001
@@ -639,7 +643,17 @@ def export_images(project: Project, images: list[ImageEntry], st: FigureSettings
             sl = im.open_slide()
             try:
                 df = project.load_cells(im) if st.overlay_cells else None
-                files += export_roi(project, im, sl, roi, st, df=df, out_dir=out_dir)
+                output = export_roi(project, im, sl, roi, st, df=df, out_dir=out_dir)
+                if output:
+                    from .workflow_status import record_output
+                    files.extend(output)
+                    x, y, w, h = clamp_roi(roi, sl.level_shapes[0])
+                    included = []
+                    for s in im.sections:
+                        bx, by, bw, bh = s.bbox0
+                        if s.enabled and bx < x + w and x < bx + bw and by < y + h and y < by + bh:
+                            included.append((im, s))
+                    record_output(project, "figure", included)
             finally:
                 sl.close()
         except Exception as e:  # noqa: BLE001

@@ -357,6 +357,8 @@ def run_group_stats(project, out_dir, params: StatsParams, region_sec: pd.DataFr
     ] + [(f"组 {g} 动物数", int(n)) for g, n in n_by_group.items()], columns=["项目", "内容"])
     xlsx = out_dir / "组间统计.xlsx"
     _write_xlsx({"组间比较": comp, "按组汇总": gsum, "按动物×脑区": show, "统计方法": info}, xlsx)
+    from .workflow_status import record_table_output
+    record_table_output(project, "group", region_sec.loc[region_sec["半脑"] == params.hemisphere])
     if progress:
         progress(2, 3, "正在画图…")
     figs = []

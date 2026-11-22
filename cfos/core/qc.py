@@ -39,10 +39,14 @@ def section_qc_image(project: Project, im, sl, s, df) -> Image.Image:
     H, W = a.shape[1:]
     rgb = np.zeros((H, W, 3), np.float32)
     for c in range(a.shape[0]):
-        d = project.display.get(c)
-        lo, hi = (d.low, d.high) if d is not None and d.high > d.low else np.percentile(a[c], [1, 99.7])
+        d = project.channel_display(c, im, s)
+        if not d.visible or c in project.unused_channels:
+            continue
+        lo, hi = (d.low, d.high) if d.high > d.low else np.percentile(a[c], [1, 99.7])
         x = np.clip((a[c] - lo) / max(hi - lo, 1e-6), 0, 1)
-        col = np.array(project.custom_color(c) or COLORS.get(names[c] if c < len(names) else "", FALLBACK[c % 5]),
+        if d.gamma != 1:
+            x = x ** d.gamma
+        col = np.array(project.custom_color(c, im, s) or COLORS.get(names[c] if c < len(names) else "", FALLBACK[c % 5]),
                        np.float32) / 255
         rgb += x[..., None] * col * 0.8
     img = Image.fromarray((np.clip(rgb, 0, 1) * 255).astype(np.uint8))
@@ -79,7 +83,9 @@ def section_qc_image(project: Project, im, sl, s, df) -> Image.Image:
         for c, nm in enumerate(names):
             if c == nuc and len(names) > 1:
                 continue  # DAPI 细胞太密，圈出来会盖住图像；DAPI 本身在图上可见
-            col = project.custom_color(c) or COLORS.get(nm, FALLBACK[c % 5])
+            if not project.channel_display(c, im, s).visible or c in project.unused_channels:
+                continue
+            col = project.custom_color(c, im, s) or COLORS.get(nm, FALLBACK[c % 5])
             gc = g[g["channel"] == c]
             for x, y in zip((gc["x"].to_numpy() - x0) / ds, (gc["y"].to_numpy() - y0) / ds):
                 dr.ellipse([x - r, y - r, x + r, y + r], outline=col)

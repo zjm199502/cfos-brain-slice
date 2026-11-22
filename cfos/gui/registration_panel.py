@@ -11,10 +11,10 @@ from qtpy.QtWidgets import (
 
 from ..core import registration as R
 from ..core.atlas import load_atlas, region_boundaries, region_colors
+from ..core.atlas_contours import boundary_paths
 from ..core.coloc import nucleus_channel
 from ..core.regions import _thumb_geometry
-
-REG_DISPLAY_UPSCALE = 3   # 脑区边界显示时放大的倍数（越大越顺滑，也越慢）
+from .atlas_outline import set_outline_paths
 
 # 滑块：(属性名, 显示名, 最小, 最大, 每格的值, 单位)
 SLIDERS = [
@@ -59,9 +59,9 @@ class RegistrationMixin:
         self.reg_unify.setToolTip("同一个脑子的切片是用同一个角度切的。勾选后，自动配准时把同一只动物（“⑦ 分组与统计”里填的动物编号；"
                                   "没填的按图片）的脑片角度统一成中位数。可以在下面“同一动物的连续切片”里撤销。")
         L.addWidget(self.reg_unify)
-        b1 = big_button("自动配准当前图片的全部脑片"); b1.clicked.connect(lambda: self.auto_register(False))
-        b2 = big_button("自动配准项目中所有图片"); b2.clicked.connect(lambda: self.auto_register(True))
-        L.addWidget(b1); L.addWidget(b2)
+        button = big_button("自动配准所选图片和脑片")
+        button.clicked.connect(lambda: self._require_scope() and self.auto_register(True))
+        L.addWidget(button)
 
         row = QHBoxLayout(); row.addWidget(QLabel("检查 / 调整脑片："))
         self.reg_sec_combo = QComboBox(); self.reg_sec_combo.currentIndexChanged.connect(self._reg_section_changed)
@@ -118,17 +118,15 @@ class RegistrationMixin:
         be = QPushButton("导出配准图（整张脑片 + 脑区轮廓，论文用）")
         be.setToolTip("导出当前图片每张已配准脑片的图：荧光 + 脑区轮廓 + 缩写 + 比例尺（PNG / TIFF / 矢量 SVG）。"
                       "线条颜色、通道、分辨率等在“⑨ 截图制图”里设置。")
-        be.clicked.connect(self._reg_export_figure)
+        be.clicked.connect(lambda: self._require_scope() and self._reg_export_figure())
         L.addWidget(be)
         self.reg_hover = QLabel("鼠标所在脑区："); self.reg_hover.setWordWrap(True)
+        self.reg_hover.setToolTip("黄线是图谱标签的平滑显示。鼠标所在脑区和细胞归属按原始配准标签判定。")
         L.addWidget(self.reg_hover)
         L.addStretch(1)
 
         self._reg_timer = QTimer(self); self._reg_timer.setSingleShot(True)
         self._reg_timer.timeout.connect(self._reg_redraw)
-        self._reg_fine_timer = QTimer(self); self._reg_fine_timer.setSingleShot(True)
-        self._reg_fine_timer.timeout.connect(self._reg_redraw)
-        self._reg_fast = False
         self._reg_cache = {}
         self._ctrl_src = []
         self._reg_lab = None
@@ -140,7 +138,9 @@ class RegistrationMixin:
 
     # ------------------------------------------------------------ 自动配准
     def auto_register(self, all_images: bool):
-        targets = list(self.project.images) if all_images else [self.image]
+        from ..core.scope import selected_sections
+        targets = self._target_images(all_images)
+        only = {im.key: {s.name for s in selected_sections(im, self._processing_scope)} for im in targets}
         if any(not im.sections for im in targets):
             self.info("有图片还没有拆分脑片，请先到“② 脑片拆分”。")
             return
@@ -153,7 +153,7 @@ class RegistrationMixin:
         def job(task):
             from ..core import autoreg
             return autoreg.run(project, targets, nuc, nonlinear=do_nl, refine=refine, unify=unify,
-                               progress=task.report, cancelled=task.is_cancelled)
+                               progress=task.report, cancelled=task.is_cancelled, only=only)
 
         def done(res):
             for im in targets:
@@ -161,7 +161,10 @@ class RegistrationMixin:
                 for s in im.sections:
                     if s.name in regs:
                         s.registration = regs[s.name].to_dict()
-                im.status = "已配准"
+                if regs:
+                    enabled = [s for s in im.sections if s.enabled]
+                    registered = sum(bool(s.registration.get("plane")) for s in enabled)
+                    im.status = f"已配准 {registered}/{len(enabled)} 张脑片"
             self.project.save(); self._refresh_images()
             self._reg_cache.clear()
             self._sync_registration_panel()
@@ -199,13 +202,20 @@ class RegistrationMixin:
         self.reg_sec_combo.blockSignals(True)
         self.reg_sec_combo.clear()
         secs = self.image.sections if self.image and self.slide else []
-        for s in secs:
+        focus = self._focus_section()
+        chosen = []
+        for i, s in enumerate(secs):
             reg = R.Registration.from_dict(s.registration)
             self.reg_sec_combo.addItem(self._reg_combo_text(s, reg))
+            allowed = self._section_in_scope(self.image, s)
+            self.reg_sec_combo.model().item(i).setEnabled(allowed)
+            if allowed:
+                chosen.append(i)
         self.reg_sec_combo.blockSignals(False)
-        if secs:
-            self.reg_sec_combo.setCurrentIndex(0)
-            self._reg_section_changed(0)
+        if chosen:
+            index = secs.index(focus) if focus is not None and secs.index(focus) in chosen else chosen[0]
+            self.reg_sec_combo.setCurrentIndex(index)
+            self._reg_section_changed(index)
         else:
             self.reg_status.clear()
             self.reg_ok_btn.setVisible(False)
@@ -215,6 +225,8 @@ class RegistrationMixin:
         if self.slide is None or self.image is None or not (0 <= i < len(self.image.sections)):
             return None, None
         s = self.image.sections[i]
+        if not self._section_in_scope(self.image, s):
+            return None, None
         return s, R.Registration.from_dict(s.registration)
 
     def _reg_geometry(self, s):
@@ -234,6 +246,11 @@ class RegistrationMixin:
         s, reg = self._reg_current()
         if s is None:
             return
+        for j in range(self.focus_combo.count()):
+            if self.focus_combo.itemData(j) == (self.image.key, s.name):
+                self.focus_combo.setCurrentIndex(j)
+                self._apply_focused_display()
+                break
         self._zoom_section(i, 0)
         widgets = [self.reg_orient, self.reg_mirror, self.reg_use_nl] + [v[0] for v in self.reg_sliders.values()]
         for wdg in widgets:
@@ -286,14 +303,13 @@ class RegistrationMixin:
         self._reg_reviewed(reg)
         s.registration = reg.to_dict()
         self._save_later()
-        # 拖动时先画快速预览（不做边界平滑），停手 0.4 秒后再画精细的
-        self._reg_fast = True
-        self._reg_timer.start(30)
-        self._reg_fine_timer.start(400)
+        # Coalesce slider events while still redrawing during a long drag.
+        if not self._reg_timer.isActive():
+            self._reg_timer.start(60)
 
     # ------------------------------------------------------------ 显示
     def _reg_redraw(self):
-        fast, self._reg_fast = self._reg_fast, False
+        self._reg_timer.stop()
         s, reg = self._reg_current()
         if s is None or not reg.done:
             if "脑区轮廓" in self.viewer.layers:
@@ -301,40 +317,34 @@ class RegistrationMixin:
             self.reg_status.setText("这张脑片还没有配准。")
             self.reg_status.setStyleSheet(""); self.reg_ok_btn.setVisible(False)
             self._reg_lab = None
+            self._reg_bnd = None
             return
         ds, H, W, warp = self._reg_geometry(s)
         lab, hemi = R.label_maps(reg, W, H, warp)
         lab_t, hemi_t = R.orient(lab, reg.orientation), R.orient(hemi, reg.orientation)
         self._reg_lab = (s, ds, lab_t, hemi_t)
-        b = region_boundaries(lab_t)
-        # 显示用：把标签图平滑放大 K 倍再找边界，边界线变细、变顺滑（统计仍按配准分辨率，不受影响）
-        K = 1 if fast else REG_DISPLAY_UPSCALE
-        try:
-            if fast:
-                raise RuntimeError("快速预览")
-            from ..core.figure import _smooth_upscale
-            lab_hi = _smooth_upscale(lab_t, (lab_t.shape[0] * K, lab_t.shape[1] * K), cap=max(lab_t.shape) * K)
-        except Exception:  # noqa: BLE001
-            K, lab_hi = 1, lab_t
-        b_hi = region_boundaries(lab_hi)
-        rgba = np.zeros(lab_hi.shape + (4,), np.uint8)
-        rgba[..., :3] = region_colors(lab_hi)
-        rgba[..., 3] = np.where(lab_hi > 0, 40, 0)
-        rgba[b_hi] = [255, 230, 0, 255]
+        self._reg_bnd = region_boundaries(lab_t)
+        plane = R.adjusted_plane(reg)
+        voxel_px = min(W / max(np.linalg.norm(plane.u), 1e-6), H / max(np.linalg.norm(plane.v), 1e-6))
+        paths = boundary_paths(lab_t, voxel_px)
+        rgba = np.empty(lab_t.shape + (4,), np.uint8)
+        rgba[..., :3] = region_colors(lab_t)
+        rgba[..., 3] = np.where(lab_t > 0, 28, 0)
         bx, by = s.bbox0[0], s.bbox0[1]
-        sc, tr = (ds / K, ds / K), (by + ds / K / 2, bx + ds / K / 2)
+        sc, tr = (ds, ds), (by + ds / 2, bx + ds / 2)
         if "脑区轮廓" in self.viewer.layers:
             # 已有图层时直接换数据（比删掉再新建快得多，拖滑块时不卡）
             ly = self.viewer.layers["脑区轮廓"]
             ly.scale, ly.translate = sc, tr
             ly.data = rgba
         else:
-            self.viewer.add_image(rgba, rgb=True, name="脑区轮廓", scale=sc, translate=tr, opacity=0.9)
-        self._reg_bnd = b
+            ly = self.viewer.add_image(rgba, rgb=True, name="脑区轮廓", scale=sc, translate=tr,
+                                       interpolation2d="linear", opacity=0.9)
+        set_outline_paths(self.qt_viewer, ly, paths)
         for nm in ("修正箭头", "修正点"):
             if nm in self.viewer.layers:
                 self.viewer.layers.move(self.viewer.layers.index(nm), len(self.viewer.layers) - 1)
-        ap = R.adjusted_plane(reg).ap_mm()
+        ap = plane.ap_mm()
         txt = (f"{reg.status}；切片中心约在 Bregma {ap:+.2f} mm。"
                f"{' 已使用非线性贴合。' if reg.nonlinear and warp is not None else ''}")
         if reg.warnings:
@@ -633,7 +643,11 @@ class RegistrationMixin:
         from qtpy.QtWidgets import (QDialog, QDialogButtonBox, QTableWidget, QTableWidgetItem, QComboBox,
                                     QCheckBox, QDoubleSpinBox, QFormLayout, QHeaderView)
         from ..core import series
-        groups = series.animal_sections(self.project)
+        if not self._require_scope():
+            return
+        groups = {key: [(im, sec) for im, sec in items if self._section_in_scope(im, sec)]
+                  for key, items in series.animal_sections(self.project).items()}
+        groups = {key: items for key, items in groups.items() if items}
         if not groups:
             self.info("还没有脑片。")
             return

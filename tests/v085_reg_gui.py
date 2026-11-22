@@ -72,23 +72,20 @@ w.reg_ok_btn.click(); pump(1)
 assert not w.reg_sec_combo.itemText(0).startswith("⚠") and not w.reg_ok_btn.isVisible()
 assert R.Registration.from_dict(s0.registration).warnings == []
 
-# ---- S2：拖滑块时先画快速预览，停手后再画精细边界；ap_auto 不受滑块影响
+# ---- S2：拖滑块时合并连续事件，最后一次调整呈现平滑轮廓；ap_auto 不受滑块影响
 auto = R.Registration.from_dict(s0.registration).ap_auto
 sl_ap = w.reg_sliders["ap_shift"][0]
 times = []
 orig = w._reg_redraw
 def timed():
-    fast = w._reg_fast; t = time.time(); orig(); times.append((fast, time.time() - t))
+    t = time.monotonic(); orig(); times.append(time.monotonic() - t)
 w._reg_redraw = timed
 w._reg_timer.timeout.disconnect(); w._reg_timer.timeout.connect(timed)
-w._reg_fine_timer.timeout.disconnect(); w._reg_fine_timer.timeout.connect(timed)
 for v in range(1, 6):
     sl_ap.setValue(v); pump(0.15)
 pump(1.0)
-fast = [t for f, t in times if f]; fine = [t for f, t in times if not f]
-print(f"快速预览 {len(fast)} 次，平均 {1000 * sum(fast) / max(len(fast), 1):.0f} ms；精细 {len(fine)} 次，"
-      f"平均 {1000 * sum(fine) / max(len(fine), 1):.0f} ms", flush=True)
-assert fast and fine and times[-1][0] is False
+assert times and not w._reg_timer.isActive()
+print(f"曲线预览 {len(times)} 次，平均 {1000 * sum(times) / len(times):.0f} ms", flush=True)
 r = R.Registration.from_dict(s0.registration)
 assert r.ap_auto == auto and abs(r.ap_shift - 5) < 1e-6 and r.status == "已手动调整"
 shot("r3_手动调整后")

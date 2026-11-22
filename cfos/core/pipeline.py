@@ -17,6 +17,7 @@ from .log import log, friendly
 from .project import Project, ImageEntry, processed_section_names
 from .relocate import IMAGE_EXT
 from .sections import find_sections
+from .scope import selected_images, selected_sections
 
 IMAGE_EXTS = tuple(sorted(IMAGE_EXT))
 
@@ -46,12 +47,14 @@ def drop_excluded(df: pd.DataFrame, im: ImageEntry) -> pd.DataFrame:
 
 
 # ---------------------------------------------------------------- 识别
-def rebuild_cells(project: Project, im: ImageEntry, pixel_um0: float | None = None) -> pd.DataFrame | None:
+def rebuild_cells(project: Project, im: ImageEntry, pixel_um0: float | None = None, *, section_names=None) -> pd.DataFrame | None:
     """Reapply thresholds where raw detections exist and retain previous counts elsewhere."""
-    parts = {s.name: raw for s in im.sections if s.enabled
+    selected = {s.name for s in im.sections if s.enabled and (section_names is None or s.name in section_names)}
+    parts = {s.name: raw for s in im.sections if s.name in selected
              if (raw := project.load_part(im, s)) is not None}
-    previous = project.load_cells(im) if len(parts) < sum(s.enabled for s in im.sections) else None
-    carried = set(processed_section_names(im, previous)).difference(parts) if previous is not None else set()
+    partial = section_names is not None
+    previous = project.load_cells(im) if partial or len(parts) < len(selected) else None
+    carried = selected.intersection(processed_section_names(im, previous)).difference(parts)
     if not parts and not carried:
         return None
     if pixel_um0 is None:
@@ -61,7 +64,7 @@ def rebuild_cells(project: Project, im: ImageEntry, pixel_um0: float | None = No
         finally:
             slide.close()
     return _merge_frames(project, im, pixel_um0, list(parts.values()), list(parts),
-                         previous=previous, carried=carried)
+                         partial=partial, previous=previous, carried=carried)
 
 
 def _merge_frames(project, im, pixel_um0, frames, names, partial=False, previous=None, carried=()):
@@ -101,13 +104,15 @@ def _merge_frames(project, im, pixel_um0, frames, names, partial=False, previous
     processed = set(names).union(carried)
     retained = set(carried)
     if partial:
-        previous = project.load_cells(im)
+        if previous is None:
+            previous = project.load_cells(im)
         if previous is not None:
-            enabled = {s.name for s in im.sections if s.enabled}
-            keep = previous[previous["section"].isin(enabled.difference(names))]
+            others = sections.keys() - processed
+            keep = previous[previous["section"].isin(others)]
             # Older whole-image results predate explicit tracking of zero-cell sections.
-            processed.update(enabled.intersection(processed_section_names(im, previous)))
-            retained.update(set(previous.attrs.get("carried_forward_sections", ())).intersection(processed - set(names)))
+            previous_done = previous.attrs.get("processed_sections", processed_section_names(im, previous))
+            processed.update(others.intersection(previous_done))
+            retained.update(others.intersection(previous.attrs.get("carried_forward_sections", ())))
             if len(keep):
                 for column in ("cell_id", "merged_id"):
                     if len(df) and column in keep:
@@ -190,7 +195,7 @@ def detect_image(project: Project, im: ImageEntry, sl=None, redo=False, report=N
             result = _merge_frames(project, im, sl.pixel_size_um, frames, [s.name for s in secs], partial)
         im.status = "已识别细胞"
         if partial:
-            completed = len(result.attrs["processed_sections"])
+            completed = len(processed_section_names(im, result))
             enabled_count = sum(s.enabled for s in im.sections)
             if completed < enabled_count:
                 im.status = f"已识别细胞（{completed}/{enabled_count} 张脑片）"
@@ -202,20 +207,24 @@ def detect_image(project: Project, im: ImageEntry, sl=None, redo=False, report=N
             sl.close()
 
 
-def refilter_all(project: Project, report=None) -> int:
+def refilter_all(project: Project, report=None, *, selection=None, cancel=None) -> int:
     """所有图片按当前阈值和共标参数重新计算（几秒钟，不需要重新识别）。返回处理的图片数。"""
     n = 0
-    for i, im in enumerate(project.images):
+    targets = selected_images(project, selection)
+    for i, im in enumerate(targets):
+        if cancel and cancel():
+            raise InterruptedError
         if report:
-            report(i, len(project.images), f"正在重新筛选和计算共标：{im.key}")
-        if rebuild_cells(project, im) is not None:
+            report(i, len(targets), f"正在重新筛选和计算共标：{im.key}")
+        names = selection.get(im.key) if selection is not None else None
+        if rebuild_cells(project, im, section_names=names) is not None:
             n += 1
     return n
 
 
 # ---------------------------------------------------------------- 批量
 def run_batch(project: Project, files, do_register=True, do_nonlinear=True, redo=False,
-              report=None, cancel=None) -> list[dict]:
+              report=None, cancel=None, *, selection=None) -> list[dict]:
     """返回每张脑片的检查清单（需要人工检查的会标出原因）。某张图片出错时记录原因并继续处理下一张。"""
     def say(d, t, txt):
         if report:
@@ -225,8 +234,15 @@ def run_batch(project: Project, files, do_register=True, do_nonlinear=True, redo
         if cancel is not None and cancel():
             raise InterruptedError
 
-    targets, checklist = [], []
-    for f in dict.fromkeys(Path(f).resolve() for f in files):
+    targets = []
+    if selection is not None:
+        targets = [im for im in selected_images(project, selection)
+                   if selection[im.key] is None or selected_sections(im, selection)]
+        if not targets:
+            return []
+    checklist = []
+    sources = dict.fromkeys(Path(f).resolve() for f in files) if selection is None else ()
+    for f in sources:
         check_cancel()
         try:
             entries, notes = project.import_images(f)
@@ -252,14 +268,18 @@ def run_batch(project: Project, files, do_register=True, do_nonlinear=True, redo
             checklist.append({"图片": name, "脑片": "", "配准": "", "需要检查": f"出错：{im.error}"})
             continue
         try:
-            if not im.sections or redo:
+            secs = selected_sections(im, selection)
+            names = None
+            if selection is not None and selection[im.key] is not None:
+                names = [s.name for s in secs]
+            if names is None and (not im.sections or redo):
                 say(base, total, f"{name}：拆分脑片")
                 im.sections = find_sections(sl, channels=project.tissue_channels())
                 if not im.sections:
                     raise ValueError("没有找到脑片（图片可能是空白的，或组织太暗）")
-            secs = [s for s in im.sections if s.enabled]
+                secs = selected_sections(im, selection)
             detect_image(project, im, sl, redo=redo, report=report, cancel=cancel,
-                         progress_range=(base + 5, base + 75), total=total)
+                         progress_range=(base + 5, base + 75), total=total, section_names=names)
             if do_register and secs:
                 todo = [s for s in secs if redo or not s.registration.get("plane")]
                 if todo:
@@ -273,7 +293,9 @@ def run_batch(project: Project, files, do_register=True, do_nonlinear=True, redo
                         if s.name in regs:
                             s.registration = regs[s.name].to_dict()
                     project.save()
-                im.status = "已配准"
+                registered = sum(s.enabled and bool(s.registration.get("plane")) for s in im.sections)
+                total_enabled = sum(s.enabled for s in im.sections)
+                im.status = "已配准" if registered == total_enabled else f"已配准（{registered}/{total_enabled} 张脑片）"
         except InterruptedError:
             project.save(); sl.close()
             raise
@@ -286,10 +308,10 @@ def run_batch(project: Project, files, do_register=True, do_nonlinear=True, redo
         # 检查清单（包括自动质量检查：配准、模糊、过曝、组织缺损）
         try:
             say(base + 97, total, f"{name}：质量检查")
-            qm = Q.check_image(project, im, sl)
+            qm = Q.check_image(project, im, sl, section_names=names)
         except Exception:  # noqa: BLE001
             log.warning("质量检查失败 %s\n%s", name, traceback.format_exc()); qm = {}
-        for s in [s for s in im.sections if s.enabled]:
+        for s in secs:
             reg = R.Registration.from_dict(s.registration)
             note = []
             st = reg.status

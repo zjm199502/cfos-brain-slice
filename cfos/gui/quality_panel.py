@@ -17,9 +17,9 @@ QUALITY_HELP = ("自动检查每张脑片：配准是否贴合、有没有模糊
 
 class QualityMixin:
     def _quality_widgets(self, layout):
-        b = QPushButton("检查所有脑片的质量（模糊、过曝、缺损、配准）")
+        b = QPushButton("检查所选脑片的质量（模糊、过曝、缺损、配准）")
         b.setToolTip(QUALITY_HELP)
-        b.clicked.connect(self.run_quality)
+        b.clicked.connect(lambda: self._require_scope() and self.run_quality())
         layout.addWidget(b)
 
     def _quality_cell(self, im, s):
@@ -38,7 +38,7 @@ class QualityMixin:
     def run_quality(self):
         if self.project is None or not self.project.images:
             return
-        project = self.project
+        project = self._view_project()
         from ..core.quality import quality_table
 
         def done(df):
