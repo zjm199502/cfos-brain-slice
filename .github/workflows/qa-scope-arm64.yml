@@ -1,0 +1,32 @@
+name: Verify 0.9.4 on the released Apple Silicon offline app
+on:
+  push:
+    branches: [codex/qa-scope-arm64]
+permissions:
+  contents: read
+jobs:
+  offline-app:
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Verify the release and candidate patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = arm64
+          echo '7230bf8b31887c45eb7a5665e2788f93eedbf3312de86333ccfb329628145255  qa-mac/cfos-patch-0.9.4.zip' | shasum -a 256 -c -
+          cd "$RUNNER_TEMP"
+          curl -fsSL --retry 3 -o release.tar.xz 'https://github.com/zjm199502/cfos-brain-slice/releases/download/v0.9.0/FosFolio-0.9.0-macOS-arm64-Offline-Compact.tar.xz'
+          echo 'ba1cb6f80de6a1846901d85fb80eda97230cad30d5f3a2ec0a6b3446331c2c85  release.tar.xz' | shasum -a 256 -c -
+          mkdir unpacked
+          tar -xf release.tar.xz -C unpacked
+      - name: Install the patch, exercise processing scope and render native Qt/VisPy frames
+        shell: bash
+        run: |
+          set -euo pipefail
+          py="$RUNNER_TEMP/unpacked/FosFolio脑片图册.app/Contents/Resources/python/bin/python3"
+          lipo "$py" -verify_arch arm64
+          "$py" -u qa-mac/verify.py
