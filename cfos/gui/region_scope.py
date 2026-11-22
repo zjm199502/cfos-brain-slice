@@ -97,7 +97,7 @@ class RegionScopeBox(QWidget):
         if m == RS.CUSTOM:
             n = len(self._region_ids)
             self.desc.setText(f"已选 {n} 个脑区。父区行包含全部下属脑区的统计。"
-                              if n else "请至少选择一个脑区，或切换到其他导出范围。")
+                              if n else "请至少选择一个脑区，或切换到其他脑区范围。")
         else:
             try:
                 count = f"共 {len(RS.selected(m, self.max_depth(), self.skip_layers()))} 个脑区。"
@@ -131,7 +131,7 @@ class RegionPreviewDialog(QDialog):
     def __init__(self, mode, depth=0, skip_layers=False, parent=None, *, region_ids=()):
         super().__init__(parent)
         custom = mode == RS.CUSTOM
-        self.setWindowTitle("选择导出的脑区" if custom else "会列出哪些脑区")
+        self.setWindowTitle("选择脑区" if custom else "会列出哪些脑区")
         fit_window(self, 900, 660)
         L = QVBoxLayout(self)
         t = RS.info()

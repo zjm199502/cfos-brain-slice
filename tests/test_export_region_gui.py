@@ -62,10 +62,7 @@ class ExportRegionGuiTests(unittest.TestCase):
 
     def test_cancel_rolls_back_and_presets_keep_the_previous_choices(self):
         export = RegionScopeBox(allow_custom=True)
-        groups = RegionScopeBox(with_layers=False)
         self.addCleanup(export.close)
-        self.addCleanup(groups.close)
-        self.assertEqual(groups.combo.findData(RS.CUSTOM), -1)
         export.set_values(RS.DEPTH, 6, True, [382])
         with patch.object(RegionPreviewDialog, "exec", return_value=QDialog.Rejected):
             export.combo.setCurrentIndex(export.combo.findData(RS.CUSTOM))
@@ -98,6 +95,34 @@ class ExportRegionGuiTests(unittest.TestCase):
         self.assertEqual(export.region_ids(), selected)
         export.set_values(RS.ALL)
         self.assertEqual(export.region_ids(), [])
+
+    def test_group_region_choice_survives_refresh_and_project_reopen(self):
+        from cfos.core.project import Project
+        from cfos.gui.groups_panel import GroupsMixin
+
+        class Window(QMainWindow, GroupsMixin):
+            _processing_scope = None
+
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            window = Window()
+            self.addCleanup(window.close)
+            window.project = Project(root, export_region_set=RS.CUSTOM, export_region_ids=[295])
+            panel = window._panel_groups()
+            window.setCentralWidget(panel)
+            window._sync_groups_panel()
+            scope = window.st_scope
+            def choose(dialog):
+                dialog._by_id[382].setCheckState(0, Qt.Checked)
+                dialog.apply_button.click()
+                return dialog.result()
+            with patch.object(RegionPreviewDialog, "exec", choose):
+                scope.combo.setCurrentIndex(scope.combo.findData(RS.CUSTOM))
+            window.project = Project.load(root)
+            window._sync_groups_panel()
+            self.assertEqual((scope.mode(), scope.region_ids()), (RS.CUSTOM, [382]))
+            self.assertEqual(window._stats_params().region_ids, [382])
+            self.assertEqual(window.project.export_region_ids, [295])
 
     def test_manual_and_batch_exports_keep_one_scope_and_release_it_on_exit(self):
         from cfos.core.project import ImageEntry, Project

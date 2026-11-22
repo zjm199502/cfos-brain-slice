@@ -1,3 +1,5 @@
+from contextlib import closing
+from copy import deepcopy
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
@@ -5,6 +7,7 @@ import unittest
 from unittest.mock import patch
 
 import pandas as pd
+from openpyxl import load_workbook
 
 from cfos.core import region_sets as RS
 from cfos.core import regions
@@ -83,12 +86,40 @@ class CustomRegionExport(unittest.TestCase):
         self.project.export_region_ids = [40]
         sheets = self.workbook()
         self.assertTrue(sheets["按脑区×脑片"].empty)
+        self.assertEqual(list(sheets["按脑区×脑片"].columns[:4]), ["图片", "脑片", "组别", "动物"])
         self.assertIn("Allen ID", sheets["按脑区×脑片"])
         params = sheets["分析参数"].set_index("参数")["值"]
         self.assertIn("没有覆盖", params["自选脑区导出结果"])
         self.assertIn("absent", params["自选脑区（Allen ID 40）"])
         self.project.images[0].sections[0].registration = {}
         self.assertTrue(self.workbook()["按脑区×脑片"].empty)
+
+    def test_region_rows_carry_each_images_sample_and_remain_filterable(self):
+        first = self.project.images[0]
+        labels = [(first.key, "对照组", "001"), ("second", "=实验组", "002"), ("third", None, None)]
+        for key, group, animal in labels:
+            if key != first.key:
+                image = deepcopy(first)
+                image.storage_key = key
+                self.project.images.append(image)
+                self.project.save_cells(image, self.project.load_cells(first))
+            if group:
+                self.project.set_sample(f"{key}/S1", animal=animal, group=group)
+        self.project.export_region_ids = [382, 20]
+        self.project.export_hemisphere = "左右分别导出并附合计"
+        path = export_excel(self.project, self.root / "groups.xlsx", masks=False, qc=False, quality=False)
+        with closing(load_workbook(path, data_only=True)) as workbook:
+            sheet = workbook["按脑区×脑片"]
+            header, *rows = sheet.values
+            self.assertEqual(header[:4], ("图片", "脑片", "组别", "动物"))
+            self.assertEqual(sheet.auto_filter.ref, sheet.dimensions)
+            samples = {r[:4] for r in rows}
+            self.assertEqual(samples, {(key, "S1", group, animal) for key, group, animal in labels})
+            sides = header.index("半脑")
+            self.assertEqual({row[sides] for row in rows}, {"左", "右", "左右合计"})
+            region = header.index("Allen ID")
+            identities = {(r[0], r[1], r[region], r[sides]) for r in rows}
+            self.assertEqual(len(identities), len(rows))
 
     def test_empty_or_invalid_selection_is_not_all_regions(self):
         for ids in ([], [99999]):

@@ -8,7 +8,7 @@ Bonett & Wright 2000 的标准误 sqrt((1 + r²/2) / (n − 3))），并做 FDR 
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 
 import numpy as np
 import pandas as pd
@@ -33,6 +33,7 @@ class BehaviorParams:
     behavior_name: str = "行为分数"   # 例如“冻结时间 %”
     group: str = ALL_ANIMALS         # 用哪些动物：全部动物，或某一个组
     alpha: float = 0.05
+    region_ids: list[int] = field(default_factory=list)
 
     def to_dict(self):
         return asdict(self)
@@ -63,7 +64,7 @@ def correlate(animal: pd.DataFrame, behavior: dict, params: BehaviorParams) -> t
     df = animal[animal["半脑"] == params.hemisphere].copy()
     if params.group != ALL_ANIMALS:
         df = df[df["组别"] == params.group]
-    df = _RS.filter_table(df, params.region_set, params.max_depth)
+    df = _RS.filter_table(df, params.region_set, params.max_depth, region_ids=params.region_ids)
     df = df[df["面积 (mm²)"] >= params.min_area_mm2]
     df["行为分数"] = df["动物"].map(behavior)
     df = df[df["行为分数"].notna() & df[params.metric].notna()]
@@ -178,7 +179,8 @@ def run_behavior_correlation(project, out_dir, params: BehaviorParams, region_se
         ("统计单位", "动物（同一动物的多张脑片先合并：细胞数相加、面积相加，再算密度）"),
         ("半脑", params.hemisphere), ("纳入条件", f"该动物在该脑区面积 ≥ {params.min_area_mm2} mm²；"
                                           f"至少 {MIN_ANIMALS} 只动物有数据的脑区才计算"),
-        ("脑区范围", _RS.describe(params.region_set, params.max_depth)),
+        ("脑区范围", _RS.describe(params.region_set, params.max_depth, region_ids=params.region_ids)),
+        *_RS.selection_details(params.region_set, params.region_ids),
         ("显著标准", f"q < {params.alpha}"), ("动物数", len(have)),
         ("提醒", "相关不等于因果；把不同组的动物放在一起算时，相关可能只是反映了组间差异，"
                  "建议同时看每个组内的相关。"),

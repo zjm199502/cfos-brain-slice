@@ -131,7 +131,8 @@ def build_tables(project: Project, intensity: bool | None = None, *, for_excel=F
     if per_section:
         # 只保留三张表：按脑片汇总、按脑区×脑片、分析参数（分析参数在 export_excel 里加）
         t = pd.concat(per_section, ignore_index=True).rename(columns={"section": "脑片"})
-        t = pd.DataFrame(section_info).merge(t, on=["图片", "脑片"], how="left")
+        sections = pd.DataFrame(section_info)
+        t = sections.merge(t, on=["图片", "脑片"], how="left")
         if t["动物"].astype(bool).any():
             t = t.sort_values(["组别", "动物", "约 Bregma (mm)"], ascending=[True, True, False], na_position="last")
         out["按脑片汇总"] = t.reset_index(drop=True)
@@ -144,6 +145,12 @@ def build_tables(project: Project, intensity: bool | None = None, *, for_excel=F
         elif custom and for_excel:
             out["按脑区×脑片"] = pd.DataFrame(columns=["图片", "脑片", "Allen ID", "脑区缩写", "脑区名称", "层级",
                                                    "半脑", "面积 (mm²)", *(f"{name}+" for name in names)])
+        if for_excel and "按脑区×脑片" in out:
+            keys = ["图片", "脑片"]
+            regions = out["按脑区×脑片"].set_index(keys)
+            samples = sections[keys + ["组别", "动物"]].drop_duplicates().set_index(keys)
+            labels = samples.reindex(regions.index)
+            out["按脑区×脑片"] = pd.concat([labels, regions], axis=1).reset_index()
         if roi_rows:  # 只有画了自定义区域时才有这张表
             out["按自定义区域"] = pd.concat(roi_rows, ignore_index=True)
     return _drop_unused(out, project)
@@ -316,9 +323,7 @@ def params_table(project: Project) -> pd.DataFrame:
     region_ids = getattr(project, "export_region_ids", [])
     rows.append(("导出的脑区范围", RS.describe(project.export_region_set, project.export_max_depth,
                                               project.export_skip_layers, region_ids=region_ids)))
-    if project.export_region_set == RS.CUSTOM:
-        for region in RS.custom_regions(region_ids).itertuples(index=False):
-            rows.append((f"自选脑区（Allen ID {region.id}）", " · ".join(x for x in (region.acronym, region.zh, region.name) if x)))
+    rows.extend(RS.selection_details(project.export_region_set, region_ids))
     rows.append(("脑区表半脑导出方式", project.export_hemisphere))
     rows.append(("脑区类别说明", RS.CATEGORY_HELP))
     tc = project.tissue_channels()
@@ -455,7 +460,13 @@ def _write_xlsx(tables, path):
         for name, df in tables.items():
             df.to_excel(xw, sheet_name=name, index=False)
             ws = xw.sheets[name]
+            if name == "按脑区×脑片":
+                ws.auto_filter.ref = ws.dimensions
             for j, col in enumerate(df.columns, 1):
+                if col in ("组别", "动物"):
+                    for i, label in enumerate(df[col], 2):
+                        if isinstance(label, str) and label.startswith(("=", "#")):
+                            ws.cell(i, j).data_type = "s"
                 if col == "面积 (mm²)":
                     for cell in ws.iter_cols(min_col=j, max_col=j, min_row=2, max_row=ws.max_row):
                         for value in cell:

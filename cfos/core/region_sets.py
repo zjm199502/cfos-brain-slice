@@ -93,7 +93,7 @@ ZH = {
 
 # ---------------------------------------------------------------- 选法
 ALL, MAJOR_ONLY, SUMMARY_ONLY, MAJOR_SUMMARY, DEPTH = "all", "major", "summary", "major+summary", "depth"
-CUSTOM = "custom"  # Excel-only mode. The preset list is also used by other analyses.
+CUSTOM = "custom"
 MODES = [   # (代号, 下拉框里的名字, 一句话说明)
     (ALL, "全部脑区（从大区到最细亚区都列出）",
      "不筛选。同一个细胞会同时出现在它所在的亚区、脑区和大脑区里（例如一个 CA1 的细胞也计入“海马结构”），"
@@ -175,16 +175,24 @@ def info() -> pd.DataFrame:
 
 
 def custom_regions(region_ids) -> pd.DataFrame:
-    """Resolve explicit Allen IDs and identify stale settings before starting an export."""
+    """按 Allen ID 解析自选脑区，并检查图谱中是否缺少已选结构。"""
     wanted = set(region_ids)
     if not wanted:
-        raise ValueError("请至少勾选一个 Allen 脑区，或选择其他导出范围。")
+        raise ValueError("请至少勾选一个 Allen 脑区，或选择其他脑区范围。")
     atlas = info()
     rows = atlas.loc[atlas["id"].isin(wanted)]
     unknown = wanted.difference(rows["id"])
     if unknown:
         raise ValueError("当前图谱中找不到已选的 Allen ID：" + "、".join(sorted(map(str, unknown))) + "。请重新选择脑区。")
     return rows
+
+
+def selection_details(mode, region_ids):
+    """在分析参数中逐行记录计划比较的脑区，包括切片未覆盖的结构。"""
+    if mode != CUSTOM:
+        return []
+    return [(f"自选脑区（Allen ID {r.id}）", " · ".join(x for x in (r.acronym, r.zh, r.name) if x))
+            for r in custom_regions(region_ids).itertuples(index=False)]
 
 
 def selected(mode: str, depth: int = 0, skip_layers: bool = False, *, region_ids=()) -> set:
