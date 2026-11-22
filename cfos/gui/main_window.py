@@ -2304,7 +2304,7 @@ class MainWindow(ProcessingScopeMixin, UpdateMixin, TeachingMixin, FigureMixin, 
         ob = QGroupBox("导出选项"); of = QVBoxLayout(ob)
         from .region_scope import RegionScopeBox
         rb = QGroupBox("“按脑区×脑片”表里列出哪些脑区"); rl = QVBoxLayout(rb)
-        self.exp_scope = RegionScopeBox(with_layers=True, allow_custom=True); rl.addWidget(self.exp_scope)
+        self.exp_scope = RegionScopeBox(); rl.addWidget(self.exp_scope)
         self.exp_scope.changed.connect(self._save_export_scope)
         rl.addWidget(QLabel("半脑导出方式"))
         self.exp_hemisphere = QComboBox()
@@ -2348,7 +2348,7 @@ class MainWindow(ProcessingScopeMixin, UpdateMixin, TeachingMixin, FigureMixin, 
         p.export_region_set = self.exp_scope.mode()
         p.export_region_ids = self.exp_scope.region_ids()
         p.export_skip_layers = self.exp_scope.skip_layers()
-        p.export_max_depth = self.exp_scope.max_depth()
+        p.export_max_depth = 0
         p.save()
 
     def export(self):

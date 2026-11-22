@@ -29,6 +29,7 @@ class ExportRegionGuiTests(unittest.TestCase):
             (382, "CA1", "HPF", "Field CA1", "海马 CA1 区", 2),
             (463, "CA3", "HPF", "Field CA3", "海马 CA3 区", 2),
             (295, "BLA", "root", "Basolateral amygdalar nucleus", "基底外侧杏仁核", 1),
+            (10703, "CA1slm", "CA1", "Field CA1, layer", "CA1 分层", 3),
         ], columns=["id", "acronym", "parent", "name", "zh", "depth"])
         table["脑区类别"] = "测试"
         atlas = patch.object(RS, "info", return_value=table)
@@ -61,12 +62,12 @@ class ExportRegionGuiTests(unittest.TestCase):
         self.assertEqual(dialog.selection.count(), 0)
 
     def test_cancel_rolls_back_and_presets_keep_the_previous_choices(self):
-        export = RegionScopeBox(allow_custom=True)
+        export = RegionScopeBox()
         self.addCleanup(export.close)
-        export.set_values(RS.DEPTH, 6, True, [382])
+        export.set_values(RS.ALL, skip_layers=True, region_ids=[382])
         with patch.object(RegionPreviewDialog, "exec", return_value=QDialog.Rejected):
             export.combo.setCurrentIndex(export.combo.findData(RS.CUSTOM))
-        self.assertEqual((export.mode(), export.max_depth(), export.skip_layers()), (RS.DEPTH, 6, True))
+        self.assertEqual((export.mode(), export.skip_layers()), (RS.ALL, True))
         self.assertEqual(export.region_ids(), [382])
 
         def choose(dialog):
@@ -95,6 +96,22 @@ class ExportRegionGuiTests(unittest.TestCase):
         self.assertEqual(export.region_ids(), selected)
         export.set_values(RS.ALL)
         self.assertEqual(export.region_ids(), [])
+
+    def test_both_pickers_offer_three_choices_and_preserve_legacy_membership(self):
+        for with_layers in (False, True):
+            box = RegionScopeBox(with_layers=with_layers)
+            self.addCleanup(box.close)
+            self.assertEqual([box.combo.itemData(i) for i in range(box.combo.count())],
+                             [RS.ALL, RS.SUMMARY_ONLY, RS.CUSTOM])
+            for mode, depth in [(RS.MAJOR_ONLY, 0), (RS.MAJOR_SUMMARY, 0), (RS.DEPTH, 1), ("", 3)]:
+                with self.subTest(mode=mode, depth=depth, with_layers=with_layers):
+                    expected = RS.selected(mode, depth, skip_layers=with_layers)
+                    box.set_values(mode, depth, skip_layers=with_layers, region_ids=[463])
+                    self.assertEqual(box.mode(), RS.CUSTOM)
+                    self.assertEqual(RS.selected(box.mode(), region_ids=box.region_ids()), expected)
+                    self.assertFalse(box.skip_layers())
+            box.set_values(RS.SUMMARY_ONLY)
+            self.assertEqual(box.mode(), RS.SUMMARY_ONLY)
 
     def test_group_region_choice_survives_refresh_and_project_reopen(self):
         from cfos.core.project import Project
@@ -133,7 +150,7 @@ class ExportRegionGuiTests(unittest.TestCase):
         window.setCentralWidget(window.stack)
         for _ in range(7):
             window.stack.addWidget(QWidget())
-        window.exp_scope = RegionScopeBox(allow_custom=True)
+        window.exp_scope = RegionScopeBox()
         window.stack.addWidget(window.exp_scope)
         window.exp_scope.set_values(RS.CUSTOM, region_ids=[382])
         window.exp_scope.changed.connect(lambda: main_window.MainWindow._save_export_scope(window))

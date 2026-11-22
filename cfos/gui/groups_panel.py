@@ -62,7 +62,7 @@ class GroupsMixin:
         self.st_area.setSingleStep(0.01); self.st_area.setSuffix(" mm²")
         self.st_area.setToolTip("某只动物在某个脑区的总面积小于这个值时，这只动物不纳入该脑区的比较（面积太小密度不稳定）。")
         from .region_scope import RegionScopeBox
-        self.st_scope = RegionScopeBox(with_layers=False, allow_custom=True)
+        self.st_scope = RegionScopeBox(with_layers=False)
         self.st_scope.changed.connect(self._save_stats_scope)
         self.st_scope.setToolTip("比较的脑区越多，多重比较校正越严格，越难得到显著结果。\n"
                                  "“常用脑区”互不重叠、粗细适中，是文献里最常用的做法。")
@@ -356,16 +356,18 @@ class GroupsMixin:
     # ------------------------------------------------------------ 统计
     def _save_stats_scope(self):
         if self.project is not None:
-            self.project.stats.update(region_set=self.st_scope.mode(), max_depth=self.st_scope.max_depth(),
+            self.project.stats.update(region_set=self.st_scope.mode(), max_depth=0,
                                       region_ids=self.st_scope.region_ids())
             self.project.save()
 
     def _stats_params(self) -> StatsParams:
+        from ..core.region_sets import CUSTOM
         sp = StatsParams(metric=self.st_metric.currentText(), test=self.st_test.currentData(),
                          control=self.st_ctrl.currentText(), hemisphere=self.st_hemi.currentText(),
-                         min_area_mm2=self.st_area.value(), max_depth=self.st_scope.max_depth(),
+                         min_area_mm2=self.st_area.value(),
                          region_set=self.st_scope.mode(), region_ids=self.st_scope.region_ids())
-        self.project.stats = sp.to_dict(); self.project.save()
+        if sp.region_set != CUSTOM or sp.region_ids:
+            self.project.stats = sp.to_dict(); self.project.save()
         return sp
 
     def run_stats(self, region_sec=None):

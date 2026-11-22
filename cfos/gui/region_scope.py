@@ -1,14 +1,11 @@
-"""“脑区范围”选择框：导出和组间统计共用（v0.8.5）。
-
-用几种看得懂的选法（12 个大脑区 / 约 300 个常用脑区 / 全部…）代替“第几级”，
-下面直接写明这种选法包含什么，并可以打开一个树形窗口查看具体会列出哪些脑区。"""
+"""组间统计和 Excel 导出共用的脑区选择框与图谱树。"""
 from __future__ import annotations
 
 from .layout import fit_window
 from qtpy.QtCore import Qt, Signal
 from qtpy.QtGui import QBrush, QColor, QFont
 from qtpy.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QHBoxLayout,
-                            QLabel, QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QPushButton, QSpinBox,
+                            QLabel, QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QPushButton,
                             QTabWidget, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
 
 from ..core import region_sets as RS
@@ -17,26 +14,17 @@ from ..core import region_sets as RS
 class RegionScopeBox(QWidget):
     changed = Signal()
 
-    def __init__(self, with_layers: bool = True, parent=None, *, allow_custom: bool = False):
+    def __init__(self, with_layers: bool = True, parent=None):
         super().__init__(parent)
         self._region_ids = []
         self._current_mode = RS.ALL
         L = QVBoxLayout(self); L.setContentsMargins(0, 0, 0, 0)
         self.combo = QComboBox()
-        for m, label, tip in RS.MODES:
-            self.combo.addItem(label, m)
-            self.combo.setItemData(self.combo.count() - 1, tip, Qt.ToolTipRole)
-        if allow_custom:
-            self.combo.addItem("自选脑区…", RS.CUSTOM)
+        for mode in (RS.ALL, RS.SUMMARY_ONLY, RS.CUSTOM):
+            label = "自选脑区…" if mode == RS.CUSTOM else RS.MODE_LABEL[mode]
+            self.combo.addItem(label, mode)
+            self.combo.setItemData(self.combo.count() - 1, RS.MODE_HELP[mode], Qt.ToolTipRole)
         L.addWidget(self.combo)
-        row = QHBoxLayout()
-        self.depth_label = QLabel("最多列到图谱的")
-        self.depth = QSpinBox(); self.depth.setRange(1, 10); self.depth.setValue(6)
-        self.depth.setPrefix("第 "); self.depth.setSuffix(" 级")
-        self.depth.setToolTip("第 2 级：大脑 / 脑干 / 小脑；第 5 级：新皮层、海马结构及部分核团；\n"
-                              "第 6 级：运动皮层 MO、躯体感觉皮层 SS 等；第 7–8 级：更细的亚区和皮层分层。")
-        row.addWidget(self.depth_label); row.addWidget(self.depth); row.addStretch(1)
-        L.addLayout(row)
         self.layers = QCheckBox("不列出皮层各层（layer 1、2/3、4、5、6a、6b）")
         self.layers.setToolTip("皮层每个区又分 6 层（如 MOp1、MOp2/3…）。不关心分层时勾选，表格会短很多。")
         self.layers.setVisible(with_layers); self._with_layers = with_layers
@@ -48,16 +36,12 @@ class RegionScopeBox(QWidget):
         self.btn.clicked.connect(self.show_preview)
         L.addWidget(self.btn)
         self.combo.currentIndexChanged.connect(self._mode_changed)
-        self.depth.valueChanged.connect(self._sync)
         self.layers.toggled.connect(self._sync)
         self._sync()
 
     # ---- 读 / 写
     def mode(self) -> str:
         return self.combo.currentData()
-
-    def max_depth(self) -> int:
-        return int(self.depth.value()) if self.mode() == RS.DEPTH else 0
 
     def skip_layers(self) -> bool:
         return self._with_layers and self.layers.isEnabled() and self.layers.isChecked()
@@ -67,16 +51,27 @@ class RegionScopeBox(QWidget):
 
     def set_values(self, mode: str, depth: int = 0, skip_layers: bool = False, region_ids=()):
         mode = RS.resolve_mode(mode, depth)
+        warning = ""
+        if mode in (RS.MAJOR_ONLY, RS.MAJOR_SUMMARY, RS.DEPTH):
+            # 旧预设在新版图谱树中呈现为相同的一组 Allen ID。
+            try:
+                acronyms = RS.selected(mode, depth, skip_layers)
+                atlas = RS.info()
+                region_ids = atlas.loc[atlas["acronym"].isin(acronyms), "id"].tolist()
+            except (OSError, ValueError, KeyError) as exc:
+                region_ids = []
+                warning = f"无法读取旧项目的脑区清单，请检查图谱或重新选择脑区。\n{exc}"
+            mode = RS.CUSTOM
         self._region_ids = sorted(set(region_ids or ()))
-        for w in (self.combo, self.depth, self.layers):
+        for w in (self.combo, self.layers):
             w.blockSignals(True)
-        self.combo.setCurrentIndex(max(0, self.combo.findData(mode)))
-        if depth and depth > 0:
-            self.depth.setValue(int(depth))
+        self.combo.setCurrentIndex(self.combo.findData(mode))
         self.layers.setChecked(bool(skip_layers))
-        for w in (self.combo, self.depth, self.layers):
+        for w in (self.combo, self.layers):
             w.blockSignals(False)
         self._sync()
+        if warning:
+            self.desc.setText(warning)
 
     # ---- 界面
     def _mode_changed(self):
@@ -90,9 +85,7 @@ class RegionScopeBox(QWidget):
     def _sync(self, *_):
         m = self.mode()
         self._current_mode = m
-        by_depth = m == RS.DEPTH
-        self.depth_label.setVisible(by_depth); self.depth.setVisible(by_depth)
-        self.layers.setEnabled(m in (RS.ALL, RS.DEPTH))    # 大脑区 / 常用脑区本来就不含皮层分层
+        self.layers.setEnabled(m == RS.ALL)
         self.btn.setText("编辑已选脑区…" if m == RS.CUSTOM else "查看会列出哪些脑区…")
         if m == RS.CUSTOM:
             n = len(self._region_ids)
@@ -100,7 +93,7 @@ class RegionScopeBox(QWidget):
                               if n else "请至少选择一个脑区，或切换到其他脑区范围。")
         else:
             try:
-                count = f"共 {len(RS.selected(m, self.max_depth(), self.skip_layers()))} 个脑区。"
+                count = f"共 {len(RS.selected(m, skip_layers=self.skip_layers()))} 个脑区。"
             except Exception:  # noqa: BLE001  图谱文件缺失时不影响界面
                 count = ""
             self.desc.setText(f"{count}{RS.MODE_HELP[m]}")
@@ -122,7 +115,7 @@ class RegionScopeBox(QWidget):
             if self._edit_custom():
                 self._sync()
         else:
-            RegionPreviewDialog(self.mode(), self.max_depth(), self.skip_layers(), self.window()).exec()
+            RegionPreviewDialog(self.mode(), skip_layers=self.skip_layers(), parent=self.window()).exec()
 
 
 class RegionPreviewDialog(QDialog):

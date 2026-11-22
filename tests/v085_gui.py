@@ -26,23 +26,21 @@ def shot(name, widget):
 
 box = w.exp_scope
 print("modes:", [box.combo.itemText(i) for i in range(box.combo.count())])
-assert box.mode() == RS.ALL and box.max_depth() == 0
-for m in (RS.ALL, RS.MAJOR_ONLY, RS.SUMMARY_ONLY, RS.MAJOR_SUMMARY, RS.DEPTH):
-    box.set_values(m, 6 if m == RS.DEPTH else 0)
+assert [box.combo.itemData(i) for i in range(box.combo.count())] == [RS.ALL, RS.SUMMARY_ONLY, RS.CUSTOM]
+for m in (RS.ALL, RS.SUMMARY_ONLY):
+    box.set_values(m)
     assert box.mode() == m
-    assert box.depth.isVisibleTo(box) == (m == RS.DEPTH)
-    assert box.layers.isEnabled() == (m in (RS.ALL, RS.DEPTH))
+    assert box.layers.isEnabled() == (m == RS.ALL)
     print(m, "|", box.desc.text()[:40])
-assert box.max_depth() == 6
 box.set_values("", 8, True)            # 旧项目：设过“第 8 级 + 不列分层”
-assert box.mode() == RS.DEPTH and box.max_depth() == 8 and box.skip_layers()
+assert box.mode() == RS.CUSTOM and RS.selected(RS.CUSTOM, region_ids=box.region_ids()) == RS.selected(RS.DEPTH, 8, True)
 box.set_values("", 0, False)
 assert box.mode() == RS.ALL
 w.stack.setCurrentIndex(7)
-for nm, m in (("1_导出_常用脑区", RS.SUMMARY_ONLY), ("2_导出_大脑区", RS.MAJOR_ONLY), ("3_导出_按层级", RS.DEPTH)):
-    box.set_values(m, 6)
+for nm, m in (("1_导出_常用脑区", RS.SUMMARY_ONLY), ("2_导出_全部脑区", RS.ALL), ("3_导出_自选脑区", RS.CUSTOM)):
+    box.set_values(m, region_ids=[382])
     shot(nm, w.stack.currentWidget())
-for nm, m in (("4_预览_常用脑区", RS.SUMMARY_ONLY), ("5_预览_大脑区", RS.MAJOR_ONLY)):
+for nm, m in (("4_预览_常用脑区", RS.SUMMARY_ONLY), ("5_预览_全部脑区", RS.ALL)):
     d = RegionPreviewDialog(m, 0, False, w); d.show(); pump()
     if m == RS.SUMMARY_ONLY:
         d.search.setText("杏仁核"); d.only.setChecked(True)
