@@ -1,0 +1,28 @@
+name: macOS image loading on the released arm64 runtime
+on:
+  push:
+    branches: [codex/qa-mac-data]
+permissions:
+  contents: read
+jobs:
+  load:
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Extract public application and exercise data loading
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          sysctl -n machdep.cpu.brand_string
+          curl -fsSL --retry 3 -o app.txz https://github.com/zjm199502/cfos-brain-slice/releases/download/v0.9.0/FosFolio-0.9.0-macOS-arm64-Offline-Compact.tar.xz
+          echo 'ba1cb6f80de6a1846901d85fb80eda97230cad30d5f3a2ec0a6b3446331c2c85  app.txz' | shasum -a 256 -c -
+          tar -xf app.txz
+          export CFOS_BASE_APP="$RUNNER_TEMP/FosFolio脑片图册.app/Contents/Resources/app"
+          export CFOS_UPDATES_DIR="$RUNNER_TEMP/updates" PYTHONFAULTHANDLER=1
+          py="$CFOS_BASE_APP/../python/bin/python3"
+          "$py" -u "$GITHUB_WORKSPACE/qa_mac_load.py" seed
+          "$py" -u "$GITHUB_WORKSPACE/qa_mac_load.py" run
