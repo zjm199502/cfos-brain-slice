@@ -1,0 +1,56 @@
+name: Verify the CZI update using the released Apple Silicon app
+on:
+  push:
+    branches: [codex/qa-macos-czi-098]
+permissions:
+  contents: read
+jobs:
+  mac:
+    runs-on: macos-15
+    timeout-minutes: 37
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Download original app, old patch and ZEISS two-scene data
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          test "$(uname -m)" = arm64
+          curl -fsSL --retry 3 -o app.txz https://github.com/zjm199502/cfos-brain-slice/releases/download/v0.9.0/FosFolio-0.9.0-macOS-arm64-Offline-Compact.tar.xz
+          echo 'ba1cb6f80de6a1846901d85fb80eda97230cad30d5f3a2ec0a6b3446331c2c85  app.txz' | shasum -a 256 -c -
+          tar -xf app.txz
+          curl -fsSL --retry 3 -o prev.zip 'https://raw.githubusercontent.com/zjm199502/cfos-brain-slice/025a42895ebe771d1b1e310a9d31094fcd2c533e/updates/v0.9/macos/cfos-patch-0.9.7-macos.zip'
+          echo '80ff907ef80dd1d0026caa5ca4467579b97a0a8cbbcb6615fe57e52fb3fd85a9  prev.zip' | shasum -a 256 -c -
+          curl -fsSL --retry 3 -o two-wells.czi 'https://raw.githubusercontent.com/zeiss-microscopy/OAD/781ce14954946366524b96347e7767cefb11a2c8/jupyter_notebooks/pylibCZIrw/images/S%3D2_CH%3D2_well_A1%2BA2_zstd.czi'
+          echo 'f6d056b0da75416815be6e6ab702fda23b547137e7cda0863395185963b80879  two-wells.czi' | shasum -a 256 -c -
+          echo "CFOS_BASE_APP=$RUNNER_TEMP/FosFolio脑片图册.app/Contents/Resources/app" >> "$GITHUB_ENV"
+          echo "PYTHONFAULTHANDLER=1" >> "$GITHUB_ENV"
+      - name: Fetch frozen candidate files
+        shell: bash
+        run: |
+          set -euo pipefail
+          target=refs/heads/codex/qa-macos-czi-098-candidate
+          for i in {1..65}; do
+            if git fetch -q origin "$target" 2>/dev/null; then
+              git checkout FETCH_HEAD -- candidate
+              exit 0
+            fi
+            sleep 12
+          done
+          exit 1
+      - name: Install staged update, restart and import CZI
+        run: '"$CFOS_BASE_APP/../python/bin/python3" -u verify_mac_czi.py staged'
+      - name: Install published update, restart and import CZI
+        shell: bash
+        run: |
+          set -euo pipefail
+          manifest='https://raw.githubusercontent.com/zjm199502/cfos-brain-slice/installers/updates/v0.9/macos/latest.json'
+          for i in {1..75}; do
+            if curl -fsSL "$manifest" -o "$RUNNER_TEMP/online.json" && python3 -c 'import json,sys; sys.exit(json.load(open(sys.argv[1]))["version"] != "0.9.8")' "$RUNNER_TEMP/online.json"; then
+              "$CFOS_BASE_APP/../python/bin/python3" -u verify_mac_czi.py online && exit 0
+            fi
+            sleep 12
+          done
+          exit 1
