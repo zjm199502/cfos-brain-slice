@@ -95,8 +95,10 @@ def manifest_urls() -> list[str]:
     urls = []
     for url in updater.manifest_urls():
         folder = url.rsplit("/", 1)[0]
-        if folder.endswith(f"/{updater.CHANNEL}"):
-            folder = folder.rsplit("/", 1)[0]  # 组件仍在两个版本共用的 updates 目录
+        for path in (updater.CHANNEL, updater.SERIES_CHANNEL):
+            if folder.endswith("/" + path):
+                folder = folder[:-len(path)] + "updates"
+                break
         urls.append(f"{folder}/{MANIFEST}")
     return urls
 

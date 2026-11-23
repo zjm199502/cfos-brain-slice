@@ -15,6 +15,7 @@ import argparse
 import datetime as dt
 import hashlib
 import json
+import re
 import sys
 import zipfile
 from pathlib import Path
@@ -111,9 +112,16 @@ def main():
     ap.add_argument("out")
     ap.add_argument("--min-base", required=True, help="需要的完整安装包最低版本，例如 0.7")
     ap.add_argument("--notes", help="这个版本的更新公告（Markdown）")
+    ap.add_argument("--platform", choices=("windows", "macos"), help="写入清单与补丁的目标平台")
+    ap.add_argument("--version", help="打入此平台补丁的发布版本")
+    ap.add_argument("--full-installer", default=updater.FULL_PAGE)
     ap.add_argument("--in-app-only", action="store_true", help="仅供支持软件内更新的客户端安装")
     a = ap.parse_args()
-    version = updater._read_version_file(APP / "cfos" / "__init__.py")
+    version = a.version or updater._read_version_file(APP / "cfos" / "__init__.py")
+    if a.version and (not a.platform or not re.fullmatch(re.escape(updater.SERIES) + r"\.\d+", version)):
+        ap.error("--version 需要指定当前系列的补丁版本和目标平台")
+    if a.platform and not a.in_app_only:
+        ap.error("平台专用补丁须使用 --in-app-only")
     if version.startswith("0.9.") and updater.vtuple(a.min_base) < (0, 9, 0):
         ap.error("v0.9.x 原生补丁的最低安装版本须为 0.9.0 或以上，确保旧版 StarDist 客户端能拒绝此包。")
     notes_file = Path(a.notes) if a.notes else APP / "packaging" / "更新公告" / f"{version}.md"
@@ -130,9 +138,18 @@ def main():
             continue
         files["app/" + f.relative_to(APP).as_posix()] = f.read_bytes()
     files["app/main.py"] = (APP / "main.py").read_bytes()
+    if a.version:
+        key = "app/cfos/__init__.py"
+        files[key], n = re.subn(rb'(?m)^__version__ = "[^"\r\n]+"', f'__version__ = "{version}"'.encode(),
+                                files[key])
+        if n != 1:
+            raise ValueError("找不到唯一的软件版本声明")
     info = {"version": version, "min_base": a.min_base, "date": dt.date.today().isoformat(), "notes": notes,
             "files": {k: hashlib.sha256(v).hexdigest() for k, v in files.items()}}
-    zname = f"cfos-patch-{version}.zip"
+    if a.platform:
+        info["platform"] = a.platform
+    suffix = f"-{a.platform}" if a.platform else ""
+    zname = f"cfos-patch-{version}{suffix}.zip"
     zp = out / zname
     fill = lambda t: t.replace("{VERSION}", version).replace("{MIN_BASE}", a.min_base).replace("{CONTACT}", CONTACT_MD)
     with zipfile.ZipFile(zp, "w") as z:
@@ -152,7 +169,6 @@ def main():
     hist = out / "更新公告.md"
     earlier = []
     if hist.exists():
-        import re
         txt = hist.read_text(encoding="utf-8")
         for m in re.finditer(r"^## v([0-9.]+)（[^）]*）\n(.*?)(?=^## v|\Z)", txt, re.S | re.M):
             v, body = m.group(1), m.group(2).strip()
@@ -166,7 +182,9 @@ def main():
         + "\n\n".join(earlier) + "\n\n" + CONTACT_MD)
     latest = {"version": version, "min_base": a.min_base, "date": info["date"], "notes": shown,
               "patch": {"file": zname, "size": len(data), "sha256": hashlib.sha256(data).hexdigest()},
-              "full_installer": updater.FULL_PAGE}
+              "full_installer": a.full_installer}
+    if a.platform:
+        latest["platform"] = a.platform
     (out / "latest.json").write_text(json.dumps(latest, ensure_ascii=False, indent=1), encoding="utf-8")
     # 累积的更新公告（新的在最前面）
     hist = out / "更新公告.md"

@@ -27,7 +27,9 @@ from pathlib import Path
 REPO = "zjm199502/cfos-brain-slice"
 BRANCH = "installers"
 SERIES = "0.9"
-CHANNEL = f"updates/v{SERIES}"
+SERIES_CHANNEL = f"updates/v{SERIES}"
+PLATFORM = {"win32": "windows", "darwin": "macos"}.get(sys.platform)
+CHANNEL = f"{SERIES_CHANNEL}/{PLATFORM}" if PLATFORM else SERIES_CHANNEL
 MANIFEST_URLS = [
     f"https://raw.githubusercontent.com/{REPO}/{BRANCH}/{CHANNEL}/latest.json",
     f"https://cdn.jsdelivr.net/gh/{REPO}@{BRANCH}/{CHANNEL}/latest.json",
@@ -195,6 +197,8 @@ def fetch_manifest() -> tuple[dict, str]:
         try:
             m = json.loads(_get(u).decode("utf-8"))
             if "version" in m:
+                if PLATFORM and m.get("platform") != PLATFORM:
+                    raise ValueError(f"更新清单与当前平台 {PLATFORM} 不匹配")
                 return m, u
         except Exception as e:  # noqa: BLE001
             err = e
@@ -266,6 +270,8 @@ def read_patch_info(zip_path: Path) -> dict:
     for k in ("version", "min_base", "files"):
         if k not in info:
             raise ValueError(f"补丁包信息不完整（缺少 {k}）。")
+    if "platform" in info and info["platform"] != PLATFORM:
+        raise ValueError(f"此补丁仅适用于 {info['platform']}。请下载当前平台的补丁。")
     return info
 
 

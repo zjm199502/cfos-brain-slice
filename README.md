@@ -10,6 +10,10 @@
 
 面向小鼠脑切片荧光图像的一体化分析软件：脑片拆分 → 亮度/对比度 → 逐通道细胞识别 → 共标统计 → CCFv3 配准 → 分组统计 / 功能网络 → 导出 Excel。
 
+从 v0.9.7 起，Windows 与 macOS 使用各自的更新通道和版本号。[v0.9.7 更新说明](packaging/更新公告/0.9.7.md)
+
+维护者在最新的更新分支工作区运行 `python packaging/make_platform_updates.py <updates/v0.9目录> --notes <公告文件>`，默认给两个平台各自递增一个补丁版本。单端发布时加 `--platform macos` 或 `--platform windows`。分别验收后，将本次目标平台的目录一起提交至 installers 分支。系列根目录保留 v0.9.7 过渡包，供旧客户端首次分流。
+
 v0.9.6 的分组统计与 Excel 导出均提供「全部脑区」「常用脑区」「自选脑区」三种范围。[v0.9.6 更新说明](packaging/更新公告/0.9.6.md)
 
 ## v0.9.5 分组比较与 Excel 明细
