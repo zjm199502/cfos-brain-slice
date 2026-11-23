@@ -1,0 +1,36 @@
+name: Verify platform feeds on the released Apple Silicon app
+on:
+  push:
+    branches: [codex/qa-platform-channels]
+permissions:
+  contents: read
+jobs:
+  mac:
+    runs-on: macos-15
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Extract released application
+        shell: bash
+        run: |
+          set -eu
+          cd "$RUNNER_TEMP"
+          curl -fsSL --retry 3 -o base.txz 'https://github.com/zjm199502/cfos-brain-slice/releases/download/v0.9.0/FosFolio-0.9.0-macOS-arm64-Offline-Compact.tar.xz'
+          echo 'ba1cb6f80de6a1846901d85fb80eda97230cad30d5f3a2ec0a6b3446331c2c85  base.txz' | shasum -a 256 -c -
+          tar -xf base.txz
+          echo "CFOS_BASE_APP=$RUNNER_TEMP/FosFolio脑片图册.app/Contents/Resources/app" >> "$GITHUB_ENV"
+      - name: Validate staged bridge and native macOS channel
+        run: '"$CFOS_BASE_APP/../python/bin/python3" qa_channels.py local'
+      - name: Verify published bridge and native macOS channel
+        shell: bash
+        run: |
+          set -eu
+          for i in {1..55}; do
+            if curl -fsSL 'https://raw.githubusercontent.com/zjm199502/cfos-brain-slice/installers/updates/v0.9/macos/latest.json' | grep -q '"0.9.7"'; then
+              "$CFOS_BASE_APP/../python/bin/python3" qa_channels.py online && exit 0
+            fi
+            sleep 15
+          done
+          exit 1
