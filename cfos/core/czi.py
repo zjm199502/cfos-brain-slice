@@ -38,8 +38,10 @@ def _catalogue(file):
     if not entries:
         raise ValueError("CZI 中没有图像数据。")
     base = [e for e in entries if e.pyramid_type == 0 and not e.is_pyramid]
-    if any(e.pyramid_type == 0 and e.is_pyramid for e in entries):
-        raise ValueError("CZI 原始图块含非标准重采样或未标识的金字塔，无法确认原始像素，请从 ZEN 导出 OME-TIFF。")
+    unmarked = [e for e in entries if e.pyramid_type == 0 and e.is_pyramid]
+    if unmarked:
+        _verify_redundant_overviews(base, unmarked)
+        entries = [e for e in entries if e.pyramid_type or not e.is_pyramid]
     if not base:
         raise ValueError("CZI 缺少可读取的原始分辨率灰度平面。")
     ids = {e.scene_index for e in base}
@@ -152,6 +154,36 @@ class _Plane:
             return self.tiles
         return [self.tiles[i] for i in sorted({i for gy in ys for gx in xs for i in self.bins.get((gx, gy), ())})]
 
+    def covers(self, box):
+        """Is the whole rectangle covered by native tiles, including mosaic seams?"""
+        right, bottom = box.x + box.width, box.y + box.height
+        spans = []
+        for t in self.intersect(box.x, box.y, box.width, box.height):
+            x0, x1 = max(t.x, box.x), min(t.x + t.width, right)
+            y0, y1 = max(t.y, box.y), min(t.y + t.height, bottom)
+            if (x0, y0, x1, y1) == (box.x, box.y, right, bottom):
+                return True
+            if x0 < x1 and y0 < y1:
+                spans.append((x0, x1, y0, y1))
+        spans.sort()
+        edges = {box.y}
+        for _, _, top, end in spans:
+            edges.add(top)
+            if end < bottom:
+                edges.add(end)
+        for y in edges:
+            covered = box.x
+            for left, end, top, lower in spans:
+                if top <= y < lower:
+                    if left > covered:
+                        return False
+                    covered = max(covered, end)
+                    if covered == right:
+                        break
+            if covered != right:
+                return False
+        return True
+
     def footprint(self):
         # Exact footprint so a partial overview never replaces base-level data.
         # Limit uncommon expensive shapes: read generated levels from source tiles.
@@ -172,6 +204,27 @@ class _Plane:
             else:
                 bands.append((top, bottom, spans))
         return bands
+
+
+def _verify_redundant_overviews(base, unmarked):
+    # Some CZI writers omit the pyramid flag. Only discard reduced XY data
+    # when native pixels cover its entire area in the same acquisition.
+    def acquisition(e):
+        axes = sorted((d, a, n) for d, a, n in zip(e.dims, e.start, e.shape)
+                      if d not in ("X", "Y") and (a != 0 or n != 1))
+        return e.scene_index, e.pixel_type, tuple(axes)
+
+    grouped = defaultdict(list)
+    for e in base:
+        grouped[acquisition(e)].append(_Tile.from_entry(e))
+    planes = {key: _Plane(tiles) for key, tiles in grouped.items()}
+    for e in unmarked:
+        plane = planes.get(acquisition(e))
+        xy_reduced = {"X", "Y"} <= set(e.dims) and all(
+            0 < stored < size if d in ("X", "Y") else stored == size
+            for d, stored, size in zip(e.dims, e.stored_shape, e.shape))
+        if not xy_reduced or plane is None or not plane.covers(_Tile.from_entry(e)):
+            raise ValueError("CZI 含非标准重采样图块，无法确认其范围内的全部原始像素，请从 ZEN 导出 OME-TIFF。")
 
 
 @dataclass(frozen=True)

@@ -12,7 +12,7 @@ from cfos.core.czi import list_czi_scenes
 from cfos.core.slide_io import open_slide
 
 
-def write_czi(path, planes, *, metadata=None, compression=0, file_part=0):
+def write_czi(path, planes, *, metadata=None, compression=0, file_part=0, logical_shapes=None):
     """planes are (scene, channel, z, absolute x, absolute y, YX ndarray[, time])."""
     def segment(sid, body):
         padding = (-len(body)) % 32
@@ -35,11 +35,14 @@ def write_czi(path, planes, *, metadata=None, compression=0, file_part=0):
     for s, c, z, x, y, pixels, *time in planes:
         h, w = pixels.shape
         m = mosaic_ids.setdefault((s, x, y), len(mosaic_ids))
-        dims = [(b"X", x, w), (b"Y", y, h), (b"Z", z, 1), (b"C", c, 1),
+        logical_h, logical_w = (logical_shapes or {}).get(len(entries), (h, w))
+        dims = [(b"X", x, logical_w), (b"Y", y, logical_h), (b"Z", z, 1), (b"C", c, 1),
                 (b"T", time[0] if time else 0, 1), (b"S", s, 1), (b"M", m, 1)]
         entry = struct.pack("<2siqiiBB4xi", b"DV", {1: 0, 2: 1}[pixels.itemsize], offset,
                             file_part, compression, 0, 0, len(dims))
-        entry += b"".join(struct.pack("<4siifi", name, start, size, 0., size) for name, start, size in dims)
+        stored = {b"X": w, b"Y": h}
+        entry += b"".join(struct.pack("<4siifi", name, start, size, 0., stored.get(name, size))
+                          for name, start, size in dims)
         raw = pixels.tobytes()
         if compression == 4:
             raw = imagecodecs.jpegxr_encode(pixels)
@@ -94,6 +97,32 @@ class CziReaderTest(unittest.TestCase):
                 write_czi(self.path, [(0, 0, 0, -42, -81, plane)], compression=compression)
                 with closing(open_slide(self.path)) as slide:
                     np.testing.assert_array_equal(slide.read(0)[0], plane)
+
+    def test_unmarked_thumbnail_over_mosaic_never_overwrites_native_pixels(self):
+        # Two scenes share XY coordinates and contain deliberately incorrect thumbnails.
+        planes, logical_shapes = [], {}
+        for s in (1, 4):
+            planes.extend([(s, 0, 0, -7, 10, self.a + s), (s, 0, 0, 0, 10, self.a + s + 10)])
+            logical_shapes[len(planes)] = (5, 14)
+            planes.append((s, 0, 0, -7, 10, np.zeros((2, 7), self.a.dtype)))
+        write_czi(self.path, planes, logical_shapes=logical_shapes)
+        self.assertEqual([s.scene_id for s in list_czi_scenes(self.path)], [1, 4])
+        with closing(open_slide(self.path, scene_id=4)) as slide:
+            expected = np.column_stack((self.a + 4, self.a + 14))
+            np.testing.assert_array_equal(slide.read(0)[0], expected)
+
+    def test_unmarked_thumbnail_requires_native_coverage_in_same_acquisition(self):
+        native = (0, 0, 0, -7, 10, self.a)
+        thumbnail = (0, 0, 0, -7, 10, self.a[:2, :2])
+        for other in [(0, 0, 0, 1, 10, self.a),  # gap on X
+                      (0, 0, 0, 0, 11, self.a),  # incomplete top row
+                      (1, 0, 0, 0, 10, self.a),  # other scene
+                      (0, 1, 0, 0, 10, self.a),  # other channel
+                      (0, 0, 1, 0, 10, self.a)]:  # other Z
+            with self.subTest(geometry=other[:5]):
+                write_czi(self.path, [native, other, thumbnail], logical_shapes={2: (5, 14)})
+                with self.assertRaisesRegex(ValueError, "原始像素"):
+                    list_czi_scenes(self.path)
 
     def test_first_absolute_time_and_incomplete_channels(self):
         planes = [(0, c, 0, 0, 0, self.a + 100*t+c, t) for t in (8, 5) for c in (0, 1)]

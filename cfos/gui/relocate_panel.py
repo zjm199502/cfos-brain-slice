@@ -8,7 +8,8 @@ from qtpy.QtWidgets import QFileDialog, QHBoxLayout, QMessageBox, QPushButton
 
 from ..core.relocate import IMAGE_EXT
 
-IMAGE_FILTER = "荧光全片图像 (" + " ".join("*" + suffix for suffix in sorted(IMAGE_EXT)) + ");;所有文件 (*)"
+_IMAGE_PATTERNS = " ".join(f"*{suffix} *{suffix.upper()}" for suffix in sorted(IMAGE_EXT))
+IMAGE_FILTER = f"荧光全片图像 ({_IMAGE_PATTERNS});;蔡司 ZEN 图像 (*.czi *.CZI);;所有文件 (*)"
 
 
 class RelocateMixin:
