@@ -111,6 +111,14 @@ def _curve(vertices, clearance, stride, voxel_px, ring):
     delta = smooth - points
     norm = np.hypot(delta[:, 0], delta[:, 1])
     points += delta * np.minimum(1, limit / np.maximum(norm, 1e-9))[:, None]
+    # The pointwise clearance constraint can leave small corners at its active
+    # limit. Fair those corners on a shorter scale with a smooth bounded step.
+    fair_sigma = min(.40 * subdivisions * voxel_px, (len(points)-1)/10)
+    if fair_sigma > .5:
+        fair = gaussian_filter1d(points, fair_sigma, axis=0, mode="wrap" if ring else "nearest") - points
+        bound = np.minimum(.22 * voxel_px, .65 * limit)
+        length = np.linalg.norm(fair, axis=1)
+        points += fair * (bound / np.hypot(bound, np.maximum(length, 1e-9)))[:,None]
     if ring:
         points = np.concatenate((points, points[:1]))
     return _thin(points)
