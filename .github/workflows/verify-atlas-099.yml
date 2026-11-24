@@ -1,0 +1,39 @@
+name: Verify atlas editing in the released Apple Silicon app
+on:
+  push:
+    branches: [codex/qa-atlas-099]
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: macos-15
+    timeout-minutes: 43
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Prepare the released Apple Silicon runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          test "$(uname -m)" = arm64
+          curl -fsSL --retry 3 -o app.txz https://github.com/zjm199502/cfos-brain-slice/releases/download/v0.9.0/FosFolio-0.9.0-macOS-arm64-Offline-Compact.tar.xz
+          echo 'ba1cb6f80de6a1846901d85fb80eda97230cad30d5f3a2ec0a6b3446331c2c85  app.txz' | shasum -a 256 -c -
+          tar -xf app.txz
+          curl -fsSL --retry 3 -o prev.zip https://raw.githubusercontent.com/zjm199502/cfos-brain-slice/1f1f09521a9c042fb32ee3a3ae619e5cb3016a69/updates/v0.9/macos/cfos-patch-0.9.8-macos.zip
+          echo "CFOS_BASE_APP=$RUNNER_TEMP/FosFolio脑片图册.app/Contents/Resources/app" >> "$GITHUB_ENV"
+          echo "PYTHONFAULTHANDLER=1" >> "$GITHUB_ENV"
+      - name: Upgrade staged client and drag an edge ten micrometres
+        run: '"$CFOS_BASE_APP/../python/bin/python3" -u verify_edge_update.py stage'
+      - name: Upgrade online client and repeat save, reopen and undo
+        shell: bash
+        run: |
+          set -euo pipefail
+          for i in {1..100}; do
+            if curl -fsSL https://raw.githubusercontent.com/zjm199502/cfos-brain-slice/installers/updates/v0.9/macos/latest.json -o "$RUNNER_TEMP/manifest.json" && python3 -c 'import json,sys;sys.exit(json.load(open(sys.argv[1]))["version"]!="0.9.9")' "$RUNNER_TEMP/manifest.json"; then
+              "$CFOS_BASE_APP/../python/bin/python3" -u verify_edge_update.py online && exit 0
+            fi
+            sleep 10
+          done
+          exit 1
