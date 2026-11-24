@@ -44,12 +44,12 @@ s, reg = w._reg_current(); assert reg.done and not reg.control_points
 sec, ds, lab0, _ = w._reg_lab; lab0 = lab0.copy(); H, W = lab0.shape
 px = w.slide.pixel_size_um
 
-# 选一个边界像素（脑片中下部），作为拖动起点
-bnd = w._reg_bnd
-ys, xs = np.nonzero(bnd[int(H * 0.70):int(H * 0.80), int(W * 0.40):int(W * 0.46)])
-k = len(ys) // 2
-iy, ix = ys[k] + int(H * 0.70), xs[k] + int(W * 0.40)
-x0, y0 = s.bbox0[0] + (ix + 0.5) * ds, s.bbox0[1] + (iy + 0.5) * ds
+# 在可见矢量边界上选一个线段中点。
+from cfos.core.edge_drag import snap_path
+path = max(w._reg_paths, key=len)
+k = len(path)//3
+iy, ix = (path[k-1]+path[k])*.5
+x0, y0 = s.bbox0[0]+ix*ds, s.bbox0[1]+iy*ds
 # 放大到这一带
 w.viewer.camera.center = (y0, x0); w.viewer.camera.zoom = 0.12; pump(0.5)
 shot("b1_before")
@@ -57,7 +57,7 @@ shot("b1_before")
 # 开启拖动模式
 w.reg_drag_btn.setChecked(True); pump(0.5)
 assert w._reg_drag_on and w.viewer.camera.mouse_pan is False
-w.reg_radius.setValue(8)   # 800 µm
+w.reg_radius.setValue(800)
 shift_um = 150.0
 dx, dy = shift_um / px, 0.6 * shift_um / px
 # 用模拟的 napari 拖动事件走一遍回调（按下 → 移动 → 松开）
@@ -68,7 +68,7 @@ gen = w._reg_drag(w.viewer, ev)
 next(gen)
 assert w._drag is not None and "拖动中" in w.viewer.layers
 sx, sy = w._drag["src"]; print("snap", (x0, y0), "->", (sx, sy))
-assert abs(sx - x0) < 1e-6 and abs(sy - y0) < 1e-6
+assert snap_path(w._reg_paths,(sx-s.bbox0[0])/ds,(sy-s.bbox0[1])/ds,1e-3) is not None
 for f in (0.3, 0.6, 1.0):
     ev.type, ev.position = "mouse_move", (y0 + dy * f, x0 + dx * f)
     try:
@@ -85,7 +85,7 @@ except StopIteration:
 pump(1.5)
 s, reg = w._reg_current()
 print("control points", reg.control_points)
-assert len(reg.control_points) == 1 and len(reg.control_points[0]) == 5
+assert len(reg.control_points) == 1 and reg.control_points[0][5] == 2
 assert "拖动中" not in w.viewer.layers and "修正箭头" in w.viewer.layers and len(w.viewer.layers["修正箭头"].data) == 1
 lab1 = w._reg_lab[2]
 changed = lab1 != lab0
@@ -95,9 +95,10 @@ assert n_changed > 50
 cy, cx = np.nonzero(changed)
 dist = np.hypot((cy + 0.5) * ds + s.bbox0[1] - (y0 + dy), (cx + 0.5) * ds + s.bbox0[0] - (x0 + dx)) * px
 print("max distance of changed px from drag end: %.0f µm" % dist.max())
-assert dist.max() <= 800 + 3 * ds * px
+assert dist.max() <= 800 + np.hypot(dx,dy)*px + 3 * ds * px
 # 拖动起点处的脑区现在应该出现在终点处（边界被拖过去了）
-assert lab1[int((y0 + dy - s.bbox0[1]) / ds), int((x0 + dx - s.bbox0[0]) / ds)] == lab0[iy, ix] or True
+final_x, final_y = sx+dx+3, sy+dy-3
+assert snap_path(w._reg_paths,(final_x-s.bbox0[0])/ds,(final_y-s.bbox0[1])/ds,1.) is not None
 shot("b3_after")
 
 # 撤销 → 回到原样
@@ -129,6 +130,6 @@ print("cells whose region changed:", moved, "of", len(c0)); assert moved > 0
 # 重新打开项目：修正仍在
 p2 = Project.load(proj)
 cps = p2.images[0].sections[0].registration["control_points"]
-assert len(cps) == 1 and len(cps[0]) == 5
+assert len(cps) == 1 and cps[0][5] == 2
 shot("b4_final")
 print("DONE")

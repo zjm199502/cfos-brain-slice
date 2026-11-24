@@ -6,12 +6,13 @@ from .layout import fit_window
 from qtpy.QtCore import Qt, QTimer
 from qtpy.QtWidgets import (
     QCheckBox, QComboBox, QFormLayout, QGroupBox, QHBoxLayout, QLabel, QPushButton, QSlider,
-    QVBoxLayout, QWidget,
+    QVBoxLayout, QWidget, QSpinBox,
 )
 
 from ..core import registration as R
 from ..core.atlas import load_atlas, region_boundaries, region_colors
-from ..core.atlas_contours import boundary_paths
+from ..core.atlas_contours import registration_paths
+from ..core.edge_drag import deform_paths, is_fine, snap_path
 from ..core.coloc import nucleus_channel
 from ..core.regions import _thumb_geometry
 from .atlas_outline import set_outline_paths
@@ -90,16 +91,24 @@ class RegistrationMixin:
         f.addRow(self.reg_use_nl)
         L.addWidget(box)
 
+        from .hippocampal_preview import preview_section
+        hippocampus = QPushButton("预览当前脑片的海马局部精修…")
+        hippocampus.clicked.connect(lambda: preview_section(self))
+        L.addWidget(hippocampus)
+
         box2 = QGroupBox("局部修正（手动矫正脑区边界）"); v2 = QVBoxLayout(box2)
         self.reg_drag_btn = QPushButton("拖动边界修正（按住边界线拖到正确位置）"); self.reg_drag_btn.setCheckable(True)
         self.reg_drag_btn.setMinimumHeight(34); self.reg_drag_btn.toggled.connect(self._reg_set_drag_mode)
         v2.addWidget(self.reg_drag_btn)
         rr = QHBoxLayout(); rr.addWidget(QLabel("影响范围"))
-        self.reg_radius = QSlider(Qt.Horizontal); self.reg_radius.setRange(2, 40); self.reg_radius.setValue(8)
-        self.reg_radius_lab = QLabel("800 µm"); self.reg_radius_lab.setMinimumWidth(60)
-        self.reg_radius.valueChanged.connect(lambda v: self.reg_radius_lab.setText(f"{v * 100} µm"))
-        self.reg_radius.setToolTip("拖动一个点时，距离它多远以内的边界会跟着动。小结构用小范围，大面积偏移用大范围。")
-        rr.addWidget(self.reg_radius, 1); rr.addWidget(self.reg_radius_lab); v2.addLayout(rr)
+        self.reg_radius = QSpinBox()
+        self.reg_radius.setRange(10, 4000)
+        self.reg_radius.setSingleStep(10)
+        self.reg_radius.setValue(800)
+        self.reg_radius.setSuffix(" µm")
+        self.reg_radius.setToolTip("沿拖动轨迹的影响半径。放大后可输入 10 µm 微调细边；内置图谱体素为 25 µm。")
+        self.reg_radius.valueChanged.connect(self._reg_radius_changed)
+        rr.addWidget(self.reg_radius, 1); v2.addLayout(rr)
         r2 = QHBoxLayout()
         b = QPushButton("撤销上一个修正"); b.clicked.connect(self._reg_undo_point); r2.addWidget(b)
         b = QPushButton("添加修正点"); b.setToolTip("另一种方式：先在边界线上点一下加点，再切到“选择”模式把点拖走。")
@@ -325,8 +334,18 @@ class RegistrationMixin:
         self._reg_lab = (s, ds, lab_t, hemi_t)
         self._reg_bnd = region_boundaries(lab_t)
         plane = R.adjusted_plane(reg)
-        voxel_px = min(W / max(np.linalg.norm(plane.u), 1e-6), H / max(np.linalg.norm(plane.v), 1e-6))
-        paths = boundary_paths(lab_t, voxel_px)
+        legacy = tuple(tuple(p) for p in reg.control_points if not is_fine(p))
+        key = (id(self.project), self.image.key, s.name, W, H, ds, tuple(plane.to_list()), legacy, reg.nonlinear)
+        cached = getattr(self, "_atlas_curves", None)
+        if cached is None or cached[0] != key or cached[1] is not warp:
+            self._atlas_curves = (key, warp, registration_paths(reg, W, H, warp, ds*self.slide.pixel_size_um))
+        paths = self._atlas_curves[2]
+        for point in reg.control_points:
+            if is_fine(point):
+                paths = deform_paths(paths, point, W, H)
+        if reg.orientation == "r180":
+            paths = [np.array([H, W], np.float32) - path for path in paths]
+        self._reg_paths = paths
         rgba = np.empty(lab_t.shape + (4,), np.uint8)
         rgba[..., :3] = region_colors(lab_t)
         rgba[..., 3] = np.where(lab_t > 0, 28, 0)
@@ -400,13 +419,13 @@ class RegistrationMixin:
             r = float(cp[4]) if len(cp) > 4 else 0.0
             x, y = self._from_norm(s, reg, ds_, dt)
             sx, sy = self._from_norm(s, reg, ss, tt)
-            pts.append([y, x]); self._ctrl_src.append((ss, tt, r))
+            pts.append([y, x]); self._ctrl_src.append((ss, tt, *cp[4:]))
             lines.append(np.array([[sy, sx], [y, x]], float))
         lw = max(2.0, 12 / self.slide.pixel_size_um)
         kw = dict(name="修正箭头", shape_type="line", edge_color="#ff3b30", edge_width=lw, opacity=0.9)
         arrows = self.viewer.add_shapes(lines, **kw) if lines else self.viewer.add_shapes(ndim=2, **kw)
         arrows.editable = False
-        size = 120 / self.slide.pixel_size_um
+        size = min(120., self.reg_radius.value() * .45) / self.slide.pixel_size_um
         layer = self.viewer.add_points(np.array(pts).reshape(-1, 2), name="修正点", size=size,
                                        face_color="#ff3b30", border_color="white")
         layer.events.data.connect(self._reg_points_changed)
@@ -414,10 +433,15 @@ class RegistrationMixin:
             layer.mode = "pan_zoom"; layer.mouse_pan = False   # 拖动模式下，鼠标拖动用来拖边界，不平移画面
         self.viewer.layers.selection.active = layer
 
+    def _reg_radius_changed(self):
+        if "修正点" in self.viewer.layers:
+            size = min(120., self.reg_radius.value() * .45) / self.slide.pixel_size_um
+            self.viewer.layers["修正点"].size = size
+
     def _reg_radius_norm(self, s):
         """当前“影响范围”（µm）→ 以缩略图宽度为单位的半径。"""
         ds, H, W, _ = self._reg_geometry(s)
-        return self.reg_radius.value() * 100.0 / (self.slide.pixel_size_um * ds) / W
+        return self.reg_radius.value() / (self.slide.pixel_size_um * ds) / W
 
     # ---------------------------------------------------------- 拖动边界
     def _reg_set_drag_mode(self, on: bool):
@@ -466,23 +490,15 @@ class RegistrationMixin:
         ix, iy = (x - s.bbox0[0]) / ds, (y - s.bbox0[1]) / ds
         if not (0 <= iy < H and 0 <= ix < W):
             return None
-        bnd = getattr(self, "_reg_bnd", None)
-        tol = max(2, int(round(150.0 / (self.slide.pixel_size_um * ds))))
-        sx, sy = x, y
-        if bnd is not None:
-            y0, y1 = max(0, int(iy) - tol), min(H, int(iy) + tol + 1)
-            x0, x1 = max(0, int(ix) - tol), min(W, int(ix) + tol + 1)
-            ys, xs = np.nonzero(bnd[y0:y1, x0:x1])
-            if len(ys):
-                d2 = (ys + y0 + 0.5 - iy) ** 2 + (xs + x0 + 0.5 - ix) ** 2
-                k = int(np.argmin(d2))
-                if d2[k] <= tol * tol:
-                    sx, sy = s.bbox0[0] + (xs[k] + x0 + 0.5) * ds, s.bbox0[1] + (ys[k] + y0 + 0.5) * ds
-        if lab[min(H - 1, int(iy)), min(W - 1, int(ix))] == 0 and (sx, sy) == (x, y):
-            self.statusBar().showMessage("请在脑组织内的边界线上按下再拖动。", 4000)
+        radius_um = self.reg_radius.value()
+        tol = min(150., radius_um) / (self.slide.pixel_size_um * ds)
+        hit = snap_path(self._reg_paths, ix, iy, tol)
+        if hit is None:
+            self.statusBar().showMessage("请放大后按住要移动的黄色轮廓线。", 4000)
             return None
-        self._drag = {"src": (sx, sy)}
-        lw = max(2.0, 12 / self.slide.pixel_size_um)
+        sx, sy = s.bbox0[0] + hit[0]*ds, s.bbox0[1] + hit[1]*ds
+        self._drag = {"src": (sx, sy), "press": (x, y)}
+        lw = min(8., radius_um * .12) / self.slide.pixel_size_um
         if "拖动中" in self.viewer.layers:
             self.viewer.layers.remove("拖动中")
         self.viewer.add_shapes(self._drag_shapes(sx, sy, sx, sy), shape_type=["line", "ellipse"], name="拖动中",
@@ -494,27 +510,31 @@ class RegistrationMixin:
         if self._drag is None or "拖动中" not in self.viewer.layers:
             return
         sx, sy = self._drag["src"]
-        self.viewer.layers["拖动中"].data = self._drag_shapes(sx, sy, x, y)
+        px, py = self._drag["press"]
+        self.viewer.layers["拖动中"].data = self._drag_shapes(sx, sy, sx+x-px, sy+y-py)
 
     def _drag_shapes(self, sx, sy, x, y):
         """拖动时的提示：起点到当前位置的线 + 以当前位置为中心的“影响范围”圆。"""
-        r = self.reg_radius.value() * 100.0 / self.slide.pixel_size_um
-        return [np.array([[sy, sx], [y, x]], float), np.array([[y, x], [r, r]], float)]   # 椭圆：中心 + 半径
+        r = self.reg_radius.value() / self.slide.pixel_size_um
+        return [np.array([[sy, sx], [y, x]], float), np.array([[y-r,x-r],[y-r,x+r],[y+r,x+r],[y+r,x-r]])]
 
     def _reg_end_drag(self, x, y):
         if self._drag is None:
             return
-        sx, sy = self._drag.pop("src"); self._drag = None
+        sx, sy = self._drag["src"]
+        px, py = self._drag["press"]
+        x, y = sx + (x-px), sy + (y-py)
+        self._drag = None
         if "拖动中" in self.viewer.layers:
             self.viewer.layers.remove("拖动中")
         s, reg = self._reg_current()
         if s is None or not reg.done:
             return
-        if np.hypot(x - sx, y - sy) < 20.0 / self.slide.pixel_size_um:   # 小于 20 µm 当作误点
+        if np.hypot(x-sx, y-sy) * self.slide.pixel_size_um < min(2., self.reg_radius.value()/8):
             return
         ss, tt = self._to_norm(s, reg, sx, sy)
         u, v = self._to_norm(s, reg, x, y)
-        reg.control_points = list(reg.control_points) + [[float(ss), float(tt), float(u), float(v), float(self._reg_radius_norm(s))]]
+        reg.control_points = list(reg.control_points) + [[float(ss), float(tt), float(u), float(v), float(self._reg_radius_norm(s)), 2]]
         reg.status = "已手动调整"
         self._reg_reviewed(reg)
         s.registration = reg.to_dict()
@@ -557,7 +577,7 @@ class RegistrationMixin:
         if action == "added":
             for i in range(len(self._ctrl_src), len(data)):
                 y, x = data[i][-2], data[i][-1]
-                self._ctrl_src.append(self._to_norm(s, reg, x, y) + (rad,))
+                self._ctrl_src.append(self._to_norm(s, reg, x, y) + (rad, 2))
         elif action == "removed":
             idx = sorted(getattr(event, "data_indices", ()) or ())
             for i in reversed(idx):
@@ -568,15 +588,15 @@ class RegistrationMixin:
         self._ctrl_src = self._ctrl_src[:len(data)]
         while len(self._ctrl_src) < len(data):
             y, x = data[len(self._ctrl_src)][-2:]
-            self._ctrl_src.append(self._to_norm(s, reg, x, y) + (rad,))
+            self._ctrl_src.append(self._to_norm(s, reg, x, y) + (rad, 2))
         cps = []
-        for (ss, tt, r), p in zip(self._ctrl_src, data):
+        for (ss, tt, *extra), p in zip(self._ctrl_src, data):
             u, v = self._to_norm(s, reg, p[-1], p[-2])
-            cps.append([float(ss), float(tt), float(u), float(v)] + ([float(r)] if r > 0 else []))
+            cps.append([float(ss), float(tt), float(u), float(v)] + extra)
         # 箭头跟着点走
         if "修正箭头" in self.viewer.layers:
             lines = []
-            for (ss, tt, _r), p in zip(self._ctrl_src, data):
+            for (ss, tt, *_), p in zip(self._ctrl_src, data):
                 sx, sy = self._from_norm(s, reg, ss, tt)
                 lines.append(np.array([[sy, sx], [p[-2], p[-1]]], float))
             try:

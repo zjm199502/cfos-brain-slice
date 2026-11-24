@@ -815,7 +815,8 @@ class MainWindow(ProcessingScopeMixin, UpdateMixin, TeachingMixin, FigureMixin, 
         self.image_layers = []
         self._ft_patch = None
         self._blind_context = None
-        self._drag = self._reg_lab = self._reg_bnd = None
+        self._drag = self._reg_lab = self._reg_bnd = self._atlas_curves = None
+        self._reg_paths = []
         self._reg_timer.stop()
         if self._reg_drag_on:
             self._reg_set_drag_mode(False)

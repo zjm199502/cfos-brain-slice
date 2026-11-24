@@ -83,21 +83,21 @@ def _curve(vertices, clearance, stride, voxel_px, ring):
     corners = np.column_stack(np.divmod(ids, stride)).astype(np.float32)
     if len(corners) == 2:
         return corners
-    # Smooth on a uniform arclength grid, with half steps for subpixel turns.
+    # Smooth at quarter-pixel intervals on a uniform arclength grid.
     # Pins at junctions (and image edges) preserve registration coordinates.
     # Short open chains can themselves return to their pinned junction.
-    points = np.empty((2 * len(corners) - 1, 2), np.float32)
-    points[::2] = corners
-    points[1::2] = (corners[:-1] + corners[1:]) * 0.5
+    subdivisions = 4
+    t = np.arange(subdivisions, dtype=np.float32) / subdivisions
+    samples = corners[:-1, None, :] + (corners[1:] - corners[:-1])[:, None, :] * t[None, :, None]
+    points = np.concatenate((samples.reshape(-1, 2), corners[-1:]))
     gaps = np.array([clearance[v] for v in vertices], np.float32)
-    limit = np.empty(len(points), np.float32)
-    limit[::2] = gaps
-    limit[1::2] = np.minimum(gaps[:-1], gaps[1:])
+    limit = np.r_[np.repeat(np.minimum(gaps[:-1], gaps[1:]), subdivisions), gaps[-1]]
+    limit[::subdivisions] = gaps
     # Displacement is limited by both atlas resolution and local label
     # thickness. Adjacent sides of a narrow ribbon retain separate traces.
     limit *= 0.30
     np.minimum(limit, 0.55 * voxel_px, out=limit)
-    sigma = min(2 * voxel_px, max(0.9, (len(points) - 1) / 9))
+    sigma = min(subdivisions * 1.2 * voxel_px, max(1.8, (len(points) - 1) / 9))
     if ring:
         points, limit = points[:-1], limit[:-1]
         smooth = gaussian_filter1d(points, sigma, axis=0, mode="wrap")
@@ -131,3 +131,21 @@ def boundary_paths(labels: np.ndarray, voxel_px: float = 3.0) -> list[np.ndarray
     neighbours, clearance = _boundary_graph(labels)
     stride = labels.shape[1] + 1
     return [_curve(ids, clearance, stride, voxel_px, ring) for ids, ring in _chains(neighbours)]
+
+
+def registration_paths(reg, width, height, warp, pixel_um):
+    """Sample the physical plane more finely, then smooth its shared interfaces."""
+    from . import registration as R
+    from .edge_drag import is_fine
+    from dataclasses import replace
+    base = replace(reg, control_points=[p for p in reg.control_points if not is_fine(p)])
+    # Typically 8 -> 4 µm. Use tiled sampling and cap label pixels on large slides.
+    factor = min(2.0, max(1., pixel_um / 4.), max(1., np.sqrt(6_000_000 / (width*height))))
+    nw, nh = round(width*factor), round(height*factor)
+    fx, fy = nw/width, nh/height
+    lab = R.sample_grid(base, width, height, warp, (np.arange(nw)+.5)/fx,
+                        (np.arange(nh)+.5)/fy, ("annotation",))["annotation"]
+    plane = R.adjusted_plane(base)
+    voxel_px = min(nw/max(np.linalg.norm(plane.u),1e-6), nh/max(np.linalg.norm(plane.v),1e-6))
+    scale = np.array([fy,fx], np.float32)
+    return [p/scale for p in boundary_paths(lab,voxel_px)]

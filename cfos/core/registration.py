@@ -518,8 +518,54 @@ def refine_ap(reg: Registration, mask_oriented: np.ndarray, img_oriented: np.nda
     return {"shift_um": best, "scores": dict(sorted(scores.items())), "edge": abs(best) >= AP_RANGE_UM}
 
 
+def registered_samples(reg, W, H, warp, x, y, which=("annotation", "hemispheres")):
+    """Sample the original atlas at arbitrary oriented section corner coordinates."""
+    from .atlas import SHAPE_ASR
+    from .edge_drag import is_fine, transport
+    x, y = np.broadcast_arrays(np.asarray(x, dtype=float), np.asarray(y, dtype=float))
+    for point in reversed(reg.control_points):
+        if is_fine(point):
+            x, y = transport(x, y, point, W, H, inverse=True)
+    legacy = [p for p in reg.control_points if not is_fine(p)]
+    manual = tps_warp_cached(legacy, W, H)
+    for field in (manual, warp if reg.nonlinear else None):
+        if field is not None:
+            coords = [y - .5, x - .5]
+            x = x + ndi.map_coordinates(field[0], coords, order=1, mode="nearest")
+            y = y + ndi.map_coordinates(field[1], coords, order=1, mode="nearest")
+    plane = adjusted_plane(reg)
+    s, t = x / W, y / H
+    coords = [size - 1 - (plane.o[k] + s * plane.u[k] + t * plane.v[k])
+              for size, k in zip(SHAPE_ASR, (1, 2, 0))]
+    atlas = load_atlas()
+    result = {k: ndi.map_coordinates(getattr(atlas, k), coords, order=0, mode="constant", cval=0)
+              for k in which}
+    if "hemispheres" in result and reg.mirror:
+        h = result["hemispheres"]
+        result["hemispheres"] = np.where(h == 1, 2, np.where(h == 2, 1, h)).astype(h.dtype)
+    return result
+
+
+def sample_grid(reg, W, H, warp, xs, ys, which):
+    """Bound temporary coordinate memory independently of export and preview size."""
+    atlas = load_atlas()
+    out = {k: np.empty((len(ys), len(xs)), getattr(atlas, k).dtype) for k in which}
+    rows = max(1, 192000 // max(1, len(xs)))
+    for start in range(0, len(ys), rows):
+        sl = slice(start, start + rows)
+        values = registered_samples(reg, W, H, warp, xs[None, :], ys[sl, None], which)
+        for k in which:
+            out[k][sl] = values[k]
+    return out
+
+
 def label_maps(reg: Registration, W: int, H: int, warp=None):
     """在“方向已校正”的缩略图坐标下，生成脑区标签图和半脑图。"""
+    from .edge_drag import is_fine
+    if any(is_fine(p) for p in reg.control_points):
+        r = sample_grid(reg, W, H, warp, np.arange(W) + .5, np.arange(H) + .5,
+                        ("annotation", "hemispheres"))
+        return r["annotation"], r["hemispheres"]
     pl = adjusted_plane(reg)
     total = None
     t = tps_warp_cached(reg.control_points, W, H)
@@ -546,6 +592,12 @@ def assign_cells(x0: np.ndarray, y0: np.ndarray, section: Section, reg: Registra
     """细胞坐标（第 0 层像素）→ (脑区 index, 半脑 1/2)。"""
     H, W = shape_hw
     lab, hemi = label_maps(reg, W, H, warp)
+    return cell_labels(x0, y0, section, reg, ds, lab, hemi, warp)
+
+
+def cell_labels(x0, y0, section, reg, ds, lab, hemi, warp=None, excluded=None):
+    from .edge_drag import is_fine, transport
+    H, W = lab.shape
     bx, by = section.bbox0[0], section.bbox0[1]
     px = (np.asarray(x0) - bx) / ds
     py = (np.asarray(y0) - by) / ds
@@ -553,7 +605,25 @@ def assign_cells(x0: np.ndarray, y0: np.ndarray, section: Section, reg: Registra
         px, py = W - 1 - px, H - 1 - py
     ix = np.clip(np.round(px).astype(int), 0, W - 1)
     iy = np.clip(np.round(py).astype(int), 0, H - 1)
-    return lab[iy, ix], hemi[iy, ix]
+    regions, sides = lab[iy, ix], hemi[iy, ix]
+    edits = [point for point in reg.control_points if is_fine(point)]
+    if edits:
+        # Legacy cell indexing used rounded thumbnail pixels. Only recompute cells
+        # within new stroke supports or whose old pixel centre was affected.
+        x, y = (np.asarray(x0)-bx)/ds, (np.asarray(y0)-by)/ds
+        if reg.orientation == "r180":
+            x, y = W-x, H-y
+        moved = np.zeros(x.shape, bool)
+        for p in edits:
+            for cx, cy in ((x,y), (ix+.5,iy+.5)):
+                sx, sy = transport(cx, cy, p, W, H, inverse=True)
+                moved |= (sx != cx) | (sy != cy)
+        if moved.any():
+            values = registered_samples(reg,W,H,warp,x[moved],y[moved])
+            regions[moved], sides[moved] = values["annotation"], values["hemispheres"]
+    if excluded is not None:
+        regions[excluded[iy, ix]] = 0
+    return regions, sides
 
 
 HEMI_NAMES = {0: "", 1: "左", 2: "右"}

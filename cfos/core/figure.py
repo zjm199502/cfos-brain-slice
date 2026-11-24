@@ -188,22 +188,22 @@ def region_overlay(project: Project, im: ImageEntry, sl: Slide, s, bbox0, out_hw
         w = np.load(wp)
         if w.shape[1:] == th:
             warp = (w[0], w[1])
-    lab, _ = R.label_maps(reg, th[1], th[0], warp)
-    lab = R.orient(lab, reg.orientation)           # 回到原图方向
     x, y, w, h = bbox0
-    bx, by = s.bbox0[0], s.bbox0[1]
-    c0, r0 = int((x - bx) / tds), int((y - by) / tds)
-    c1, r1 = int(np.ceil((x + w - bx) / tds)), int(np.ceil((y + h - by) / tds))
-    c0, r0 = max(0, c0), max(0, r0)
-    c1, r1 = min(lab.shape[1], max(c1, c0 + 1)), min(lab.shape[0], max(r1, r0 + 1))
-    crop = lab[r0:r1, c0:c1]
-    # 截图框可能超出脑片范围：补 0
-    full = np.zeros((max(1, int(np.ceil(h / tds))), max(1, int(np.ceil(w / tds)))), lab.dtype)
-    oy, ox = max(0, int((by - y) / tds)), max(0, int((bx - x) / tds))
-    hh, ww = min(crop.shape[0], full.shape[0] - oy), min(crop.shape[1], full.shape[1] - ox)
-    if hh > 0 and ww > 0:
-        full[oy:oy + hh, ox:ox + ww] = crop[:hh, :ww]
-    up = _smooth_upscale(full, out_hw)
+    bx, by = s.bbox0[:2]
+    H, W = out_hw
+    # Sample the precise crop in physical coordinates; never enlarge a coarsely
+    # rounded crop. Bound whole-slide memory while retaining fine ROI resolution.
+    scale = min(1., 4096 / max(H, W))
+    mh, mw = max(1,round(H*scale)), max(1,round(W*scale))
+    xs = (x-bx + (np.arange(mw)+.5)*w/mw) / tds
+    ys = (y-by + (np.arange(mh)+.5)*h/mh) / tds
+    valid_x, valid_y = (xs >= 0) & (xs < th[1]), (ys >= 0) & (ys < th[0])
+    if reg.orientation == "r180":
+        xs, ys = th[1]-xs, th[0]-ys
+    sampled = R.sample_grid(reg,th[1],th[0],warp,xs,ys,("annotation",))["annotation"]
+    sampled[:, ~valid_x] = 0
+    sampled[~valid_y] = 0
+    up = sampled if sampled.shape == (H,W) else np.asarray(Image.fromarray(sampled).resize((W,H), Image.NEAREST))
     st = load_atlas().structures
     names = dict(zip(st["index"].to_numpy(), st["acronym"].to_numpy()))
     return up, names
@@ -260,7 +260,7 @@ def make_inset(project: Project, sl: Slide, s, bbox0, channels, width_px: int, i
 REGION_COLORS = {"白": (235, 235, 235), "黑": (0, 0, 0), "黄": (255, 220, 0)}
 
 
-def region_contours(lab: np.ndarray, cap: int = 1600, min_frac: float = 0.0) -> dict:
+def region_contours(lab: np.ndarray, cap: int = 4096, min_frac: float = 0.0) -> dict:
     """标签图 → 每个脑区的平滑轮廓线（输出像素坐标，(x, y)）。返回 {index: [N×2 数组, ...]}。
     在缩小到 cap 的标签图上找轮廓（快），先轻微平滑去掉锯齿，再按比例放大回输出大小。"""
     from scipy import ndimage as ndi
@@ -288,7 +288,7 @@ def region_contours(lab: np.ndarray, cap: int = 1600, min_frac: float = 0.0) -> 
         for c in measure.find_contours(mf, 0.5):
             if len(c) < 4:
                 continue
-            c = measure.approximate_polygon(c, 0.35)
+            c = measure.approximate_polygon(c, 0.12)
             xy = np.stack([(c[:, 1] - 1 + c0 + 0.5) * fx, (c[:, 0] - 1 + r0 + 0.5) * fy], 1)
             lines.append(xy.astype(np.float32))
         if lines:

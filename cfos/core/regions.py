@@ -173,19 +173,15 @@ def assign_regions(cells: pd.DataFrame, slide: Slide, sections: list[Section], r
             if w.shape[1:] == (H, W):
                 warp = (w[0], w[1])
         lab, hemi = R.label_maps(reg, W, H, warp)
-        lab = np.where(_excluded_mask(s, (H, W), ds, exclusions, reg.orientation), 0, lab)
+        excluded = _excluded_mask(s, (H, W), ds, exclusions, reg.orientation)
+        lab = np.where(excluded, 0, lab)
         # 只统计组织内的面积
         sel = cells["section"] == s.name
         if sel.any():
-            bx, by = s.bbox0[0], s.bbox0[1]
-            px = (cells.loc[sel, "x"].to_numpy() - bx) / ds
-            py = (cells.loc[sel, "y"].to_numpy() - by) / ds
-            if reg.orientation == "r180":
-                px, py = W - 1 - px, H - 1 - py
-            ix = np.clip(np.round(px).astype(int), 0, W - 1)
-            iy = np.clip(np.round(py).astype(int), 0, H - 1)
-            cells.loc[sel, "region_index"] = lab[iy, ix]
-            cells.loc[sel, "hemisphere"] = hemi[iy, ix]
+            regions, sides = R.cell_labels(cells.loc[sel, "x"].to_numpy(), cells.loc[sel, "y"].to_numpy(),
+                                            s, reg, ds, lab, hemi, warp, excluded)
+            cells.loc[sel, "region_index"] = regions
+            cells.loc[sel, "hemisphere"] = sides
         pix_mm2 = (ds * px0 / 1000.0) ** 2
         inten = cached_intensity_sums(slide, s, lab, hemi, ds, reg, results_dir, image_key, exclusions, wp,
                                       unmix_model) \
