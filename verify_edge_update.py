@@ -51,6 +51,8 @@ else:
     assert suite.countTestCases()>=4 and unittest.TextTestRunner(verbosity=2).run(suite).wasSuccessful()
     from cfos.core.fosfolio_adapter import preview_hippocampal_alignment
     check_gui=runpy.run_path(str(here/"edge_gui_qa.py"))["check_gui"]
-    with tempfile.TemporaryDirectory(dir=os.environ["RUNNER_TEMP"]) as td:check_gui(Path(td))
+    project_folder=Path(os.environ["CFOS_UPDATES_DIR"]).parent/"gui-project"
+    project_folder.mkdir()
+    check_gui(project_folder)
     print("PASS",platform,mode,flush=True)
 
