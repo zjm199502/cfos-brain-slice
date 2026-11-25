@@ -452,11 +452,12 @@ def _nonlinear_fit(reg: Registration, mask_oriented: np.ndarray, img_oriented: n
 
 
 # ------------------------------------------------------------------ 自动校正前后位置（v0.8.5）
-AP_RANGE_UM = 600.0     # 最多前后各挪这么多
+AP_RANGE_UM = 10_000    # 从初始切面沿法向向前、向后各搜索 1 cm
 AP_COARSE_UM = 200.0    # 粗找的步长
 AP_FINE_UM = 100.0      # 在最好的位置两侧再细找一步
 AP_MIN_GAIN = 1.05      # 相似度至少比原位置高 5% 才挪动（否则认为 DeepSlice 的位置已经够好）
 AP_BIG_UM = 500.0       # 挪动量达到这个值时提示人工检查
+AP_DISTINCT_UM = 800    # 比较相隔较远的切面，避免把一个峰的相邻采样误判为两个峰
 
 
 def similarity(ref: np.ndarray, img: np.ndarray, mask: np.ndarray) -> float:
@@ -473,13 +474,58 @@ def similarity(ref: np.ndarray, img: np.ndarray, mask: np.ndarray) -> float:
     return float((p[nz] * np.log(p[nz] / q[nz])).sum())
 
 
-def refine_ap(reg: Registration, mask_oriented: np.ndarray, img_oriented: np.ndarray, cancelled=None) -> dict:
-    """DeepSlice 给的前后位置（Bregma）常有几百微米的误差。这里把切面前后挪动试几个位置，
-    每个位置先做一次快速的仿射对齐（只用轮廓），再比较图谱模板与 DAPI 的相似度，取最像的位置，写进 reg.ap_auto。
+def _ap_candidates(reg, tissue, image, cancelled):
+    """Screen the whole physical interval cheaply; retain separate anatomical peaks."""
+    from .atlas import SHAPE_ASR
+    if cancelled is not None and cancelled():
+        raise InterruptedError
+    h, w = tissue.shape
+    scale = min(1., 224 / max(h, w))
+    zoom = (max(1, round(h * scale))/h, max(1, round(w * scale))/w)
+    target = ndi.zoom(tissue, zoom, order=0, mode="nearest", grid_mode=True).astype(bool)
+    small = ndi.zoom(image, zoom, order=1, mode="nearest", grid_mode=True)
+    if target.sum() < 100 or np.ptp(small[target]) == 0:
+        return []
+    h, w = target.shape
+    ty, tx = np.nonzero(target)
+    center = np.array([ty.mean(), tx.mean()])
+    spread = np.maximum([ty.std(), tx.std()], 1.)
+    limits = np.array(SHAPE_ASR)[[2, 0, 1]] - 1
+    scores = {}
+    for offset in range(-AP_RANGE_UM, AP_RANGE_UM + 1, int(AP_COARSE_UM)):
+        if cancelled is not None and cancelled():
+            raise InterruptedError
+        reg.ap_auto = offset / 25.
+        plane = adjusted_plane(reg)
+        corners = np.array([plane.o, plane.o + plane.u, plane.o + plane.v, plane.o + plane.u + plane.v])
+        if np.any(corners.max(axis=0) < 0) or np.any(corners.min(axis=0) > limits):
+            continue
+        batch = sample_plane(plane, w, h, ("annotation", "reference"))
+        mask = batch["annotation"] != 0
+        my, mx = np.nonzero(mask)
+        if len(my) < max(100, mask.size * .02):
+            continue
+        ratio = np.clip(np.array([my.std(), mx.std()]) / spread, .65, 1.55)
+        origin = np.array([my.mean(), mx.mean()]) - center * ratio
+        moved = ndi.affine_transform(mask, np.diag(ratio), offset=origin, order=0)
+        ref = ndi.affine_transform(batch["reference"], np.diag(ratio), offset=origin, order=1)
+        scores[offset] = dice(target, moved) * similarity(ref, small, target)
+    # Neighbouring planes are correlated. Take up to three distinct neighbourhoods
+    # for affine verification, along with the original high-resolution local window.
+    peaks = []
+    for offset in sorted(scores, key=lambda k: (-scores[k], abs(k))):
+        if scores[offset] > 0 and all(abs(offset-p) >= AP_DISTINCT_UM for p in peaks):
+            peaks.append(offset)
+            if len(peaks) == 3:
+                break
+    offsets = set(range(-600, 601, int(AP_COARSE_UM)))
+    for peak in peaks:
+        offsets.update((peak-AP_COARSE_UM, peak, peak+AP_COARSE_UM))
+    return sorted(offsets.intersection(scores), key=lambda k: (abs(k), k))
 
-    示例图（两张相邻脑片）实测：DeepSlice 给 +0.77 和 +0.11 mm，本方法给 +0.37 和 +0.41 mm；
-    不参与配准的 NeuN 通道“灰质/白质亮度比”从 2.0 左右提高到 2.6 左右。
-    返回 {"shift_um": 挪动量, "scores": {挪动量: 相似度}, "edge": 最好的位置是否在搜索范围边上}。"""
+
+def refine_ap(reg: Registration, mask_oriented: np.ndarray, img_oriented: np.ndarray, cancelled=None) -> dict:
+    """Screen ±10 mm, verify shortlisted planes with affine fits, then refine at 100 µm."""
     H, W = mask_oriented.shape
     fixed = ndi.gaussian_filter(mask_oriented.astype(np.float32), 2)
     f2 = ndi.gaussian_filter(img_oriented.astype(np.float32), 1) / 255.0
@@ -498,24 +544,47 @@ def refine_ap(reg: Registration, mask_oriented: np.ndarray, img_oriented: np.nda
                 scores[um] = 0.0
             else:
                 moving = ndi.gaussian_filter((lab > 0).astype(np.float32), 2)
-                w = _elastix(fixed, moving, f2, ndi.gaussian_filter(ref, 1) / float(ref.max()),
-                             bspline=False, iters=100)
+                try:
+                    w = _elastix(fixed, moving, f2, ndi.gaussian_filter(ref, 1) / float(ref.max()),
+                                 bspline=False, iters=100)
+                except RuntimeError:
+                    log.warning("候选切面 %+.0f µm 仿射对齐失败", um, exc_info=True)
+                    scores[um] = 0.0
+                    return 0.0
                 scores[um] = similarity(sample_plane(pl, W, H, ("reference",), warp=w)["reference"],
                                         img_oriented, mask_oriented)
         return scores[um]
 
-    n = int(round(AP_RANGE_UM / AP_COARSE_UM))
-    for k in range(-n, n + 1):
-        score(k * AP_COARSE_UM)
-    best = max(scores, key=scores.get)
-    for um in (best - AP_FINE_UM, best + AP_FINE_UM):
-        if abs(um) <= AP_RANGE_UM:
-            score(um)
-    best = max(scores, key=scores.get)
-    if best != 0.0 and scores[best] < scores[0.0] * AP_MIN_GAIN:
+    candidates = _ap_candidates(r2, mask_oriented, img_oriented, cancelled)
+    for um in candidates:
+        score(um)
+    scores.setdefault(0, 0.)
+    def ranking(k):
+        return scores[k], -abs(k)
+
+    best = max(scores, key=ranking)
+    if scores[best] > 0:
+        for um in (best - AP_FINE_UM, best + AP_FINE_UM):
+            if abs(um) <= AP_RANGE_UM:
+                score(um)
+    best = max(scores, key=ranking)
+    ambiguous = None
+    if abs(best) > 600:
+        rivals = [v for k, v in scores.items() if abs(k-best) >= AP_DISTINCT_UM]
+        if rivals and scores[best] < 1.20 * max(rivals):
+            # Multiple widely separated sections resemble this image. Show the
+            # remote offset for review; only apply an independently refined local fit.
+            ambiguous = best
+            local = max((k for k in scores if abs(k) <= 600), key=ranking)
+            for um in (local-AP_FINE_UM, local+AP_FINE_UM):
+                if abs(um) <= 600:
+                    score(um)
+            best = max((k for k in scores if abs(k) <= 600), key=ranking)
+    if scores[best] <= 0 or scores[best] < scores[0.0] * AP_MIN_GAIN:
         best = 0.0
     reg.ap_auto = best / 25.0
-    return {"shift_um": best, "scores": dict(sorted(scores.items())), "edge": abs(best) >= AP_RANGE_UM}
+    return {"shift_um": best, "scores": dict(sorted(scores.items())), "edge": abs(best) >= AP_RANGE_UM,
+            "ambiguous_um": ambiguous, "has_signal": max(scores.values()) > 0}
 
 
 def registered_samples(reg, W, H, warp, x, y, which=("annotation", "hemispheres")):

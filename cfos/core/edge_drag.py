@@ -6,6 +6,33 @@ def is_fine(point):
     return len(point) >= 6 and point[5] == 2 and point[4] > 0
 
 
+def landmark_targets(points, width, height):
+    """Current positions of protected landmarks after replaying saved edits."""
+    anchors = np.empty((0, 2))
+    for point in points:
+        if not is_fine(point):
+            continue
+        if len(anchors):
+            anchors = np.column_stack(transport(anchors[:, 0], anchors[:, 1], point, width, height))
+        if len(point) > 6 and point[6] == 1:
+            anchors = np.vstack((anchors, np.asarray(point[2:4]) * [width, height]))
+    return anchors
+
+
+def protected_radius(anchors, start, end, radius):
+    """Limit the new edit's swept support so it fixes the earlier targets."""
+    if not len(anchors):
+        return radius
+    v = np.subtract(end, start)
+    t = np.clip((anchors - start) @ v / max(v @ v, 1e-16), 0, 1)
+    d = np.linalg.norm(anchors - (start + t[:, None] * v), axis=1)
+    return min(radius, float(d.min()))
+
+
+def landmark_radius(points, start, end, width, height, radius):
+    return protected_radius(landmark_targets(points, width, height), start, end, radius)
+
+
 def transport(x, y, point, width, height, inverse=False):
     """Map a stroke in either direction. The support is its swept radius.
 
@@ -54,6 +81,8 @@ def deform_paths(paths, point, width, height):
     """Subdivide only segments that intersect the brush before bending them."""
     src = np.asarray(point[:2]) * (width, height)
     dst = np.asarray(point[2:4]) * (width, height)
+    if np.array_equal(src, dst):
+        return paths
     rad = point[4] * width
     low, high = np.minimum(src, dst) - rad, np.maximum(src, dst) + rad
     result = []

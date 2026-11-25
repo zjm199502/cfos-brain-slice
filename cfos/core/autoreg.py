@@ -98,6 +98,12 @@ def run(project, targets, nuc, nonlinear: bool = True, refine: bool = True, unif
             try:
                 res = R.refine_ap(reg, mo, io, cancelled)
                 um = res["shift_um"]
+                alternative = res.get("ambiguous_um")
+                if alternative is not None:
+                    warns.append(f"多个相距较远的切面相似。请复核远处候选（相对初始切面 {alternative/1000:+.2f} mm）；"
+                                 f"可用前后滑块再调 {(alternative-um)/1000:+.2f} mm 查看")
+                elif not res.get("has_signal", True):
+                    warns.append("图谱和组织缺少可比较的纹理，保留初始切面")
                 if um:
                     notes.append(f"前后位置自动向{'前' if um > 0 else '后'}校正了 {abs(um):.0f} µm")
                     if abs(um) >= R.AP_BIG_UM:
