@@ -1,0 +1,40 @@
+name: Verify simplified detection and colocalization on Apple Silicon
+on:
+  push:
+    branches: [codex/qa-cells-0911]
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: macos-15
+    timeout-minutes: 43
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Prepare the released Apple Silicon runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          test "$(uname -m)" = arm64
+          curl -fsSL --retry 3 -o app.txz https://github.com/zjm199502/cfos-brain-slice/releases/download/v0.9.0/FosFolio-0.9.0-macOS-arm64-Offline-Compact.tar.xz
+          echo 'ba1cb6f80de6a1846901d85fb80eda97230cad30d5f3a2ec0a6b3446331c2c85  app.txz' | shasum -a 256 -c -
+          tar -xf app.txz
+          curl -fsSL --retry 3 -o prev.zip https://raw.githubusercontent.com/zjm199502/cfos-brain-slice/fb7c6fc1a829502cda88728c926eb215852b1685/updates/v0.9/macos/cfos-patch-0.9.10-macos.zip
+          echo "CFOS_BASE_APP=$RUNNER_TEMP/FosFolio脑片图册.app/Contents/Resources/app" >> "$GITHUB_ENV"
+          echo "PYTHONFAULTHANDLER=1" >> "$GITHUB_ENV"
+      - name: Upgrade staged client and verify cell processing controls
+        run: '"$CFOS_BASE_APP/../python/bin/python3" -u verify_cells_update.py stage'
+      - name: Upgrade live client and verify cell processing controls
+        shell: bash
+        run: |
+          set -euo pipefail
+          for i in {1..100}; do
+            if curl -fsSL https://raw.githubusercontent.com/zjm199502/cfos-brain-slice/installers/updates/v0.9/macos/latest.json -o "$RUNNER_TEMP/manifest.json" && python3 -c 'import json,sys;sys.exit(json.load(open(sys.argv[1]))["version"]!="0.9.11")' "$RUNNER_TEMP/manifest.json"; then
+              "$CFOS_BASE_APP/../python/bin/python3" -u verify_cells_update.py online && exit 0
+            fi
+            sleep 10
+          done
+          exit 1
+
