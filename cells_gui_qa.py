@@ -1,4 +1,5 @@
 """Inspect the installed Qt controls, scope dispatch, old-project counts and exported workbook."""
+from contextlib import closing
 from unittest.mock import patch
 import numpy as np
 import pandas as pd
@@ -20,6 +21,8 @@ def check_gui(folder):
     tifffile.imwrite(image,np.ones((2,64,128),np.uint16),ome=True,metadata={'axes':'CYX','PhysicalSizeX':1.,'PhysicalSizeY':1.})
     im=ImageEntry(str(image),[Section(i,(i*64,0,64,64),[],f'S0{i+1}') for i in range(2)])
     p=Project(folder,images=[im],channel_names=['DAPI','Green'],grading={'Green':[2.,4.]})
+    with closing(im.open_slide()) as slide:
+        p.ensure_channels(slide.channels)
     p.stats={'metric':'Green+ 强 密度 (个/mm²)'}
     p.detection.channels[1]=ChannelParams(min_intensity=9999)
     p.save()
