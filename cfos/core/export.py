@@ -65,8 +65,6 @@ def build_tables(project: Project, intensity: bool | None = None, *, for_excel=F
             with closing(im.open_slide()) as slide:
                 df = colocalize(df, slide.pixel_size_um, project.coloc, nucleus_channel(names))
         cells = merged_cells(df, len(names))
-        from .grading import add_grades
-        cells = add_grades(cells, names, project.grading)
         cells.insert(0, "图片", im.key)
         s = summarize(cells, names, group_cols=("图片", "section"), require_nucleus=project.coloc.require_nucleus)
         from .coloc import add_nucleus_ratios
@@ -330,8 +328,6 @@ def params_table(project: Project) -> pd.DataFrame:
     rows.append(("拆分脑片用的通道", "全部通道" if tc is None else "、".join(project.channel_names[c] for c in tc)))
     if project.unused_channels:
         rows.append(("不使用的通道", "、".join(f"第 {c + 1} 通道" for c in sorted(project.unused_channels))))
-    for nm, cuts in (project.grading or {}).items():
-        rows.append((f"{nm} 强度分级（倍背景）", f"弱 < {cuts[0]} ≤ 中 < {cuts[1]} ≤ 强"))
     for c, nm in enumerate(project.channel_names):
         p = project.detection.channels.get(c)
         if p is None or c in project.unused_channels:

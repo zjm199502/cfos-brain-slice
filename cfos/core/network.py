@@ -414,7 +414,7 @@ def run_network_analysis(project, out_dir, params: NetParams, region_sec=None, p
     animal = per_animal(region_sec, project.samples)
     if animal.empty:
         raise ValueError("还没有填写分组。请在表格中为每张脑片填写“动物编号”和“组别”。")
-    params.metric = params.metric or metric_options(project.channel_names, grading=project.grading)[0]
+    params.metric = params.metric or metric_options(project.channel_names)[0]
     res = run_network(animal, params, progress)
     groups, regions = res["groups"], res["regions"]
     anc = _structures()

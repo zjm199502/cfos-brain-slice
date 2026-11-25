@@ -37,11 +37,11 @@ class StatsParams:
 
 def count_columns(df: pd.DataFrame) -> list[str]:
     """细胞数的列：“X+”和“X+Y 共标”。"""
-    return [c for c in df.columns if (c.endswith("+") or c.endswith(" 共标") or c[-3:] in ("+ 弱", "+ 中", "+ 强"))
+    return [c for c in df.columns if (c.endswith("+") or c.endswith(" 共标"))
             and pd.api.types.is_numeric_dtype(df[c])]
 
 
-def metric_options(channel_names, nucleus_name="DAPI", grading=None) -> list[str]:
+def metric_options(channel_names, nucleus_name="DAPI") -> list[str]:
     """界面上可选的指标：每个通道和每种共标的密度，以及双标占单标的百分比。
     v0.8.3：有 DAPI 通道时，“X+ 占 DAPI+ 的比例 %”放在最前面，作为推荐主指标（不受切片厚度、组织收缩、面积误差影响）。"""
     from itertools import combinations
@@ -60,11 +60,6 @@ def metric_options(channel_names, nucleus_name="DAPI", grading=None) -> list[str
         opts.append(f"{a}+{b} 共标 密度 (个/mm²)")
         opts.append(f"{a}+{b} 共标 占 {a}+ 的比例 %")
         opts.append(f"{a}+{b} 共标 占 {b}+ 的比例 %")
-    for nm in (grading or {}):
-        if nm in channel_names:
-            for lab in ("强", "中", "弱"):
-                opts.append(f"{nm}+ {lab} 密度 (个/mm²)")
-            opts.append(f"{nm}+ 强 占 {nm}+ 的比例 %")
     if nucleus_name in channel_names:
         opts.append(f"{nucleus_name}+ 密度 (个/mm²)")
     if not markers and channel_names:
@@ -78,8 +73,6 @@ def add_metrics(t: pd.DataFrame) -> pd.DataFrame:
     area = t["面积 (mm²)"].replace(0, np.nan)
     for c in count_columns(t):
         t[f"{c} 密度 (个/mm²)"] = t[c] / area
-        if c[-3:] in ("+ 弱", "+ 中", "+ 强") and c[:-2] in t.columns:
-            t[f"{c} 占 {c[:-2]} 的比例 %"] = 100.0 * t[c] / t[c[:-2]].replace(0, np.nan)
         if c.endswith(" 共标"):
             parts = c[:-3].split("+")
             if len(parts) == 2:
@@ -396,7 +389,7 @@ def run_group_stats(project, out_dir, params: StatsParams, region_sec: pd.DataFr
     control = params.control if params.control in groups else groups[0]
     if progress:
         progress(1, 3, "正在做组间比较…")
-    metric = params.metric or metric_options(project.channel_names, grading=project.grading)[0]
+    metric = params.metric or metric_options(project.channel_names)[0]
     params.metric = metric
     eligible = eligible_rows(animal, params)
     if metric not in eligible.columns:

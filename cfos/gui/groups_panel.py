@@ -209,7 +209,7 @@ class GroupsMixin:
         # 统计参数
         sp = StatsParams(**{k: v for k, v in p.stats.items() if k in StatsParams.__dataclass_fields__})
         self.st_metric.blockSignals(True); self.st_metric.clear()
-        self.st_metric.addItems(metric_options(p.channel_names, grading=p.grading))
+        self.st_metric.addItems(metric_options(p.channel_names))
         if sp.metric:
             self.st_metric.setCurrentText(sp.metric)
         self.st_metric.blockSignals(False)

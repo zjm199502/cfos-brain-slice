@@ -10,7 +10,7 @@ import pandas as pd
 from scipy.ndimage import label
 
 from cfos.core import accuracy, cellpose4, detection as det, finetune
-from cfos.core.pipeline import detect_image, rebuild_cells
+from cfos.core.pipeline import detect_image, recompute_image_coloc
 from cfos.core.project import ImageEntry, Project
 from cfos.core.sections import Section
 
@@ -67,7 +67,7 @@ class CellposePipelineTests(unittest.TestCase):
         self.assertGreater(len(row.contour), 3)
         self.assertEqual(full.attrs["channel_models"], {1:cellpose4.MODEL_KEY})
 
-    def test_partial_runs_and_refilter_retain_historical_model_attribution(self):
+    def test_partial_runs_and_coloc_retain_historical_model_attribution(self):
         with TemporaryDirectory() as folder:
             path = Path(folder)/"slide.tif"
             path.touch()
@@ -96,7 +96,7 @@ class CellposePipelineTests(unittest.TestCase):
                 self.assertEqual(infer.call_count,2)
             expected = {"A":{0:cellpose4.MODEL_KEY},"B":{0:"old-ft-model"}}
             self.assertEqual(project.load_cells(im).attrs["section_models"],expected)
-            self.assertEqual(rebuild_cells(project, im, 1.).attrs["section_models"],expected)
+            self.assertEqual(recompute_image_coloc(project, im, 1.).attrs["section_models"],expected)
             saved = project.load_cells(im)
             project.detection.channels[0].min_area_um2 = 999.
             box = (0,0,50,50)

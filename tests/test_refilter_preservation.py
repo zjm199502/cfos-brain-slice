@@ -8,13 +8,13 @@ import tifffile
 
 from cfos.core.detection import ChannelParams
 from cfos.core.manual import save_manual
-from cfos.core.pipeline import refilter_all
+from cfos.core.pipeline import refresh_coloc
 from cfos.core.project import ImageEntry, Project
 from cfos.core.sections import Section
 
 
 class RefilterPreservationTests(TestCase):
-    def test_mixed_legacy_repeated_refilter_and_new_raw_cache(self):
+    def test_mixed_legacy_repeated_coloc_and_new_raw_cache(self):
         with TemporaryDirectory() as folder:
             root = Path(folder)
             path = root / "slide.tif"
@@ -29,6 +29,7 @@ class RefilterPreservationTests(TestCase):
                      mean_ch1=200., contour=[], manual=0, combo="stale")
                 for s, c, x in [("A", 0, 20.), ("B", 0, 120.), ("B", 0, 121.), ("B", 1, 121.)]
             ])
+            previous.attrs["carried_forward_sections"] = ["B", "Zero"]
             previous.attrs["processed_sections"] = ["A", "B", "Zero"]
             project.save_cells(im, previous)
             project.save_part(im, sections[0], "A", previous[previous.section == "A"])
@@ -38,17 +39,17 @@ class RefilterPreservationTests(TestCase):
             })
 
             for _ in range(2):
-                self.assertEqual(refilter_all(project), 1)
+                self.assertEqual(refresh_coloc(project), 1)
                 rebuilt = project.load_cells(im)
                 self.assertEqual(rebuilt.attrs["processed_sections"], ["A", "B", "Zero"])
                 self.assertEqual(rebuilt.attrs["carried_forward_sections"], ["B", "Zero"])
-                self.assertEqual(rebuilt.section.unique().tolist(), ["B"])
-                self.assertEqual(sorted(rebuilt.x), [121., 121., 155.])
+                self.assertEqual(rebuilt.section.unique().tolist(), ["A", "B"])
+                self.assertEqual(sorted(rebuilt.x), [20., 121., 121., 155.])
                 self.assertEqual(rebuilt[rebuilt.x == 121].combo.tolist(), ["0+1", "0+1"])
                 self.assertEqual(rebuilt.manual.sum(), 1)
 
             project.save_part(im, sections[1], "B", previous[previous.section == "B"])
-            refilter_all(project)
+            refresh_coloc(project)
             updated = project.load_cells(im)
-            self.assertEqual(updated.attrs["carried_forward_sections"], ["Zero"])
-            self.assertEqual(updated.combo.tolist(), ["1", "0"])
+            self.assertEqual(updated.attrs["carried_forward_sections"], ["B", "Zero"])
+            self.assertEqual(updated.combo.tolist(), ["0", "0+1", "0+1", "0"])

@@ -1,4 +1,4 @@
-"""处理流程：识别一张图片（可中断后继续）、重新筛选/共标、一键批量处理。"""
+"""处理流程：识别一张图片（可中断后继续）、刷新共标、一键批量处理。"""
 from __future__ import annotations
 
 import traceback
@@ -47,15 +47,13 @@ def drop_excluded(df: pd.DataFrame, im: ImageEntry) -> pd.DataFrame:
 
 
 # ---------------------------------------------------------------- 识别
-def rebuild_cells(project: Project, im: ImageEntry, pixel_um0: float | None = None, *, section_names=None) -> pd.DataFrame | None:
-    """Reapply thresholds where raw detections exist and retain previous counts elsewhere."""
-    selected = {s.name for s in im.sections if s.enabled and (section_names is None or s.name in section_names)}
-    parts = {s.name: raw for s in im.sections if s.name in selected
-             if (raw := project.load_part(im, s)) is not None}
-    partial = section_names is not None
-    previous = project.load_cells(im) if partial or len(parts) < len(selected) else None
-    carried = selected.intersection(processed_section_names(im, previous)).difference(parts)
-    if not parts and not carried:
+def recompute_image_coloc(project: Project, im: ImageEntry, pixel_um0: float | None = None, *, section_names=None) -> pd.DataFrame | None:
+    """Recalculate colocalization and replay manual edits on the accepted detections."""
+    previous = project.load_cells(im)
+    selected = processed_section_names(im, previous)
+    if section_names is not None:
+        selected.intersection_update(section_names)
+    if not selected:
         return None
     if pixel_um0 is None:
         slide = im.open_slide()
@@ -63,11 +61,10 @@ def rebuild_cells(project: Project, im: ImageEntry, pixel_um0: float | None = No
             pixel_um0 = slide.pixel_size_um
         finally:
             slide.close()
-    return _merge_frames(project, im, pixel_um0, list(parts.values()), list(parts),
-                         partial=partial, previous=previous, carried=carried)
+    return _merge_frames(project, im, pixel_um0, [], [], partial=True, previous=previous, saved_sections=selected)
 
 
-def _merge_frames(project, im, pixel_um0, frames, names, partial=False, previous=None, carried=()):
+def _merge_frames(project, im, pixel_um0, frames, names, partial=False, previous=None, saved_sections=()):
     sections = {sec.name: sec for sec in im.sections}
     filtered = []
     settings_by_section = {}
@@ -93,16 +90,17 @@ def _merge_frames(project, im, pixel_um0, frames, names, partial=False, previous
     corrected = []
     if filtered:
         corrected.append(correct(pd.concat(filtered, ignore_index=True), set(names)))
-    if carried:
-        old = previous[previous["section"].isin(carried)]
+    if saved_sections:
+        old = previous[previous["section"].isin(saved_sections)]
         if "manual" in old:
             old = old[old["manual"] != 1]
-        corrected.append(correct(old, carried, exact_removals=True))
+        corrected.append(correct(old, saved_sections, exact_removals=True))
     df = corrected[0] if len(corrected) == 1 else pd.concat(corrected, ignore_index=True)
     df["cell_id"] = np.arange(len(df))
     df = colocalize(df, pixel_um0, project.coloc, nucleus_channel(project.channel_names)) if len(df) else df
-    processed = set(names).union(carried)
-    retained = set(carried)
+    processed = set(names).union(saved_sections)
+    retained = (set(saved_sections).intersection(previous.attrs.get("carried_forward_sections", ()))
+                if previous is not None else set())
     if partial:
         if previous is None:
             previous = project.load_cells(im)
@@ -207,17 +205,17 @@ def detect_image(project: Project, im: ImageEntry, sl=None, redo=False, report=N
             sl.close()
 
 
-def refilter_all(project: Project, report=None, *, selection=None, cancel=None) -> int:
-    """所有图片按当前阈值和共标参数重新计算（几秒钟，不需要重新识别）。返回处理的图片数。"""
+def refresh_coloc(project: Project, report=None, *, selection=None, cancel=None) -> int:
+    """按选定的图片和脑片更新共标，保留识别时的阈值与阳性判定。"""
     n = 0
     targets = selected_images(project, selection)
     for i, im in enumerate(targets):
         if cancel and cancel():
             raise InterruptedError
         if report:
-            report(i, len(targets), f"正在重新筛选和计算共标：{im.key}")
+            report(i, len(targets), f"正在重新计算共标：{im.key}")
         names = selection.get(im.key) if selection is not None else None
-        if rebuild_cells(project, im, section_names=names) is not None:
+        if recompute_image_coloc(project, im, section_names=names) is not None:
             n += 1
     return n
 

@@ -1,4 +1,4 @@
-"""各步骤面板截图 + 宽度检查 + 强度分级界面。用法：xvfb-run python tests/panels_smoke.py <项目> <截图目录>"""
+"""各步骤面板截图 + 宽度检查。用法：xvfb-run python tests/panels_smoke.py <项目> <截图目录>"""
 import sys, time, faulthandler; faulthandler.enable()
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -26,8 +26,5 @@ for i, nm in enumerate(STEPS):
     mw = w.stack.widget(i).minimumSizeHint().width()
     print(nm, "min width", mw, "超宽!" if mw > 440 else "")
 w.steps.setCurrentRow(4); pump(1)
-w.gr_ch.setCurrentIndex(0); w.grading_suggest(); pump(2)
-print("grading", w.project.grading)
-w.stack.parentWidget().parentWidget().verticalScrollBar().setValue(10000); pump(1)
-w.grab().save(str(out / "p5_grading.png"))
+w.grab().save(str(out / "p5_coloc.png"))
 print("DONE")

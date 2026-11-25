@@ -145,18 +145,6 @@ def merged_cells(df: pd.DataFrame, n_channels: int) -> pd.DataFrame:
     for col in ("hemisphere", "region_id"):
         if col in df.columns:
             out[col] = g[col].first()
-    # 每个通道：该细胞在这个通道里被识别出的那一个对象的平均亮度和组织背景（用于强度分级）
-    for c in range(n_channels):
-        sub = df[df["channel"] == c]
-        if f"mean_ch{c}" in sub.columns and len(sub):
-            first = sub.groupby("merged_id").first()
-            out[f"int_ch{c}"] = first[f"mean_ch{c}"].reindex(out.index)
-            if "background" in sub.columns:
-                bg = first["background"]
-                # 手动补加的细胞没有背景值：用同一脑片其他细胞的背景
-                sec_bg = sub.groupby("section")["background"].median()
-                fill = first["section"].map(sec_bg)
-                out[f"bg_ch{c}"] = bg.fillna(fill).reindex(out.index)
     return out.reset_index()
 
 
@@ -230,12 +218,6 @@ def summarize(cells: pd.DataFrame, channel_names: list[str], group_cols=("sectio
         row = dict(zip(group_cols, key))
         for c in range(n):
             row[f"{channel_names[c]}+"] = int(g[f"pos_ch{c}"].sum())
-        for c in range(n):
-            gc = f"grade_ch{c}"
-            if gc in g.columns:
-                gv = g[gc].to_numpy()
-                for lv, lab in ((1, "弱"), (2, "中"), (3, "强")):
-                    row[f"{channel_names[c]}+ {lab}"] = int((gv == lv).sum())
         for k in range(2, n + 1):
             for combo in combinations(range(n), k):
                 m = np.ones(len(g), bool)

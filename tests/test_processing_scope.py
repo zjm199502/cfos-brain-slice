@@ -67,16 +67,16 @@ class ProcessingScopeTests(TestCase):
             quality.quality_table(view)
         self.assertEqual(json.loads(summary.read_text(encoding="utf-8"))["unselected/S1"], {"why":"keep"})
 
-    def test_subset_refilter_carries_only_selected_legacy_cells_without_duplication(self):
+    def test_subset_coloc_preserves_only_selected_legacy_cells_without_duplication(self):
         self.im.sections[2].enabled = False
         for _ in range(2):
             with patch.object(self.p, "load_part", wraps=self.p.load_part) as load:
-                self.assertEqual(pipeline.refilter_all(self.p, selection=self.selection), 1)
-                self.assertEqual([call.args[1].name for call in load.call_args_list], ["S1"])
+                self.assertEqual(pipeline.refresh_coloc(self.p, selection=self.selection), 1)
+                load.assert_not_called()
             df = self.p.load_cells(self.im)
             self.assertCountEqual(df.section, ["S0","S1","S2"])
             self.assertEqual(df.attrs["processed_sections"], ["S0","S1","S2"])
-            self.assertEqual(df.attrs["carried_forward_sections"], ["S1"])
+            self.assertEqual(df.attrs["carried_forward_sections"], [])
             originals = df.set_index("section").loc[["S0","S2"]]
             self.assertEqual(originals["merged_id"].tolist(), [0,2])
 
@@ -90,17 +90,17 @@ class ProcessingScopeTests(TestCase):
             self.p.save_part(self.im, section, section.name, raw)
         paths = [self.p.part_path(self.im, s.name) for s in self.im.sections]
         bytes_before = [p.read_bytes() for p in paths]
-        self.assertEqual(pipeline.refilter_all(self.p, selection=self.selection), 1)
+        self.assertEqual(pipeline.refresh_coloc(self.p, selection=self.selection), 1)
         result = self.p.load_cells(self.im)
-        self.assertEqual(result.section.tolist(), ["S0"])
-        self.assertEqual(result.merged_id.tolist(), [0])
+        self.assertEqual(result.section.tolist(), ["S0", "S1"])
+        self.assertEqual(result.merged_id.tolist(), [0, 1])
         self.assertEqual(result.attrs["processed_sections"], ["S0", "S1", "S2"])
         self.assertEqual(result.attrs["section_devices"], cells.attrs["section_devices"])
         self.assertEqual([p.read_bytes() for p in paths], bytes_before)
         cell_file = self.p.cells_path(self.im)
         before = cell_file.read_bytes()
         for empty in ({}, {self.im.key: ()}, {self.im.key: ("absent",)}):
-            self.assertEqual(pipeline.refilter_all(self.p, selection=empty), 0)
+            self.assertEqual(pipeline.refresh_coloc(self.p, selection=empty), 0)
             self.assertEqual(scoped_project(self.p, empty).images, [])
         self.assertEqual(cell_file.read_bytes(), before)
 

@@ -520,7 +520,7 @@ class MainWindow(ProcessingScopeMixin, UpdateMixin, TeachingMixin, FigureMixin, 
         if self.slide is not None:
             self._show_image()
         self.info("参数模板已导入。" + ("\n" + "\n".join(notes) if notes else "")
-                  + "\n已识别的图片需要重新识别（或点“④ 细胞识别”中的“按新阈值重新筛选”）才会使用新参数。")
+                  + "\n要应用新参数，请到“④ 细胞识别”点“选择处理范围并识别…”。")
 
     def new_project(self):
         d = QFileDialog.getExistingDirectory(self, "选择一个空文件夹作为项目文件夹")
@@ -896,7 +896,7 @@ class MainWindow(ProcessingScopeMixin, UpdateMixin, TeachingMixin, FigureMixin, 
             if label == UNUSED_LABEL or was_unused:
                 notes.append("启用 / 停用通道后，请在“④ 细胞识别”里重新识别（没变的通道会直接用上次的结果）。")
             if "DAPI" in (old_name, p.channel_names[c]):
-                notes.append("细胞核（DAPI）通道变了，请在“④ 细胞识别”里点“按新阈值重新筛选”，更新共标结果。")
+                notes.append("细胞核（DAPI）通道变了，请在“⑤ 共标统计”中重新计算所选脑片的共标。")
             if notes:
                 self.info("通道设置已保存。\n\n" + "\n".join(notes))
         QTimer.singleShot(0, self._refresh_channels_form)
@@ -1453,12 +1453,8 @@ class MainWindow(ProcessingScopeMixin, UpdateMixin, TeachingMixin, FigureMixin, 
         L.addWidget(b0)
         b1 = big_button("预览当前视野的细胞识别"); b1.clicked.connect(lambda: self._require_scope() and self.preview_detection())
         b2 = big_button("选择处理范围并识别…"); b2.clicked.connect(lambda: self.choose_processing_scope() and self.run_detection(True))
-        b3 = big_button("识别已选图片和脑片"); b3.clicked.connect(lambda: self._require_scope() and self.run_detection(True))
-        b4 = big_button("按新阈值重新筛选（几秒钟，不用重新识别）"); b4.clicked.connect(lambda: self._require_scope() and self.refilter())
-        b4.setToolTip("只改了面积、最低强度、自动阳性阈值、局部对比度时，点这里即可，不需要重新识别。\n"
-                      "改了 Cellpose 掩膜阈值、提亮、减背景或去卷积，需要重新识别。")
-        for b in (b1, b2, b3, b4):
-            L.addWidget(b)
+        L.addWidget(b1)
+        L.addWidget(b2)
         mb = QGroupBox("手动校正细胞（识别完成后）"); ml = QVBoxLayout(mb)
         lb = QLabel("先选通道，再点“补加”后在图上点击漏掉的细胞；或点“选择”后点击 / 拖框选中误识别的细胞，"
                     "按“删除选中”。改完点“保存手动校正”。校正会保留到以后（改阈值、重新识别后仍然有效），"
@@ -1640,7 +1636,7 @@ class MainWindow(ProcessingScopeMixin, UpdateMixin, TeachingMixin, FigureMixin, 
             mct.setSuffix(" 倍周围"); mct.setSpecialValueText("不使用")
             mct.setToolTip("局部对比度：细胞内平均亮度 ÷ 细胞外面一圈（3 µm 宽，不含其他细胞）的平均亮度。\n"
                            "厚切片中焦平面以外的细胞看起来是一团模糊的光晕，和周围差别小，设 1.3–1.8 可以去掉它们。\n"
-                           "0 表示不使用。改这个值后点“按新阈值重新筛选”即可，不需要重新识别。")
+                           "0 表示不使用。调整后请点“选择处理范围并识别…”。")
             f.addRow("局部对比度下限", mct)
             bgr = QDoubleSpinBox(); bgr.setRange(0, 500); bgr.setSingleStep(5); bgr.setValue(p.bg_radius_um)
             bgr.setSuffix(" µm"); bgr.setSpecialValueText("不减背景")
@@ -1951,27 +1947,6 @@ class MainWindow(ProcessingScopeMixin, UpdateMixin, TeachingMixin, FigureMixin, 
             self.info("已使用薄切片推荐参数（不减背景、不去卷积）。\n"
                       "建议先放大到一块区域点“预览当前视野的细胞识别”检查效果，再识别全部脑片。")
 
-    def refilter(self):
-        from ..core.pipeline import refilter_all
-        project = self.project
-        selection = self._processing_scope
-
-        def done(n):
-            self._cells_cache.clear(); self._draw_cells(); self._refresh_coloc_table()
-            lines = []
-            view = self._view_project()
-            for im in view.images:
-                df = view.load_cells(im)
-                if df is not None and len(df):
-                    lines.append(f"{im.key}：" + ", ".join(f"{self.ch_name(c)} {int((df['channel'] == c).sum())}"
-                                                         for c in range(len(project.channel_names))))
-                if df is not None and df.attrs.get("carried_forward_sections"):
-                    sections = "、".join(df.attrs["carried_forward_sections"])
-                    lines.append(f"{im.key} 的 {sections} 缺少原始缓存，沿用上次筛选结果。")
-            self.det_summary.setText(f"已更新 {n} 张图片的细胞统计。\n" + "\n".join(lines))
-
-        self.run_task(lambda task: refilter_all(project, task.report, selection=selection, cancel=task.is_cancelled), done, label="正在重新筛选…")
-
     # ---------------- 手动校正
     def _man_layer(self, create=True):
         nm = self.man_ch.currentText()
@@ -2012,7 +1987,7 @@ class MainWindow(ProcessingScopeMixin, UpdateMixin, TeachingMixin, FigureMixin, 
 
     def save_manual(self):
         from ..core.manual import load_manual, save_manual, section_of, measure_added
-        from ..core.pipeline import refilter_all
+        from ..core.pipeline import refresh_coloc
         if self.slide is None:
             return
         df = self.cells_for(self.image)
@@ -2059,7 +2034,7 @@ class MainWindow(ProcessingScopeMixin, UpdateMixin, TeachingMixin, FigureMixin, 
                 msg += f"\n有 {n_out} 个补加的点不在任何脑片方框内，已忽略。"
             self.statusBar().showMessage(msg.replace("\n", " "), 10000)
 
-        self.run_task(lambda task: refilter_all(project, task.report, selection=selection, cancel=task.is_cancelled), done, label="正在更新细胞和共标…")
+        self.run_task(lambda task: refresh_coloc(project, task.report, selection=selection, cancel=task.is_cancelled), done, label="正在更新细胞和共标…")
 
     # ---------------- 人工标注块
     def _ft_refresh(self):
@@ -2180,26 +2155,9 @@ class MainWindow(ProcessingScopeMixin, UpdateMixin, TeachingMixin, FigureMixin, 
         L.addLayout(f)
         b = big_button("重新计算所选脑片的共标"); b.clicked.connect(lambda: self._require_scope() and self.recompute_coloc())
         L.addWidget(b)
-        gb = QGroupBox("阳性细胞强度分级（弱 / 中 / 强）"); gl = QVBoxLayout(gb)
-        lb = QLabel("强度 = 细胞平均亮度 ÷ 该脑片组织背景（倍）。同一批实验请使用同一组分界值。"
-                    "设置后 Excel 和组间统计中会多出“弱 / 中 / 强”的细胞数，可以比较强阳性细胞的变化。")
-        lb.setWordWrap(True); gl.addWidget(lb)
-        r = QHBoxLayout(); r.addWidget(QLabel("通道：")); self.gr_ch = QComboBox(); r.addWidget(self.gr_ch, 1); gl.addLayout(r)
-        self.gr_on = QCheckBox("对这个通道分级")
-        self.gr_c1 = QDoubleSpinBox(); self.gr_c1.setRange(0.1, 1000); self.gr_c1.setSingleStep(0.5); self.gr_c1.setSuffix(" 倍")
-        self.gr_c2 = QDoubleSpinBox(); self.gr_c2.setRange(0.1, 1000); self.gr_c2.setSingleStep(0.5); self.gr_c2.setSuffix(" 倍")
-        f2 = QFormLayout(); f2.addRow(self.gr_on); f2.addRow("弱 / 中 分界", self.gr_c1); f2.addRow("中 / 强 分界", self.gr_c2)
-        gl.addLayout(f2)
-        r = QHBoxLayout()
-        b = QPushButton("按全部细胞三等分建议"); b.clicked.connect(lambda: self._require_scope() and self.grading_suggest()); r.addWidget(b)
-        b = QPushButton("应用并画分布图"); b.clicked.connect(lambda: self._require_scope() and self.grading_apply()); r.addWidget(b)
-        gl.addLayout(r)
-        self.gr_hist = QLabel(); self.gr_hist.setAlignment(Qt.AlignCenter); gl.addWidget(self.gr_hist)
-        self.gr_ch.currentIndexChanged.connect(lambda _: self._grading_sync())
         self.coloc_table = QTableWidget(); self.coloc_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.coloc_table.setMinimumHeight(220)
         L.addWidget(self.coloc_table, 1)
-        L.addWidget(gb)
         return w
 
     def recompute_coloc(self):
@@ -2212,52 +2170,13 @@ class MainWindow(ProcessingScopeMixin, UpdateMixin, TeachingMixin, FigureMixin, 
         selection = self._processing_scope
 
         def job(task):
-            from ..core.pipeline import refilter_all
-            return refilter_all(project, task.report, selection=selection, cancel=task.is_cancelled)
+            from ..core.pipeline import refresh_coloc
+            return refresh_coloc(project, task.report, selection=selection, cancel=task.is_cancelled)
 
         def done(_):
             self._cells_cache.clear(); self._refresh_coloc_table()
 
         self.run_task(job, done, label="正在计算共标…")
-
-    def _grading_sync(self):
-        nm = self.gr_ch.currentText()
-        cuts = (self.project.grading or {}).get(nm) if self.project else None
-        self.gr_on.setChecked(bool(cuts))
-        self.gr_c1.setValue(cuts[0] if cuts else 3.0); self.gr_c2.setValue(cuts[1] if cuts else 6.0)
-        self.gr_hist.clear()
-
-    def grading_suggest(self):
-        from ..core.grading import project_folds, suggest_cuts
-        nm = self.gr_ch.currentText()
-        if not nm:
-            return
-        v = project_folds(self._view_project(), self.project.channel_names.index(nm))
-        if not len(v):
-            self.info("还没有这个通道的识别结果。"); return
-        a, b = suggest_cuts(v)
-        self.gr_c1.setValue(a); self.gr_c2.setValue(b); self.gr_on.setChecked(True)
-        self.grading_apply()
-
-    def grading_apply(self):
-        from ..core.grading import project_folds, histogram_png
-        nm = self.gr_ch.currentText()
-        if not nm:
-            return
-        g = dict(self.project.grading or {})
-        if self.gr_on.isChecked():
-            a, b = sorted([self.gr_c1.value(), self.gr_c2.value()])
-            g[nm] = [round(a, 2), round(b, 2)]
-        else:
-            g.pop(nm, None)
-        self.project.grading = g; self.project.save()
-        self._refresh_coloc_table()
-        v = project_folds(self._view_project(), self.project.channel_names.index(nm))
-        if len(v):
-            path = self.project.results_dir / f"强度分布_{nm}.png"
-            histogram_png(v, g.get(nm), f"{nm}+ 细胞强度分布（所选范围）", path)
-            from qtpy.QtGui import QPixmap
-            self.gr_hist.setPixmap(QPixmap(str(path)).scaledToWidth(360, Qt.SmoothTransformation))
 
     def _refresh_coloc_table(self):
         if not self.project:
@@ -2266,14 +2185,6 @@ class MainWindow(ProcessingScopeMixin, UpdateMixin, TeachingMixin, FigureMixin, 
         self.coloc_contour.setChecked(self.project.coloc.use_contour)
         self.coloc_nuc_int.setChecked(self.project.coloc.nucleus_by_intensity)
         self.coloc_req_nuc.setChecked(self.project.coloc.require_nucleus)
-        nuc = nucleus_channel(self.project.channel_names)
-        cur = self.gr_ch.currentText()
-        self.gr_ch.blockSignals(True); self.gr_ch.clear()
-        self.gr_ch.addItems([n for i, n in enumerate(self.project.channel_names) if i != nuc])
-        if cur:
-            self.gr_ch.setCurrentText(cur)
-        self.gr_ch.blockSignals(False); self._grading_sync()
-        from ..core.grading import add_grades
         frames = []
         for im in self._view_project().images:
             df = self.cells_for(im)
@@ -2282,7 +2193,6 @@ class MainWindow(ProcessingScopeMixin, UpdateMixin, TeachingMixin, FigureMixin, 
             enabled = {s.name for s in im.sections if s.enabled}
             from ..core.pipeline import drop_excluded
             cells = merged_cells(drop_excluded(df[df["section"].isin(enabled)], im), len(self.project.channel_names))
-            cells = add_grades(cells, self.project.channel_names, self.project.grading)
             cells.insert(0, "图片", im.key)
             frames.append(summarize(cells, self.project.channel_names, ("图片", "section"), require_nucleus=self.project.coloc.require_nucleus))
         t = pd.concat(frames, ignore_index=True).rename(columns={"section": "脑片"}) if frames else pd.DataFrame()

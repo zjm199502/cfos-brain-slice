@@ -160,7 +160,7 @@ def run_behavior_correlation(project, out_dir, params: BehaviorParams, region_se
     if len(have) < MIN_ANIMALS:
         raise ValueError(f"填了行为分数的动物只有 {len(have)} 只，至少需要 {MIN_ANIMALS} 只才能算相关"
                          f"（建议 ≥ {WARN_ANIMALS} 只）。请在表格的“行为分数”列填写。")
-    params.metric = params.metric or metric_options(project.channel_names, grading=project.grading)[0]
+    params.metric = params.metric or metric_options(project.channel_names)[0]
     if progress:
         progress(1, 3, "正在逐脑区计算相关…")
     res, wide = correlate(animal, behavior, params)

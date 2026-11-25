@@ -217,7 +217,7 @@ class Project:
     stats: dict = field(default_factory=dict)     # 组间统计参数（stats.StatsParams 的字典）
     network: dict = field(default_factory=dict)   # 功能网络分析参数（network.NetParams 的字典）
     relocated: int = 0                             # 打开项目时自动找回的图片数（不保存）
-    grading: dict = field(default_factory=dict)   # 强度分级：{通道名: [弱/中分界, 中/强分界]}（倍背景）
+    grading: dict = field(default_factory=dict)   # 仅在旧项目读写时保留历史设置。
     figure: dict = field(default_factory=dict)    # 截图制图设置（figure.FigureSettings 的字典）
     accuracy: list = field(default_factory=list)  # 识别准确率检查记录（accuracy.check 的结果）
     behavior: dict = field(default_factory=dict)  # 每只动物的行为分数：{动物编号: 数值}（v0.8.1）
@@ -530,7 +530,7 @@ class Project:
                               "overlap": self.detection.overlap,
                               "channels": {str(k): v.to_dict() for k, v in self.detection.channels.items()}},
                 "coloc": self.coloc.to_dict(), "thickness": self.thickness, "z_mode": self.z_mode,
-                "grading": self.grading, "unused_channels": self.unused_channels,
+                "unused_channels": self.unused_channels,
                 "section_channels": self.section_channels,
                 "unmix": {k: v for k, v in self.unmix.items() if k in ("enabled", "scale")},
                 "display": {str(k): _display_dict(v) for k, v in self.display.items()},
@@ -569,7 +569,6 @@ class Project:
             self.channel_names = list(names)
         self.coloc = ColocParams(**{k: v for k, v in d.get("coloc", {}).items() if k in ColocParams.__dataclass_fields__})
         self.thickness = d.get("thickness", self.thickness)
-        self.grading = d.get("grading", self.grading)
         self.z_mode = d.get("z_mode", self.z_mode)
         if len(names) == len(self.channel_names):
             self.unused_channels = list(d.get("unused_channels", self.unused_channels))
