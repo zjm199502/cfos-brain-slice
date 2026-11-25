@@ -1,12 +1,12 @@
 {
- "version": "0.9.13",
+ "version": "0.9.13+mac.1",
  "min_base": "0.9.0",
  "date": "2026-11-25",
- "notes": "FosFolio 0.9.13 · 细胞识别\n\nDAPI 默认使用 StarDist 2D_versatile_fluo，其他通道默认使用 Cellpose 4。每个通道可更改模型。软件打开后在后台加载两种模型，设备与加载状态写入识别日志。\n\n预览使用固定的组织范围。正式识别按所选宽高比例读取、重采样并分块，图块核心和边缘缓冲随比例缩放。暗灰色半透明虚线显示当前任务的分块边界。细胞识别页面实时显示各脑片、各通道的分块进度、用时和预计剩余时间。日志包含实际输入尺寸、模型、设备及跳过的暗区。\n\n图层工具按钮改为单列，保留不透明度滑块，移除横向滚动条。\n\nWindows 和 Apple Silicon macOS 的 0.9.x 可在“帮助 → 检查更新”中直接升级。0.8.x 系列仍使用兼容的 0.8.11。",
+ "notes": "修复 Apple Silicon Mac 上识别细胞后切回「项目与图片」时，系统读取表格选中项导致的闪退。匹配 Qt 6.12.0 的客户端会在启动时加载已修复的 Cocoa 插件；刷新图片和进度时保留原有单元格。包含 0.9.13 的全部功能。",
  "patch": {
-  "file": "cfos-patch-0.9.13.zip",
-  "size": 21915533,
-  "sha256": "a72c20615ae9d2f8dc5643b3776ed087e16ebf20e57b65578457593776da1f21"
+  "file": "cfos-patch-0.9.13+mac.1.zip",
+  "size": 22628809,
+  "sha256": "ce95c4b5f57426ff02e05e11593911becc37c691f5a6093f87bedeb4e6ebe999"
  },
  "full_installer": "https://cnb.cool/fosfolio/cfos-brain-slice/-/releases/tag/v0.9.0",
  "platform": "macos"
