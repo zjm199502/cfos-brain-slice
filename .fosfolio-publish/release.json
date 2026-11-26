@@ -1,0 +1,29 @@
+{
+  "base": "a89ac950f5e6610a7dad11f682d35caae9f15623",
+  "assets": {
+    "cfos-patch-0.8.12.zip": {
+      "parts": [
+        "cfos-patch-0.8.12.part0"
+      ],
+      "sha256": "96eb64a78d53e55b1fb582243587636343d0bf29d5abd26fa697f00e8c5e6dde",
+      "size": 416498
+    },
+    "cfos-patch-0.9.19.zip": {
+      "parts": [
+        "cfos-patch-0.9.19.part0",
+        "cfos-patch-0.9.19.part1",
+        "cfos-patch-0.9.19.part2",
+        "cfos-patch-0.9.19.part3"
+      ],
+      "sha256": "453c95b86969fd6f9cee204bc72f49911c2baf48e818da6b85c2a978161ba3a9",
+      "size": 48138928
+    }
+  },
+  "files": {
+    "updates/cfos-patch-0.9.19.zip": "cfos-patch-0.9.19.zip",
+    "updates/v0.9/cfos-patch-0.9.19.zip": "cfos-patch-0.9.19.zip",
+    "updates/v0.9/macos/cfos-patch-0.9.19.zip": "cfos-patch-0.9.19.zip",
+    "updates/v0.9/windows/cfos-patch-0.9.19.zip": "cfos-patch-0.9.19.zip",
+    "updates/v0.8/cfos-patch-0.8.12.zip": "cfos-patch-0.8.12.zip"
+  }
+}

@@ -1,0 +1,12 @@
+{
+ "version": "0.8.12",
+ "min_base": "0.7",
+ "date": "2026-11-26",
+ "notes": "FosFolio 0.9.19 已发布，支持 CCFv3 和 STAM 双图谱 giRAff 配准。\n\n当前 0.8 系列使用旧运行环境。如要升级到 0.9.19，请安装适用于本机的 0.9 基础安装包，启动后选择「帮助 → 检查更新 → 现在更新」。\n\n本窗口的「现在更新」安装 0.8.12 兼容补丁。重启后，可从「帮助 → 升级至 FosFolio 0.9.19…」打开安装说明。",
+ "patch": {
+  "file": "cfos-patch-0.8.12.zip",
+  "size": 416498,
+  "sha256": "96eb64a78d53e55b1fb582243587636343d0bf29d5abd26fa697f00e8c5e6dde"
+ },
+ "full_installer": "https://github.com/zjm199502/cfos-brain-slice/releases/tag/v0.9.0"
+}

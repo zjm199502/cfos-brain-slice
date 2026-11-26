@@ -1,0 +1,17 @@
+name: Assemble the tested FosFolio 0.9.19 release
+on:
+  push:
+    branches:
+      - release/assemble-fosfolio-0.9.19
+permissions:
+  contents: write
+jobs:
+  assemble:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          sparse-checkout: .fosfolio-publish
+      - name: Verify packages and prepare the release branch
+        run: python3 .fosfolio-publish/assemble.py
