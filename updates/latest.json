@@ -1,12 +1,12 @@
 {
- "version": "0.9.17",
- "min_base": "0.7",
+ "version": "0.9.19",
+ "min_base": "0.9.0",
  "date": "2026-11-26",
- "notes": "优化细胞标记和图块网格的缩放、平移与旋转显示。虚线圆仍可调整线宽，默认 0.75 pt。",
+ "notes": "FosFolio 0.9.19 已发布。打开「帮助 → 检查更新 → 现在更新」，安装后重启。\n\n第⑥步可选择 Allen CCFv3（双侧分区）或 STAM（官方单侧分区）。两个图谱都使用 giRAff 自动定位，可选择组织外轮廓非线性贴合。每套图谱分别保存配准结果及手动修正。\n\n配准页使用白色脑区边界，隐藏已识别的细胞标记。离开配准页后恢复各图层原来的可见状态。\n\n使用 0.7 或 0.8 基础安装版时，请先安装 0.9 基础版，再检查更新至 0.9.19。",
  "patch": {
-  "file": "cfos-update-0.8.11-and-0.9.17.zip",
-  "size": 16088484,
-  "sha256": "e72f5cfcc05efdd75bde58690631872fd5711a0a279692b4d163747f078c3f5a"
+  "file": "cfos-patch-0.9.19.zip",
+  "size": 48138928,
+  "sha256": "453c95b86969fd6f9cee204bc72f49911c2baf48e818da6b85c2a978161ba3a9"
  },
- "full_installer": "https://cnb.cool/fosfolio/cfos-brain-slice/-/releases/tag/v0.9.0"
+ "full_installer": "https://github.com/zjm199502/cfos-brain-slice/releases/tag/v0.9.0"
 }

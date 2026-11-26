@@ -1,12 +1,12 @@
 {
- "version": "0.8.11",
+ "version": "0.8.12",
  "min_base": "0.7",
- "date": "2026-11-21",
- "notes": "# FosFolio v0.8.11 更新公告\n\n## Excel 导出支持自选脑区\n\n在「⑧ 导出 Excel」的「脑区范围」选择「自选脑区」，按缩写、英文名、已收录的中文名或 Allen ID 搜索。勾选多个脑区后点击「应用」。项目会记住选择，手动导出和一键批量处理都使用这份清单。\n\n「按脑区×脑片」只列所选且在切片上有组织覆盖的脑区。选中上级脑区会导出包含下属区域的汇总；要同时查看亚区，请也勾选该亚区。父区与亚区的结果有重叠。半脑导出仍可单独设置，所选脑区可在「分析参数」中核对。\n\n本次为 v0.8.x 系列的独立更新，继续使用 StarDist。更新器只接收 v0.8.x 清单和补丁。选错其他版本的 ZIP 时会提示并保留当前安装。\n\n在「帮助 → 检查更新」中点击「现在更新」，完成后重启软件。\n\n如需手动下载，请打开 [v0.8.x 专用下载页](https://github.com/zjm199502/cfos-brain-slice/blob/installers/updates/v0.8/README.md)。\n\n联系方式：zjm199502@163.com，https://github.com/zjm199502/cfos-brain-slice",
+ "date": "2026-11-26",
+ "notes": "FosFolio 0.9.19 已发布，支持 CCFv3 和 STAM 双图谱 giRAff 配准。\n\n当前 0.8 系列使用旧运行环境。如要升级到 0.9.19，请安装适用于本机的 0.9 基础安装包，启动后选择「帮助 → 检查更新 → 现在更新」。\n\n本窗口的「现在更新」安装 0.8.12 兼容补丁。重启后，可从「帮助 → 升级至 FosFolio 0.9.19…」打开安装说明。",
  "patch": {
-  "file": "cfos-patch-0.8.11.zip",
-  "size": 418048,
-  "sha256": "a1bad0ed0d4bd97ccbfb83f41bf09a4798dfe097b5ab698e2e0866c9e8795f0b"
+  "file": "cfos-patch-0.8.12.zip",
+  "size": 416498,
+  "sha256": "96eb64a78d53e55b1fb582243587636343d0bf29d5abd26fa697f00e8c5e6dde"
  },
- "full_installer": "https://github.com/zjm199502/cfos-brain-slice/blob/installers/updates/v0.8/README.md"
+ "full_installer": "https://github.com/zjm199502/cfos-brain-slice/releases/tag/v0.9.0"
 }
