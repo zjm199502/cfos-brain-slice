@@ -1,12 +1,12 @@
 {
- "version": "0.9.16",
+ "version": "0.9.17",
  "min_base": "0.9.0",
  "date": "2026-11-26",
- "notes": "支持旋转预览、鼠标点选图块识别并单独导出 Excel。共标参数移至④，精简图层和人工校正工具。④细胞识别可为项目选择 2048、1024 或 512 原图像素的核心图块，默认 2048。预览和正式识别采用同一分块设置，各通道可独立设置识别分辨率。细胞识别移除 StarDist。DAPI 和旧项目、模板中使用 StarDist 的通道在再次识别时使用 Cellpose 4。历史识别结果可继续查看。",
+ "notes": "优化细胞标记和图块网格的缩放、平移与旋转显示。虚线圆仍可调整线宽，默认 0.75 pt。",
  "patch": {
-  "file": "cfos-patch-0.9.16.zip",
-  "size": 15667706,
-  "sha256": "140cce17d0e761ca5ad50e0db6bc9a9456c2456ef9c6d1977720b7420e3fc112"
+  "file": "cfos-patch-0.9.17.zip",
+  "size": 15668233,
+  "sha256": "d58480e6089448725f83cb8c962608398e5d60a7a2da5b55781a2bda291c89dc"
  },
  "full_installer": "https://cnb.cool/fosfolio/cfos-brain-slice/-/releases/tag/v0.9.0"
 }
