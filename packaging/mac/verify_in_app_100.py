@@ -28,10 +28,11 @@ if phase == "install":
     assert result["manifest"]["version"] == wanted
     assert result["manifest"]["patch"]["sha256"] == digest
     patch = updater.download_patch(result)
+    size = patch.stat().st_size
     with patch.open("rb") as stream:
         assert hashlib.file_digest(stream, "sha256").hexdigest() == digest
     assert updater.install_patch(patch)["version"] == wanted
-    print(f"Actual {expected} updater verified and installed {wanted}, {patch.stat().st_size} bytes.")
+    print(f"Actual {expected} updater verified and installed {wanted}, {size} bytes.")
 elif phase in ("snapshot", "restarted"):
     from cfos.core import cellpose_setup
     runtime, weights = cellpose_setup.runtime_python(), cellpose_setup.weights_path()
