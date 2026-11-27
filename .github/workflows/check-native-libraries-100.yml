@@ -1,0 +1,23 @@
+name: Check FosFolio 1.0.0 Apple Silicon libraries
+on:
+  push:
+    branches: [codex/qa-arm64-runtime-100]
+permissions:
+  contents: read
+jobs:
+  native:
+    runs-on: macos-15
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+          sparse-checkout: cfos/core/giraff_runtime
+      - run: |
+          set -euo pipefail
+          binary=cfos/core/giraff_runtime/bin/reg_aladin
+          chmod +x "$binary"
+          file "$binary"
+          codesign --verify "$binary"
+          otool -L "$binary"
+          "$binary" -version
