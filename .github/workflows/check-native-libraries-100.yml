@@ -7,12 +7,15 @@ permissions:
 jobs:
   native:
     runs-on: macos-15
-    timeout-minutes: 5
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           persist-credentials: false
-          sparse-checkout: cfos/core/giraff_runtime
+          sparse-checkout: |
+            cfos
+            packaging/mac
+            tests
       - run: |
           set -euo pipefail
           binary=cfos/core/giraff_runtime/bin/reg_aladin
@@ -21,3 +24,25 @@ jobs:
           codesign --verify "$binary"
           otool -L "$binary"
           "$binary" -version
+      - name: Exercise the release code on the verified offline runtime
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          curl -fsSL --retry 3 -o base.txz https://github.com/zjm199502/cfos-brain-slice/releases/download/v0.9.0/FosFolio-0.9.0-macOS-arm64-Offline-Compact.tar.xz
+          echo 'ba1cb6f80de6a1846901d85fb80eda97230cad30d5f3a2ec0a6b3446331c2c85  base.txz' | shasum -a 256 -c -
+          /usr/bin/tar -xf base.txz
+          bundle="$RUNNER_TEMP/FosFolio脑片图册.app"
+          app="$bundle/Contents/Resources/app"
+          mv "$app/cfos" "$RUNNER_TEMP/previous-cfos"
+          cp -R "$GITHUB_WORKSPACE/cfos" "$app/cfos"
+          cp "$GITHUB_WORKSPACE/main.py" "$app/main.py"
+          cp "$GITHUB_WORKSPACE/packaging/mac/Info.plist" "$bundle/Contents/Info.plist"
+          chmod +x "$app/cfos/core/giraff_runtime/bin/reg_aladin"
+          py="$bundle/Contents/Resources/python/bin/python3"
+          "$py" -c 'from qtpy.QtCore import QSettings; s=QSettings("cfos","cfos脑片分析"); s.setValue("cellposeOfflineSetupOffered", True); s.sync()'
+          "$py" "$GITHUB_WORKSPACE/packaging/mac/verify_bundle.py" "$bundle" app
+          export PYTHONPATH="$app"
+          for test in test_coloc_cache_coordinates.py test_cell_ring_navigation.py test_rotated_pan.py; do
+            "$py" -m unittest discover -s "$GITHUB_WORKSPACE/tests" -p "$test" -v
+          done
+          "$py" "$GITHUB_WORKSPACE/packaging/mac/verify_bundle.py" "$bundle" cellpose-offline
