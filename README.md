@@ -12,7 +12,9 @@
 
 ## v1.0.0 安装与升级
 
-国内用户可优先从[腾讯云 CNB](https://cnb.cool/fosfolio/cfos-brain-slice/-/releases/tag/v1.0.0)下载完整离线安装包，也可使用 [GitHub Release](https://github.com/zjm199502/cfos-brain-slice/releases/tag/v1.0.0)。Windows x64 请下载同名的 Setup.exe、-1.bin 和 -2.bin，放在同一文件夹后运行 Setup.exe。Apple 芯片 Mac 请解压 .tar.xz 并将应用放入「应用程序」。v0.9.x 用户可通过「帮助 → 检查更新」打开下载页。
+已有 v0.9.x 的用户在「帮助 → 检查更新」中选择「现在更新」并重启，即可通过补丁升级到 v1.0.0，沿用已安装的 Cellpose 环境和模型。较早的客户端若先收到 v0.9.22，请重启后再检查一次。
+
+首次安装可优先从[腾讯云 CNB](https://cnb.cool/fosfolio/cfos-brain-slice/-/releases/tag/v1.0.0)下载完整离线包，或使用 [GitHub Release](https://github.com/zjm199502/cfos-brain-slice/releases/tag/v1.0.0)。Windows x64 用户解压腾讯云 ZIP 后运行 Setup.exe。使用 GitHub 下载时，将 Setup.exe、-1.bin 和 -2.bin 放在同一文件夹。Apple 芯片 Mac 请解压 .tar.xz 并将应用放入「应用程序」。
 
 本版修复了部分旧细胞缓存引发的共标计算错误和旋转后平移方向错误，改善了大量细胞标记下的缩放与鼠标定位。升级前请保存项目并退出软件。[本版更新公告](packaging/更新公告/1.0.0.md)
 

@@ -54,13 +54,18 @@ def vtuple(v: str) -> tuple:
 
 
 def updates_dir() -> Path:
+    override = os.environ.get("CFOS_UPDATES_DIR")
+    if override:
+        return Path(override)
     if sys.platform == "darwin":
         base = Path(os.path.expanduser("~/Library/Application Support")) / "cfos脑片分析"
     elif sys.platform == "win32":
         base = Path(os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")) / "cfos脑片分析"
     else:
         base = Path(os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share")) / "cfos脑片分析"
-    return Path(os.environ.get("CFOS_UPDATES_DIR") or (base / "更新" / f"v{SERIES}"))
+    # An existing 0.9 launcher reads its original current.json on every boot.
+    root = base / "更新"
+    return root if vtuple(base_version())[:2] == (0, 9) else root / f"v{SERIES}"
 
 
 def _read_version_file(init_py: Path) -> str:
@@ -80,6 +85,17 @@ def base_app_dir() -> Path:
 
 def base_version() -> str:
     return _read_version_file(base_app_dir() / "cfos" / "__init__.py")
+
+
+def _patch_compatible(version, minimum, base):
+    target_series = vtuple(version)[:2]
+    installed_series = vtuple(base)[:2]
+    if target_series != vtuple(SERIES)[:2] or vtuple(minimum) > vtuple(base):
+        return False
+    # Only a 1.0 patch explicitly built for the 0.9 runtime can bridge the two.
+    return installed_series == target_series or (
+        installed_series == (0, 9) and target_series == (1, 0) and vtuple(minimum)[:2] == (0, 9)
+    )
 
 
 def _state_file() -> Path:
@@ -116,8 +132,7 @@ def active_patch() -> dict | None:
     if not (app / "cfos" / "__init__.py").exists():
         return None
     bv = base_version()
-    if (vtuple(v)[:2] != vtuple(bv)[:2] or vtuple(v) <= vtuple(bv)
-            or vtuple(st.get("min_base", "0")) > vtuple(bv)):
+    if vtuple(v) <= vtuple(bv) or not _patch_compatible(v, st.get("min_base", "0"), bv):
         return None
     return {**st, "version": v, "app": str(app)}
 
@@ -220,7 +235,7 @@ def check() -> dict:
     cur, base = current_version(), base_version()
     if vtuple(m["version"]) <= vtuple(cur):
         return {"status": "latest", "manifest": m, "url": url}
-    if vtuple(m["version"])[:2] != vtuple(base)[:2] or vtuple(m.get("min_base", "0")) > vtuple(base):
+    if not _patch_compatible(m["version"], m.get("min_base", "0"), base):
         return {"status": "full", "manifest": m, "url": url}
     return {"status": "patch", "manifest": m, "url": url}
 
@@ -288,11 +303,8 @@ def install_patch(zip_path: Path) -> dict:
     zip_path = Path(zip_path)
     info = read_patch_info(zip_path)
     v, base = info["version"], base_version()
-    if vtuple(v)[:2] != vtuple(base)[:2]:
-        raise ValueError(f"补丁 {v} 与当前基础版本 {base} 的版本系列不同。请使用相应版本的完整安装包。")
-    if vtuple(info["min_base"]) > vtuple(base):
-        raise ValueError(f"这个补丁（{v}）需要先安装 {info['min_base']} 或更新的完整安装包，"
-                         f"你现在装的是 {base}。请到 GitHub 下载完整安装包：{FULL_PAGE}")
+    if not _patch_compatible(v, info["min_base"], base):
+        raise ValueError(f"补丁 {v} 不适用于当前基础版本 {base}。请下载对应的完整安装包：{FULL_PAGE}")
     if vtuple(v) <= vtuple(base):
         raise ValueError(f"这个补丁（{v}）不比你安装的版本（{base}）新，不需要安装。")
     root = updates_dir()
