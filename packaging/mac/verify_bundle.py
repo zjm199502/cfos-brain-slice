@@ -39,7 +39,15 @@ def verify_app(app):
         from cfos.core import atlas_choice, giraff
         for name in (atlas_choice.CCF, atlas_choice.STAM):
             atlas = giraff.load_atlas(name)
-            assert atlas.reference.shape == atlas.annotation.shape and atlas.n_regions > 0
+            assert atlas.n_regions > 0 and atlas.annotation.shape == atlas.hemispheres.shape
+            if name == atlas_choice.STAM:
+                # STAM's histological reference is 32 µm; its annotation is 40 µm.
+                assert atlas.reference.shape == (438, 282, 357)
+                assert atlas.annotation.shape == (350, 225, 285)
+                np.testing.assert_allclose(np.array(atlas.reference.shape) * .032,
+                                           np.array(atlas.annotation.shape) * .040, atol=.040)
+            else:
+                assert atlas.reference.shape == atlas.annotation.shape == (528, 320, 456)
         with tempfile.TemporaryDirectory() as trial:
             root = Path(trial)
             plane = atlas.reference[len(atlas.reference) // 2]
