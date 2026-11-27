@@ -1,80 +1,19 @@
-name: Verify macOS release
-
+name: Mac in-app 0.9 to 1.0 acceptance
 on:
   workflow_dispatch:
     inputs:
-      release_id:
-        description: Numeric GitHub release ID (published release or draft)
+      candidate:
+        description: Immutable candidate installers commit SHA
         required: true
-        type: string
-  release:
-    types: [published]
-
-permissions: {}
-
+      digest:
+        description: SHA-256 of the staged v1.0.0 macOS patch
+        required: true
+permissions:
+  contents: read
 jobs:
-  fetch:
-    if: github.repository == 'zjm199502/cfos-brain-slice'
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    permissions:
-      # GitHub restricts visibility of draft releases to users with push access.
-      contents: write
-    outputs:
-      version: ${{ steps.fetch.outputs.version }}
-      sha256: ${{ steps.fetch.outputs.sha256 }}
-      format: ${{ steps.fetch.outputs.format }}
-    steps:
-      - name: Fetch the official release asset
-        id: fetch
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_ID: ${{ inputs.release_id || github.event.release.id }}
-        run: |
-          set -euo pipefail
-          fail() { echo "::error::$1"; exit 1; }
-          repo=zjm199502/cfos-brain-slice
-          [[ "$RELEASE_ID" =~ ^[0-9]+$ ]] || fail 'A numeric release ID is required.'
-          echo "Reading $repo release ID $RELEASE_ID"
-          gh api "repos/$repo/releases/$RELEASE_ID" > "$RUNNER_TEMP/release.json" || fail "Cannot read release $RELEASE_ID. Check the ID and access to the draft."
-          tag=$(jq -er .tag_name "$RUNNER_TEMP/release.json")
-          [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail 'Release tag must use vX.Y.Z.'
-          if [[ "$tag" == v0.* ]]; then
-            name="FosFolio-${tag#v}-macOS-arm64.zip"
-            format=zip
-          else
-            name="FosFolio-${tag#v}-macOS-arm64-Offline-Compact.tar.xz"
-            format=tar.xz
-          fi
-          echo "format=$format" >> "$GITHUB_OUTPUT"
-          metadata=$(jq -ec --arg name "$name" '.assets[] | select(.name == $name and .state == "uploaded")' "$RUNNER_TEMP/release.json") || fail "Uploaded asset $name is missing from release $RELEASE_ID."
-          asset_id=$(jq -er .id <<< "$metadata")
-          digest=$(jq -er '.digest | select(type == "string") | ltrimstr("sha256:")' <<< "$metadata") || fail "No SHA-256 digest found for asset $asset_id."
-          [[ "$digest" =~ ^[0-9a-f]{64}$ ]] || fail "Invalid SHA-256 digest for asset $asset_id."
-          cd "$RUNNER_TEMP"
-          echo "Downloading $name, asset $asset_id"
-          gh api -H 'Accept: application/octet-stream' "repos/$repo/releases/assets/$asset_id" > bundle.archive || fail "Failed to download asset $asset_id."
-          printf '%s  bundle.archive\n' "$digest" | sha256sum -c -
-          printf 'version=%s\nsha256=%s\n' "${tag#v}" "$digest" >> "$GITHUB_OUTPUT"
-      - name: Transfer the verified archive
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: macos-release-archive
-          path: ${{ runner.temp }}/bundle.archive
-          compression-level: 0
-          retention-days: 1
-          if-no-files-found: error
-
-  verify:
-    needs: fetch
+  mac:
     runs-on: macos-15
-    timeout-minutes: 60
-    permissions:
-      contents: read
-    env:
-      EXPECTED_VERSION: ${{ needs.fetch.outputs.version }}
-      PIP_NO_CACHE_DIR: "1"
-      PYTHONNOUSERSITE: "1"
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
@@ -82,53 +21,36 @@ jobs:
           sparse-checkout: |
             packaging/mac
             tests
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          name: macos-release-archive
-          path: ${{ runner.temp }}
-      - name: Check digest and unpack on macOS
-        env:
-          digest: ${{ needs.fetch.outputs.sha256 }}
-          format: ${{ needs.fetch.outputs.format }}
+      - name: Unpack released 0.9.0 Mac and install offline environment
         run: |
           set -euo pipefail
           cd "$RUNNER_TEMP"
-          printf '%s  bundle.archive\n' "$digest" | shasum -a 256 --check
-          mkdir -p "$RUNNER_TEMP/fosfolio"
-          if [[ "$format" == tar.xz ]]; then
-            /usr/bin/tar -xf bundle.archive -C "$RUNNER_TEMP/fosfolio"
-          else
-            ditto -x -k bundle.archive "$RUNNER_TEMP/fosfolio"
-          fi
-          printf 'BUNDLE=%s\n' "$RUNNER_TEMP/fosfolio/FosFolio脑片图册.app" >> "$GITHUB_ENV"
-      - name: Validate native launcher, GUI, demo and atlas registration
-        run: |
-          set -euo pipefail
-          test "$(uname -m)" = arm64
-          py="$BUNDLE/Contents/Resources/python/bin/python3"
-          lipo "$py" -verify_arch arm64
-          test "$(plutil -extract CFBundleShortVersionString raw -o - "$BUNDLE/Contents/Info.plist")" = "$EXPECTED_VERSION"
-          "$BUNDLE/Contents/MacOS/cfos" --version | tee "$RUNNER_TEMP/launcher.txt"
-          grep -F "$EXPECTED_VERSION" "$RUNNER_TEMP/launcher.txt"
-          "$py" -c 'from qtpy.QtCore import QSettings; s=QSettings("cfos","cfos脑片分析"); s.setValue("cellposeOfflineSetupOffered", True); s.sync()'
-          "$py" packaging/mac/verify_bundle.py "$BUNDLE" app
-      - name: Test the fixes with the packaged application
-        if: needs.fetch.outputs.format == 'tar.xz'
-        run: |
-          set -euo pipefail
-          cd "$RUNNER_TEMP"
-          app="$BUNDLE/Contents/Resources/app"
-          export PYTHONPATH="$app"
-          py="$BUNDLE/Contents/Resources/python/bin/python3"
-          test -x "$app/cfos/core/giraff_runtime/bin/reg_aladin"
-          for test in test_coloc_cache_coordinates.py test_cell_ring_navigation.py test_rotated_pan.py; do
-            "$py" -m unittest discover -s "$GITHUB_WORKSPACE/tests" -p "$test" -v
-          done
-      - name: Install Cellpose, run CPU inference and test MPS when available
+          curl -fsSL --retry 3 -o base.txz https://github.com/zjm199502/cfos-brain-slice/releases/download/v0.9.0/FosFolio-0.9.0-macOS-arm64-Offline-Compact.tar.xz
+          echo 'ba1cb6f80de6a1846901d85fb80eda97230cad30d5f3a2ec0a6b3446331c2c85  base.txz' | shasum -a 256 -c -
+          /usr/bin/tar -xf base.txz
+          bundle="$RUNNER_TEMP/FosFolio脑片图册.app"
+          echo "BASE_APP=$bundle/Contents/Resources/app" >> "$GITHUB_ENV"
+          echo "LAUNCH=$bundle/Contents/MacOS/cfos" >> "$GITHUB_ENV"
+          echo "PY=$bundle/Contents/Resources/python/bin/python3" >> "$GITHUB_ENV"
+          "$bundle/Contents/MacOS/cfos" --version | grep -F v0.9.0
+          /usr/bin/sandbox-exec -p '(version 1)(allow default)(deny network*)' "$bundle/Contents/MacOS/cfos" --install-cellpose-offline
+      - name: Apply actual 0.9.22 then staged 1.0.0 and restart twice
         env:
-          format: ${{ needs.fetch.outputs.format }}
+          CANDIDATE: ${{ inputs.candidate }}
+          SHA: ${{ inputs.digest }}
         run: |
           set -euo pipefail
-          phase=cellpose
-          if [[ "$format" == tar.xz ]]; then phase=cellpose-offline; fi
-          "$BUNDLE/Contents/Resources/python/bin/python3" packaging/mac/verify_bundle.py "$BUNDLE" "$phase"
+          [[ "$CANDIDATE" =~ ^[0-9a-f]{40}$ && "$SHA" =~ ^[0-9a-f]{64}$ ]]
+          host=https://raw.githubusercontent.com/zjm199502/cfos-brain-slice
+          old="$host/25ec34f498b68710339ec5e19db7e77a5fd97f3e/updates/v0.9/macos/latest.json"
+          staging="$host/$CANDIDATE/updates/v0.9/macos/latest.json"
+          future="$host/$CANDIDATE/updates/v1.0/macos/latest.json"
+          qa="$GITHUB_WORKSPACE/packaging/mac/verify_in_app_100.py"
+          cd "$RUNNER_TEMP"
+          "$PY" "$qa" install 0.9.0 "$old" 0.9.22 a9cb372bb7c24e70e15cfa93cbec1e231bdf5d92fed21711a5cf7f873536930d
+          "$LAUNCH" --version | grep -F v0.9.22
+          "$PY" "$qa" snapshot 0.9.22 "$old"
+          "$PY" "$qa" install 0.9.22 "$staging" 1.0.0 "$SHA"
+          "$LAUNCH" --version | grep -F v1.0.0
+          "$LAUNCH" --version | grep -F v1.0.0
+          "$PY" "$qa" restarted 1.0.0 "$future"
