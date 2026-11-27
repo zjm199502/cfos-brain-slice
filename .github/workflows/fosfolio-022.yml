@@ -1,0 +1,26 @@
+name: Verify and stage FosFolio 0.9.22
+on:
+  push:
+    branches: [release/assemble-fosfolio-0.9.22]
+permissions:
+  contents: read
+jobs:
+  verify-windows:
+    runs-on: windows-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          sparse-checkout: .fosfolio-release
+      - run: python -X utf8 .fosfolio-release/release.py --verify-only
+  stage:
+    needs: verify-windows
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          sparse-checkout: .fosfolio-release
+      - run: python3 .fosfolio-release/release.py
