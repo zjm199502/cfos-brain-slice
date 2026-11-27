@@ -1,8 +1,14 @@
 {
-  "version": "1.0.0",
-  "min_base": "1.0.0",
-  "date": "2026-11-27",
-  "notes": "FosFolio 1.0.0 面向 Windows x64 和 Apple Silicon Mac，内含 Cellpose 4 运行环境与模型。\n\n- 修复旧项目细胞坐标触发的共标统计错误。先前因 hypot 报错而跳过的图片可按原参数重跑，已有且匹配的脑片识别缓存会被复用。\n- 旋转脑片后，左键拖动视野会跟随鼠标在屏幕上的实时方向。\n- 优化大量细胞标记显示时的缩放和鼠标定位，保留人工校正与细胞计数。\n\n请先保存项目并退出软件。Windows 用户从腾讯云下载完整 ZIP，解压后运行 Setup.exe；从 GitHub 下载时，将 Setup.exe、-1.bin、-2.bin 放在同一目录再安装。Apple Silicon Mac 用户请解压 .tar.xz 并将其中的应用程序安装到“应用程序”。\n\n国内优先使用腾讯云 CNB：https://cnb.cool/fosfolio/cfos-brain-slice/-/releases/tag/v1.0.0\nGitHub 备用：https://github.com/zjm199502/cfos-brain-slice/releases/tag/v1.0.0",
-  "full_installer": "https://cnb.cool/fosfolio/cfos-brain-slice/-/releases/tag/v1.0.0",
-  "platform": "macos"
+ "version": "1.0.0",
+ "min_base": "0.9.0",
+ "date": "2026-11-27",
+ "notes": "FosFolio v1.0.0 软件内更新（48.2 MB）。在 Windows 或 Apple Silicon Mac 上打开「帮助 → 检查更新」，选择「现在更新」，安装后重启。已有 Cellpose、模型和项目可继续使用。极早期 v0.9 客户端如先收到 v0.9.22，重启后再检查一次即可升级至 v1.0.0。\n\n- 修复旧项目细胞坐标触发的共标统计错误。先前因 hypot 报错而跳过的图片可按原参数重跑，已有且匹配的脑片识别缓存会被复用。\n- 旋转脑片后，左键拖动视野会跟随鼠标在屏幕上的实时方向。\n- 优化大量细胞标记显示时的缩放和鼠标定位，保留人工校正与细胞计数。",
+ "full_installer": "https://cnb.cool/fosfolio/cfos-brain-slice/-/releases/tag/v1.0.0",
+ "platform": "macos",
+ "patch": {
+  "file": "cfos-patch-1.0.0.zip",
+  "size": 48157458,
+  "sha256": "8a56bcfe1641d4cdd60b9b906057e14ee4a2abdfadbf8e17e6f0385c367f5047",
+  "url": "https://cnb.cool/fosfolio/cfos-brain-slice/-/releases/download/v1.0.0/cfos-patch-1.0.0.zip"
+ }
 }
