@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+from .atlas_choice import project_atlas
 import base64
 import io
 import json
@@ -16,7 +17,7 @@ import numpy as np
 from PIL import Image, ImageDraw
 
 from .project import Project, ImageEntry
-from .slide_io import Slide, open_slide
+from .slide_io import Slide
 from .qc import COLORS, FALLBACK, _font
 
 NICE_UM = [1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000]
@@ -42,6 +43,7 @@ class FigureSettings:
     channels: list = field(default_factory=list)   # 显示的通道序号；空 = 全部
     separate: bool = False        # 合并图之外，每个通道再单独导出一张
     overlay_cells: bool = False
+    cell_ring_width_pt: float = 0.75
     overlay_regions: bool = False
     overlay_region_names: bool = False
     overlay_exclusions: bool = False
@@ -82,10 +84,10 @@ def auto_length_um(width_um: float) -> float:
     return float(min(NICE_UM, key=lambda v: abs(np.log(v) - np.log(max(target, 1e-6)))))
 
 
-def channel_color(name: str, idx: int, project: Project | None = None) -> tuple[int, int, int]:
+def channel_color(name: str, idx: int, project: Project | None = None, image=None, section=None) -> tuple[int, int, int]:
     """通道显示颜色：项目里选过的颜色（v0.8.3）优先，否则按通道名的默认颜色。"""
     if project is not None:
-        c = project.custom_color(idx)
+        c = project.custom_color(idx, image, section)
         if c is not None:
             return c
     return tuple(COLORS.get(name, FALLBACK[idx % len(FALLBACK)]))
@@ -117,22 +119,22 @@ def section_for(im: ImageEntry, x: float, y: float):
 
 
 # ------------------------------------------------------------------ 渲染
-def render_rgb(project: Project, sl: Slide, bbox0, lv: int, channels: list[int]) -> np.ndarray:
+def render_rgb(project: Project, sl: Slide, bbox0, lv: int, channels: list[int], image=None, section=None) -> np.ndarray:
     """按 ③ 的亮度/伽马和通道颜色合成 RGB（float 0–1）。"""
     names = project.channel_names
     a = sl.read(lv, bbox0, channels).astype(np.float32)
     H, W = a.shape[1:]
     rgb = np.zeros((H, W, 3), np.float32)
     for k, c in enumerate(channels):
-        d = project.display.get(c)
-        if d is not None and d.high > d.low:
+        d = project.channel_display(c, image, section)
+        if d.high > d.low:
             lo, hi, gm = d.low, d.high, d.gamma
         else:
             lo, hi = np.percentile(a[k], [0.5, 99.7]); gm = 1.0
         x = np.clip((a[k] - lo) / max(hi - lo, 1e-6), 0, 1)
         if gm != 1.0:
             x = x ** gm
-        col = np.array(channel_color(names[c] if c < len(names) else "", c, project), np.float32) / 255
+        col = np.array(channel_color(names[c] if c < len(names) else "", c, project, image, section), np.float32) / 255
         rgb += x[..., None] * col
     return np.clip(rgb, 0, 1)
 
@@ -172,6 +174,7 @@ def _smooth_upscale(lab: np.ndarray, out_hw, cap: int = 2000) -> np.ndarray:
     return np.asarray(Image.fromarray(mid).resize((W, H), Image.NEAREST))
 
 
+@project_atlas
 def region_overlay(project: Project, im: ImageEntry, sl: Slide, s, bbox0, out_hw):
     """截图范围内的脑区标签图（输出分辨率）。没有配准时返回 None。"""
     from . import registration as R
@@ -183,27 +186,27 @@ def region_overlay(project: Project, im: ImageEntry, sl: Slide, s, bbox0, out_hw
     tds = sl.downsample(tlv)
     th = sl.read(tlv, s.bbox0, [0])[0].shape
     warp = None
-    wp = R.warp_path(project.results_dir, im.key, s.name)
+    wp = R.warp_path(project.results_dir, im.key, s.name, reg)
     if reg.nonlinear and wp.exists():
         w = np.load(wp)
         if w.shape[1:] == th:
             warp = (w[0], w[1])
-    lab, _ = R.label_maps(reg, th[1], th[0], warp)
-    lab = R.orient(lab, reg.orientation)           # 回到原图方向
     x, y, w, h = bbox0
-    bx, by = s.bbox0[0], s.bbox0[1]
-    c0, r0 = int((x - bx) / tds), int((y - by) / tds)
-    c1, r1 = int(np.ceil((x + w - bx) / tds)), int(np.ceil((y + h - by) / tds))
-    c0, r0 = max(0, c0), max(0, r0)
-    c1, r1 = min(lab.shape[1], max(c1, c0 + 1)), min(lab.shape[0], max(r1, r0 + 1))
-    crop = lab[r0:r1, c0:c1]
-    # 截图框可能超出脑片范围：补 0
-    full = np.zeros((max(1, int(np.ceil(h / tds))), max(1, int(np.ceil(w / tds)))), lab.dtype)
-    oy, ox = max(0, int((by - y) / tds)), max(0, int((bx - x) / tds))
-    hh, ww = min(crop.shape[0], full.shape[0] - oy), min(crop.shape[1], full.shape[1] - ox)
-    if hh > 0 and ww > 0:
-        full[oy:oy + hh, ox:ox + ww] = crop[:hh, :ww]
-    up = _smooth_upscale(full, out_hw)
+    bx, by = s.bbox0[:2]
+    H, W = out_hw
+    # Sample the precise crop in physical coordinates; never enlarge a coarsely
+    # rounded crop. Bound whole-slide memory while retaining fine ROI resolution.
+    scale = min(1., 4096 / max(H, W))
+    mh, mw = max(1,round(H*scale)), max(1,round(W*scale))
+    xs = (x-bx + (np.arange(mw)+.5)*w/mw) / tds
+    ys = (y-by + (np.arange(mh)+.5)*h/mh) / tds
+    valid_x, valid_y = (xs >= 0) & (xs < th[1]), (ys >= 0) & (ys < th[0])
+    if reg.orientation == "r180":
+        xs, ys = th[1]-xs, th[0]-ys
+    sampled = R.sample_grid(reg,th[1],th[0],warp,xs,ys,("annotation",))["annotation"]
+    sampled[:, ~valid_x] = 0
+    sampled[~valid_y] = 0
+    up = sampled if sampled.shape == (H,W) else np.asarray(Image.fromarray(sampled).resize((W,H), Image.NEAREST))
     st = load_atlas().structures
     names = dict(zip(st["index"].to_numpy(), st["acronym"].to_numpy()))
     return up, names
@@ -239,11 +242,11 @@ def draw_scale_bar(img: Image.Image, pix_um: float, sb: ScaleBar) -> dict:
             "text": text, "text_x": tx, "text_y": y_text, "font_px": font_px, "color": sb.color}
 
 
-def make_inset(project: Project, sl: Slide, s, bbox0, channels, width_px: int) -> Image.Image:
+def make_inset(project: Project, sl: Slide, s, bbox0, channels, width_px: int, image=None) -> Image.Image:
     """定位小图：整张脑片缩略图 + 红框标出截图位置。"""
     lv = sl.level_for_pixel_size(8.0)
     ds = sl.downsample(lv)
-    rgb = render_rgb(project, sl, s.bbox0, lv, channels)
+    rgb = render_rgb(project, sl, s.bbox0, lv, channels, image, s)
     im = Image.fromarray((rgb * 255).astype(np.uint8))
     x, y, w, h = bbox0
     bx, by = s.bbox0[0], s.bbox0[1]
@@ -260,7 +263,7 @@ def make_inset(project: Project, sl: Slide, s, bbox0, channels, width_px: int) -
 REGION_COLORS = {"白": (235, 235, 235), "黑": (0, 0, 0), "黄": (255, 220, 0)}
 
 
-def region_contours(lab: np.ndarray, cap: int = 1600, min_frac: float = 0.0) -> dict:
+def region_contours(lab: np.ndarray, cap: int = 4096, min_frac: float = 0.0) -> dict:
     """标签图 → 每个脑区的平滑轮廓线（输出像素坐标，(x, y)）。返回 {index: [N×2 数组, ...]}。
     在缩小到 cap 的标签图上找轮廓（快），先轻微平滑去掉锯齿，再按比例放大回输出大小。"""
     from scipy import ndimage as ndi
@@ -288,7 +291,7 @@ def region_contours(lab: np.ndarray, cap: int = 1600, min_frac: float = 0.0) -> 
         for c in measure.find_contours(mf, 0.5):
             if len(c) < 4:
                 continue
-            c = measure.approximate_polygon(c, 0.35)
+            c = measure.approximate_polygon(c, 0.12)
             xy = np.stack([(c[:, 1] - 1 + c0 + 0.5) * fx, (c[:, 0] - 1 + r0 + 0.5) * fy], 1)
             lines.append(xy.astype(np.float32))
         if lines:
@@ -356,6 +359,7 @@ def _draw_regions(img: Image.Image, layer: dict):
         dr.text((px, py), t, fill=layer["text_color"], font=f)
 
 
+@project_atlas
 def render_roi(project: Project, im: ImageEntry, sl: Slide, roi: dict, st: FigureSettings,
                df=None, channels: list[int] | None = None, max_side: int | None = None,
                with_scale: bool = True, layers: bool = False) -> tuple[Image.Image, dict]:
@@ -367,6 +371,7 @@ def render_roi(project: Project, im: ImageEntry, sl: Slide, roi: dict, st: Figur
     chans = [c for c in chans if c < n_ch] or list(range(n_ch))
     bbox0 = clamp_roi(roi, sl.level_shapes[0])
     x, y, w, h = bbox0
+    sec = section_for(im, x + w / 2, y + h / 2)
     st2 = st if max_side is None else FigureSettings.from_dict({**st.to_dict(), "max_side": max_side})
     lv = choose_level(sl, w, h, st2)
     ds = sl.downsample(lv)
@@ -375,32 +380,31 @@ def render_roi(project: Project, im: ImageEntry, sl: Slide, roi: dict, st: Figur
         W0, H0 = int(np.ceil(w / ds)), int(np.ceil(h / ds))
         img = Image.new("RGB", (W0, H0), (255, 255, 255))
     else:
-        rgb = render_rgb(project, sl, bbox0, lv, chans)
+        rgb = render_rgb(project, sl, bbox0, lv, chans, im, sec)
         img = Image.fromarray((rgb * 255).astype(np.uint8))
     W, H = img.size
-    dr = ImageDraw.Draw(img)
     meta = {"image": im.key, "roi": roi.get("name", ""), "x": x, "y": y, "w": w, "h": h,
             "pixel_um": pix, "width_um": W * pix, "height_um": H * pix, "level": lv, "out_w": W, "out_h": H,
             "channels": [] if st.outline_only else [names[c] if c < len(names) else str(c) for c in chans]}
-    sec = section_for(im, x + w / 2, y + h / 2)
     # 细胞
     if st.overlay_cells and df is not None and not df.empty and not st.outline_only:
-        from .coloc import nucleus_channel
-        nuc = nucleus_channel(names)
+        from .cell_markers import diameters, draw_figure_rings
         g = df[(df["x"] >= x) & (df["x"] < x + w) & (df["y"] >= y) & (df["y"] < y + h)]
-        r = max(2.0, 5.0 / pix)
-        lw = max(1, int(round(r / 4)))
+        groups = []
         for c in chans:
-            if c == nuc and len(chans) > 1:
-                continue
-            col = channel_color(names[c] if c < len(names) else "", c, project)
+            col = channel_color(names[c] if c < len(names) else "", c, project, im, sec)
             col = tuple(min(255, int(v * 0.5 + 128)) for v in col)
             gc = g[g["channel"] == c]
-            for cx, cy in zip((gc["x"].to_numpy() - x) / ds, (gc["y"].to_numpy() - y) / ds):
-                dr.ellipse([cx - r, cy - r, cx + r, cy + r], outline=col, width=lw)
+            if not gc.empty:
+                xy = (gc[["x", "y"]].to_numpy() - [x, y]) / ds
+                groups.append((xy, diameters(gc, pix) / 2, col))
+        if groups:
+            img = draw_figure_rings(img, groups, st.cell_ring_width_pt, dpi=300)
+        meta["cell_ring_width_pt"] = st.cell_ring_width_pt
         meta["cells_in_roi"] = {names[c] if c < len(names) else str(c): int((g["channel"] == c).sum()) for c in chans}
     # 排除区域
     if st.overlay_exclusions:
+        dr = ImageDraw.Draw(img)
         for poly in im.exclusions:
             pts = [((px - x) / ds, (py - y) / ds) for px, py in poly]
             if len(pts) >= 3:
@@ -430,7 +434,7 @@ def render_roi(project: Project, im: ImageEntry, sl: Slide, roi: dict, st: Figur
     inset = None
     if st.inset and sec is not None:
         try:
-            ins = make_inset(project, sl, sec, bbox0, chans, max(80, int(W * 0.25)))
+            ins = make_inset(project, sl, sec, bbox0, chans, max(80, int(W * 0.25)), im)
             m = max(6, int(round(min(W, H) * 0.02)))
             img.paste(ins, (m, m))
             inset = (ins, m, m)
@@ -453,7 +457,7 @@ def _midline(project, im, sl, s, bbox0, out_hw):
         return None
     tds, (th, tw), _ = _thumb_geometry(sl, s)
     warp = None
-    wp = R.warp_path(project.results_dir, im.key, s.name)
+    wp = R.warp_path(project.results_dir, im.key, s.name, reg)
     if reg.nonlinear and wp.exists():
         w = np.load(wp)
         if w.shape[1:] == (th, tw):
@@ -563,6 +567,7 @@ def save_outputs(img: Image.Image, img_no_bar: Image.Image | None, meta: dict, s
     return out
 
 
+@project_atlas
 def export_roi(project: Project, im: ImageEntry, sl: Slide, roi: dict, st: FigureSettings, df=None,
                out_dir: Path | None = None, base_name: str | None = None) -> list[Path]:
     """导出一个截图框的所有文件（合并图 + 可选各通道单独图）。"""
@@ -594,6 +599,7 @@ def section_roi(s, margin_frac: float = 0.03) -> dict:
     return {"name": s.name, "x": x - m, "y": y - m, "w": w + 2 * m, "h": h + 2 * m}
 
 
+@project_atlas
 def export_sections(project: Project, images: list[ImageEntry], st: FigureSettings, sections: list[str] | None = None,
                     progress=None, cancel=None, out_dir: Path | None = None) -> tuple[list[Path], list[str]]:
     """导出整张脑片的配准图（荧光 + 脑区轮廓 + 缩写 + 比例尺）。sections 为 None 时导出所有已配准的脑片。"""
@@ -611,11 +617,15 @@ def export_sections(project: Project, images: list[ImageEntry], st: FigureSettin
         if progress:
             progress(i, len(todo), f"{im.key}：{s.name} 配准图")
         try:
-            sl = open_slide(im.path)
+            sl = im.open_slide()
             try:
                 df = project.load_cells(im) if st.overlay_cells else None
-                files += export_roi(project, im, sl, section_roi(s), st, df=df, out_dir=out_dir,
+                output = export_roi(project, im, sl, section_roi(s), st, df=df, out_dir=out_dir,
                                     base_name=f"{im.key}_{safe_name(s.name)}_配准图")
+                if output:
+                    from .workflow_status import record_output
+                    files.extend(output)
+                    record_output(project, "figure", [(im, s)])
             finally:
                 sl.close()
         except Exception as e:  # noqa: BLE001
@@ -625,6 +635,7 @@ def export_sections(project: Project, images: list[ImageEntry], st: FigureSettin
     return files, errors
 
 
+@project_atlas
 def export_images(project: Project, images: list[ImageEntry], st: FigureSettings, progress=None, cancel=None,
                   out_dir: Path | None = None) -> tuple[list[Path], list[str]]:
     """批量导出：给定图片的全部截图框。返回 (文件列表, 出错说明列表)。"""
@@ -636,10 +647,20 @@ def export_images(project: Project, images: list[ImageEntry], st: FigureSettings
         if progress:
             progress(i, len(todo), f"{im.key}：{roi.get('name', '')}")
         try:
-            sl = open_slide(im.path)
+            sl = im.open_slide()
             try:
                 df = project.load_cells(im) if st.overlay_cells else None
-                files += export_roi(project, im, sl, roi, st, df=df, out_dir=out_dir)
+                output = export_roi(project, im, sl, roi, st, df=df, out_dir=out_dir)
+                if output:
+                    from .workflow_status import record_output
+                    files.extend(output)
+                    x, y, w, h = clamp_roi(roi, sl.level_shapes[0])
+                    included = []
+                    for s in im.sections:
+                        bx, by, bw, bh = s.bbox0
+                        if s.enabled and bx < x + w and x < bx + bw and by < y + h and y < by + bh:
+                            included.append((im, s))
+                    record_output(project, "figure", included)
             finally:
                 sl.close()
         except Exception as e:  # noqa: BLE001

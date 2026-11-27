@@ -4,23 +4,23 @@
 
 多通道脑片配准与细胞定量。v0.8.6 起使用新名称，原 FosMap 用户可从软件内检查更新。
 
-原名“cFos 脑片分析”。版本号规则：x.y.1 到 x.y.10 是小版本（补丁，软件内自动更新）；x.y.10 之后的下一个版本是大版本 x.(y+1).0，并发布正式 GitHub Release。例如 0.8.10 之后是 0.9.0。
+原名“cFos 脑片分析”。Windows 和 macOS 各自提供软件内更新。新基础版本使用完整安装包升级。
 
 **使用说明书（研一新生版）**：[在线阅读](docs/使用说明书/使用说明书.md) · [Word](docs/使用说明书/cFos脑片分析_使用说明书_v0.7.docx) · [PDF](docs/使用说明书/cFos脑片分析_使用说明书_v0.7.pdf)
 
 面向小鼠脑切片荧光图像的一体化分析软件：脑片拆分 → 亮度/对比度 → 逐通道细胞识别 → 共标统计 → CCFv3 配准 → 分组统计 / 功能网络 → 导出 Excel。
 
-## v0.9.0 安装与升级
+## v1.0.0 安装与升级
 
-下载 [Windows x64 安装程序](https://github.com/zjm199502/cfos-brain-slice/releases/download/v0.9.0/FosFolio-0.9.0-Windows-x64-Setup.exe) 或 [Apple 芯片 Mac 安装包](https://github.com/zjm199502/cfos-brain-slice/releases/download/v0.9.0/FosFolio-0.9.0-macOS-arm64.zip)。旧版用户可在「帮助 → 检查更新」打开新版下载页。本版使用完整安装包升级。
+国内用户可优先从[腾讯云 CNB](https://cnb.cool/fosfolio/cfos-brain-slice/-/releases/tag/v1.0.0)下载完整离线安装包，也可使用 [GitHub Release](https://github.com/zjm199502/cfos-brain-slice/releases/tag/v1.0.0)。Windows x64 请下载同名的 Setup.exe、-1.bin 和 -2.bin，放在同一文件夹后运行 Setup.exe。Apple 芯片 Mac 请解压 .tar.xz 并将应用放入「应用程序」。v0.9.x 用户可通过「帮助 → 检查更新」打开下载页。
 
-细胞识别支持选择单张或多张脑片。单层厚切片可以先用人工标注视野比较漏检和误检，再将选定的参数应用到相应脑片。Excel 默认合并左右半脑，导出时可以选择分侧统计。详见[本版更新公告](packaging/更新公告/0.9.0.md)。
+本版修复了部分旧细胞缓存引发的共标计算错误和旋转后平移方向错误，改善了大量细胞标记下的缩放与鼠标定位。升级前请保存项目并退出软件。[本版更新公告](packaging/更新公告/1.0.0.md)
 
 ### 首次使用 Cellpose 4
 
 所有启用的通道使用 Cellpose-SAM v2（`cpsam_v2`）独立生成轮廓。各通道可以分别调整 Cellpose 掩膜阈值，默认值为 0。DAPI、EGFP 和 Fos 的阳性筛选仍使用各通道的面积、亮度和局部背景设置。
 
-在「④ 细胞识别 → 安装 / 修复 Cellpose 4 运行环境」完成首次下载，再点「测试 Cellpose 设备」查看实际推理设备。Windows 上兼容的 NVIDIA 显卡使用 CUDA，Apple 芯片 Mac 使用 PyTorch MPS（Metal），也可选择「仅 CPU」。首次安装需要联网并预留数 GB 空间，模型保存在本机，以后可离线识别。已有运行环境可通过 `CFOS_CELLPOSE_PYTHON` 指向 Python 解释器，通过 `CFOS_CELLPOSE_WEIGHTS` 指向官方 `cpsam_v2` 权重文件。
+完整离线安装包内含 Cellpose 运行环境和模型。需要初始化或修复时，请打开「④ 细胞识别 → 安装 / 修复 Cellpose 4 运行环境」，完成后使用「测试 Cellpose 设备」查看实际推理设备。Windows 上兼容的 NVIDIA 显卡使用 CUDA，Apple 芯片 Mac 使用 PyTorch MPS（Metal），也可选择「仅 CPU」。
 
 打开已有项目可继续查阅原始计数。再次识别使用 Cellpose 4，已有 StarDist 自训练权重及概率阈值仅适用于原模型。正式统计前可在人工评估视野复核新模型的漏检和误检。
 

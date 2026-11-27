@@ -1,6 +1,10 @@
 """Use Qt logical screen dimensions, including the taskbar and display scaling."""
 from qtpy.QtCore import QEvent, QSize, Qt, QTimer
-from qtpy.QtWidgets import QApplication, QLabel, QScrollArea
+from qtpy.QtGui import QPalette, QTextLayout, QTextOption
+from qtpy.QtWidgets import (
+    QApplication, QLabel, QListView, QScrollArea, QSizePolicy, QStyle, QStyleOptionViewItem, QVBoxLayout, QWidget,
+)
+from napari._qt.containers._layer_delegate import LayerDelegate
 
 
 def fit_window(widget, width, height):
@@ -53,3 +57,99 @@ class ProjectLabel(QLabel):
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self._fit_text()
+
+
+class LayerNameDelegate(LayerDelegate):
+    """Allow napari's visibility box, layer icon and thumbnail to keep their own space."""
+
+    def _lines(self, text, option):
+        # The thumbnail, visibility indicator, type icon and item margins share the row.
+        view = self.parent()
+        width = max(20, view.viewport().width() - 112)
+        if option.fontMetrics.horizontalAdvance(text) <= width:
+            return [text]
+        lines = []
+        for paragraph in text.split("\n"):
+            data = paragraph.encode("utf-16-le")
+            layout = QTextLayout(paragraph, option.font)
+            wrap = QTextOption()
+            wrap.setWrapMode(QTextOption.WrapAtWordBoundaryOrAnywhere)
+            layout.setTextOption(wrap)
+            layout.beginLayout()
+            while True:
+                line = layout.createLine()
+                if not line.isValid():
+                    break
+                line.setLineWidth(width)
+                start = line.textStart()
+                # Qt uses UTF-16 indices. Slice the encoded string for supplementary characters.
+                lines.append(data[2*start:2*(start + line.textLength())].decode("utf-16-le"))
+            layout.endLayout()
+        return lines
+
+    def paint(self, painter, option, index):
+        if not index.isValid():
+            return
+        opt = QStyleOptionViewItem(option)
+        self.initStyleOption(opt, index)
+        lines = self._lines(opt.text, opt)
+        if len(lines) <= 1:
+            return super().paint(painter, option, index)
+        self.get_layer_icon(opt, index)
+        view = self.parent()
+        style = view.style()
+        bounds = style.subElementRect(QStyle.SE_ItemViewItemText, opt, view)
+        # Draw the native row, including its eye and type icon. Qt elides even
+        # explicit newlines in this style, so draw the wrapped name separately.
+        opt.text = ""
+        style.drawControl(QStyle.CE_ItemViewItem, opt, painter, view)
+        self._paint_loading(painter, opt, index)
+        self._paint_thumbnail(painter, opt, index)
+        self._paint_lock_icon(painter, opt, index)
+        painter.save()
+        painter.setClipRect(option.rect)
+        painter.setFont(opt.font)
+        role = QPalette.HighlightedText if opt.state & QStyle.State_Selected else QPalette.Text
+        painter.setPen(opt.palette.color(role))
+        step = max(opt.fontMetrics.height(), opt.fontMetrics.lineSpacing())
+        bounds.setTop(option.rect.top() + (option.rect.height() - step * len(lines)) // 2)
+        bounds.setHeight(step)
+        for text in lines:
+            painter.drawText(bounds, Qt.AlignCenter | Qt.TextSingleLine, text)
+            bounds.translate(0, step)
+        painter.restore()
+
+    def sizeHint(self, option, index):
+        opt = QStyleOptionViewItem(option)
+        self.initStyleOption(opt, index)
+        rows = len(self._lines(opt.text, opt))
+        default_height = super().sizeHint(option, index).height()
+        step = max(opt.fontMetrics.height(), opt.fontMetrics.lineSpacing())
+        return QSize(1, max(default_height, rows * step + 16))
+
+
+class LayerSidebar(QWidget):
+    def __init__(self, view):
+        super().__init__()
+        self.view = view
+        self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        title = QLabel("图层（点眼睛图标可显示/隐藏）")
+        title.setWordWrap(True)
+        layout.addWidget(title)
+        layout.addWidget(view, 1)
+        view.setContextMenuPolicy(Qt.NoContextMenu)
+        view.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        view.setResizeMode(QListView.Adjust)
+        view.setUniformItemSizes(False)
+        view.setStyleSheet("QtLayerList { min-width: 0px; }")
+        self.delegate = LayerNameDelegate(view)
+        view.setItemDelegate(self.delegate)
+        self.delegate.loading_frame_changed.connect(view.viewport().update)
+
+    def sizeHint(self):
+        fm = self.view.fontMetrics()
+        scrollbar = self.style().pixelMetric(QStyle.PM_ScrollBarExtent)
+        return QSize(max(242, 112 + fm.horizontalAdvance("细胞-Far red") + scrollbar),
+                     super().sizeHint().height())

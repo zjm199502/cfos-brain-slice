@@ -1,16 +1,25 @@
-"""“脑区范围”选择框：导出和组间统计共用（v0.8.5）。
-
-用几种看得懂的选法（12 个大脑区 / 约 300 个常用脑区 / 全部…）代替“第几级”，
-下面直接写明这种选法包含什么，并可以打开一个树形窗口查看具体会列出哪些脑区。"""
+"""组间统计和 Excel 导出共用的脑区选择框与图谱树。"""
 from __future__ import annotations
 
 from .layout import fit_window
 from qtpy.QtCore import Qt, Signal
 from qtpy.QtGui import QBrush, QColor, QFont
-from qtpy.QtWidgets import (QCheckBox, QComboBox, QDialog, QHBoxLayout, QLabel, QLineEdit, QPushButton, QSpinBox,
-                               QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
+from qtpy.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QHBoxLayout,
+                            QLabel, QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QPushButton,
+                            QTabWidget, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
 
 from ..core import region_sets as RS
+from ..core.atlas_choice import CCF, use_atlas, structure_id
+from functools import wraps
+
+
+def _scope_atlas(method):
+    @wraps(method)
+    def run(self, *args, **kwargs):
+        project = getattr(self.window(), "project", None)
+        with use_atlas(getattr(project, "registration_atlas", CCF)):
+            return method(self, *args, **kwargs)
+    return run
 
 
 class RegionScopeBox(QWidget):
@@ -18,20 +27,15 @@ class RegionScopeBox(QWidget):
 
     def __init__(self, with_layers: bool = True, parent=None):
         super().__init__(parent)
+        self._region_ids = []
+        self._current_mode = RS.ALL
         L = QVBoxLayout(self); L.setContentsMargins(0, 0, 0, 0)
         self.combo = QComboBox()
-        for m, label, tip in RS.MODES:
-            self.combo.addItem(label, m)
-            self.combo.setItemData(self.combo.count() - 1, tip, Qt.ToolTipRole)
+        for mode in (RS.ALL, RS.SUMMARY_ONLY, RS.CUSTOM):
+            label = "自选脑区…" if mode == RS.CUSTOM else RS.MODE_LABEL[mode]
+            self.combo.addItem(label, mode)
+            self.combo.setItemData(self.combo.count() - 1, RS.MODE_HELP[mode], Qt.ToolTipRole)
         L.addWidget(self.combo)
-        row = QHBoxLayout()
-        self.depth_label = QLabel("最多列到图谱的")
-        self.depth = QSpinBox(); self.depth.setRange(1, 10); self.depth.setValue(6)
-        self.depth.setPrefix("第 "); self.depth.setSuffix(" 级")
-        self.depth.setToolTip("第 2 级：大脑 / 脑干 / 小脑；第 5 级：新皮层、海马结构及部分核团；\n"
-                              "第 6 级：运动皮层 MO、躯体感觉皮层 SS 等；第 7–8 级：更细的亚区和皮层分层。")
-        row.addWidget(self.depth_label); row.addWidget(self.depth); row.addStretch(1)
-        L.addLayout(row)
         self.layers = QCheckBox("不列出皮层各层（layer 1、2/3、4、5、6a、6b）")
         self.layers.setToolTip("皮层每个区又分 6 层（如 MOp1、MOp2/3…）。不关心分层时勾选，表格会短很多。")
         self.layers.setVisible(with_layers); self._with_layers = with_layers
@@ -42,8 +46,7 @@ class RegionScopeBox(QWidget):
         self.btn = QPushButton("查看会列出哪些脑区…")
         self.btn.clicked.connect(self.show_preview)
         L.addWidget(self.btn)
-        self.combo.currentIndexChanged.connect(self._sync)
-        self.depth.valueChanged.connect(self._sync)
+        self.combo.currentIndexChanged.connect(self._mode_changed)
         self.layers.toggled.connect(self._sync)
         self._sync()
 
@@ -51,96 +54,228 @@ class RegionScopeBox(QWidget):
     def mode(self) -> str:
         return self.combo.currentData()
 
-    def max_depth(self) -> int:
-        return int(self.depth.value()) if self.mode() == RS.DEPTH else 0
-
     def skip_layers(self) -> bool:
         return self._with_layers and self.layers.isEnabled() and self.layers.isChecked()
 
-    def set_values(self, mode: str, depth: int = 0, skip_layers: bool = False):
+    def region_ids(self) -> list[int]:
+        return self._region_ids.copy()
+
+    @_scope_atlas
+    def set_values(self, mode: str, depth: int = 0, skip_layers: bool = False, region_ids=()):
         mode = RS.resolve_mode(mode, depth)
-        for w in (self.combo, self.depth, self.layers):
+        warning = ""
+        if mode in (RS.MAJOR_ONLY, RS.MAJOR_SUMMARY, RS.DEPTH):
+            # 旧预设在新版图谱树中呈现为相同的一组 Allen ID。
+            try:
+                acronyms = RS.selected(mode, depth, skip_layers)
+                atlas = RS.info()
+                region_ids = atlas.loc[atlas["acronym"].isin(acronyms), "id"].tolist()
+            except (OSError, ValueError, KeyError) as exc:
+                region_ids = []
+                warning = f"无法读取旧项目的脑区清单，请检查图谱或重新选择脑区。\n{exc}"
+            mode = RS.CUSTOM
+        self._region_ids = sorted(set(region_ids or ()))
+        for w in (self.combo, self.layers):
             w.blockSignals(True)
-        self.combo.setCurrentIndex(max(0, self.combo.findData(mode)))
-        if depth and depth > 0:
-            self.depth.setValue(int(depth))
+        self.combo.setCurrentIndex(self.combo.findData(mode))
         self.layers.setChecked(bool(skip_layers))
-        for w in (self.combo, self.depth, self.layers):
+        for w in (self.combo, self.layers):
             w.blockSignals(False)
         self._sync()
+        if warning:
+            self.desc.setText(warning)
 
     # ---- 界面
+    def _mode_changed(self):
+        if self.mode() == RS.CUSTOM and not self._edit_custom():
+            self.combo.blockSignals(True)
+            self.combo.setCurrentIndex(self.combo.findData(self._current_mode))
+            self.combo.blockSignals(False)
+            return
+        self._sync()
+
+    @_scope_atlas
     def _sync(self, *_):
         m = self.mode()
-        by_depth = m == RS.DEPTH
-        self.depth_label.setVisible(by_depth); self.depth.setVisible(by_depth)
-        self.layers.setEnabled(m in (RS.ALL, RS.DEPTH))    # 大脑区 / 常用脑区本来就不含皮层分层
-        try:
-            n = len(RS.selected(m, self.max_depth(), self.skip_layers()))
-            count = f"共 {n} 个脑区。"
-        except Exception:  # noqa: BLE001  图谱文件缺失时不影响界面
-            count = ""
-        self.desc.setText(f"{count}{RS.MODE_HELP[m]}")
+        self._current_mode = m
+        self.layers.setEnabled(m == RS.ALL)
+        self.btn.setText("编辑已选脑区…" if m == RS.CUSTOM else "查看会列出哪些脑区…")
+        if m == RS.CUSTOM:
+            n = len(self._region_ids)
+            self.desc.setText(f"已选 {n} 个脑区。父区行包含全部下属脑区的统计。"
+                              if n else "请至少选择一个脑区，或切换到其他脑区范围。")
+        else:
+            try:
+                count = f"共 {len(RS.selected(m, skip_layers=self.skip_layers()))} 个脑区。"
+            except Exception:  # noqa: BLE001  图谱文件缺失时不影响界面
+                count = ""
+            self.desc.setText(f"{count}{RS.MODE_HELP[m]}")
         self.changed.emit()
 
+    def _edit_custom(self):
+        try:
+            dialog = RegionPreviewDialog(RS.CUSTOM, parent=self.window(), region_ids=self._region_ids)
+        except (OSError, ValueError, KeyError) as exc:
+            QMessageBox.warning(self, "无法读取脑区清单", str(exc))
+            return False
+        if dialog.exec() != QDialog.Accepted:
+            return False
+        self._region_ids = sorted(dialog.selected_ids())
+        return True
+
     def show_preview(self):
-        RegionPreviewDialog(self.mode(), self.max_depth(), self.skip_layers(), self.window()).exec()
+        if self.mode() == RS.CUSTOM:
+            if self._edit_custom():
+                self._sync()
+        else:
+            RegionPreviewDialog(self.mode(), skip_layers=self.skip_layers(), parent=self.window()).exec()
 
 
 class RegionPreviewDialog(QDialog):
-    """按图谱的树形结构显示全部脑区：会列出的打 ✔ 加粗，不列出的变灰。"""
+    """预览预设范围或编辑自选范围；父区与子区的勾选相互独立。"""
 
-    def __init__(self, mode, depth=0, skip_layers=False, parent=None):
+    def __init__(self, mode, depth=0, skip_layers=False, parent=None, *, region_ids=()):
         super().__init__(parent)
-        self.setWindowTitle("会列出哪些脑区")
+        with use_atlas(getattr(getattr(parent, "project", None), "registration_atlas", CCF)):
+            self._populate(mode, depth, skip_layers, region_ids)
+
+    def _populate(self, mode, depth, skip_layers, region_ids):
+        custom = mode == RS.CUSTOM
+        self.setWindowTitle("选择脑区" if custom else "会列出哪些脑区")
         fit_window(self, 900, 660)
         L = QVBoxLayout(self)
         t = RS.info()
-        sel = RS.selected(mode, depth, skip_layers)
-        head = QLabel(f"当前选法：{RS.MODE_LABEL[RS.resolve_mode(mode, depth)]}\n"
-                      f"打 ✔ 的 {len(sel)} 个脑区会出现在结果里，灰色的不列出（它们的细胞不会丢，已经计入所属的上级或常用脑区）。")
+        sel = set(region_ids) if custom else RS.selected(mode, depth, skip_layers)
+        head = QLabel("勾选至少一个需要单独列出的脑区。父区的统计包含全部下属脑区；同时勾选父区和子区时，两行的统计会重叠。"
+                      if custom else f"当前选法：{RS.MODE_LABEL[RS.resolve_mode(mode, depth)]}\n"
+                      f"打 ✔ 的 {len(sel)} 个脑区会出现在结果里。")
         head.setWordWrap(True); L.addWidget(head)
+        tree_layout = L
+        if custom:
+            self.tabs = QTabWidget()
+            L.addWidget(self.tabs, 1)
+            browse = QWidget()
+            tree_layout = QVBoxLayout(browse)
+            self.tabs.addTab(browse, "图谱树")
         row = QHBoxLayout()
-        self.search = QLineEdit(); self.search.setPlaceholderText("搜索缩写、英文名或中文名，例如 BLA、amygdala、杏仁核")
-        self.only = QCheckBox("只看会列出的"); row.addWidget(self.search, 1); row.addWidget(self.only)
-        L.addLayout(row)
-        self.tree = QTreeWidget(); self.tree.setColumnCount(5)
-        self.tree.setHeaderLabels(["脑区缩写", "中文名", "英文名", "脑区类别", "图谱层级"])
-        L.addWidget(self.tree, 1)
+        self.search = QLineEdit(); self.search.setClearButtonEnabled(True)
+        self.search.setPlaceholderText(f"搜索中文名、缩写、英文名或 {structure_id()}")
+        row.addWidget(self.search, 1)
+        self.only = None
+        if not custom:
+            self.only = QCheckBox("只看会列出的")
+            row.addWidget(self.only)
+        tree_layout.addLayout(row)
+        self.tree = QTreeWidget()
+        self.tree.setHeaderLabels(["脑区缩写", "中文名", "英文名", structure_id(), "脑区类别", "图谱层级"])
+        self.tree.setUniformRowHeights(True)
+        tree_layout.addWidget(self.tree, 1)
         bold = QFont(); bold.setBold(True)
         grey = QBrush(QColor("#7d8590"))
         items = {}
+        self._by_id = {}
         for r in t.itertuples(index=False):
-            on = r.acronym in sel
-            it = QTreeWidgetItem([("✔ " if on else "    ") + r.acronym, r.zh, r.name, r.脑区类别, f"第 {r.depth} 级"])
-            it.setData(0, Qt.UserRole, on)
-            for c in range(5):
-                if on:
-                    it.setFont(c, bold)
-                else:
-                    it.setForeground(c, grey)
-            parent = items.get(r.parent)
-            (parent.addChild(it) if parent is not None else self.tree.addTopLevelItem(it))
+            rid = int(r.id)
+            on = rid in sel if custom else r.acronym in sel
+            prefix = "" if custom else ("✔ " if on else "    ")
+            it = QTreeWidgetItem([prefix + r.acronym, r.zh, r.name, str(rid), r.脑区类别, f"第 {r.depth} 级"])
+            it.setData(0, Qt.UserRole, rid)
+            if custom:
+                it.setFlags(it.flags() | Qt.ItemIsUserCheckable)
+                it.setCheckState(0, Qt.Checked if on else Qt.Unchecked)
+            else:
+                it.setData(0, Qt.UserRole + 1, on)
+                for c in range(it.columnCount()):
+                    if on:
+                        it.setFont(c, bold)
+                    else:
+                        it.setForeground(c, grey)
+            parent_item = items.get(r.parent)
+            if parent_item is None:
+                self.tree.addTopLevelItem(it)
+            else:
+                parent_item.addChild(it)
             items[r.acronym] = it
-        self._items = items
-        # 展开到能看见所有会列出的脑区
+            self._by_id[rid] = it
+        if custom:
+            unknown = sorted(sel.difference(self._by_id))
+            if unknown:
+                ids = "、".join(map(str, unknown))
+                head.setText(head.text() + f"\n已有选择中的{structure_id()} {ids} 在当前图谱中找不到，应用后将移除。")
+            self.tree.expandToDepth(1)
         for it in items.values():
-            if it.data(0, Qt.UserRole):
+            if (it.checkState(0) == Qt.Checked if custom else it.data(0, Qt.UserRole + 1)):
                 p = it.parent()
                 while p is not None:
                     p.setExpanded(True); p = p.parent()
-        for c, w in enumerate((210, 180, 280, 100, 70)):
+        for c, w in enumerate((200, 150, 240, 90, 110, 70)):
             self.tree.setColumnWidth(c, w)
-        b = QPushButton("关闭"); b.clicked.connect(self.accept); L.addWidget(b)
-        self.search.textChanged.connect(self._filter); self.only.toggled.connect(self._filter)
+        if custom:
+            self._add_selection_tab(L)
+        else:
+            b = QPushButton("关闭"); b.clicked.connect(self.accept); L.addWidget(b)
+        self.search.textChanged.connect(self._filter)
+        if self.only is not None:
+            self.only.toggled.connect(self._filter)
+
+    def selected_ids(self):
+        return [rid for rid, it in self._by_id.items() if it.checkState(0) == Qt.Checked]
+
+    def _add_selection_tab(self, layout):
+        page = QWidget()
+        column = QVBoxLayout(page)
+        self.selection = QListWidget()
+        self.selection.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        column.addWidget(self.selection, 1)
+        row = QHBoxLayout()
+        self.remove_button = QPushButton("移除选中项")
+        self.remove_button.clicked.connect(lambda: self._uncheck_items(self.selection.selectedItems()))
+        self.selection.itemSelectionChanged.connect(lambda: self.remove_button.setEnabled(bool(self.selection.selectedItems())))
+        row.addWidget(self.remove_button)
+        self.clear_button = QPushButton("清空已选")
+        self.clear_button.clicked.connect(lambda: self._uncheck_items([self.selection.item(i) for i in range(self.selection.count())]))
+        row.addWidget(self.clear_button); row.addStretch(1)
+        column.addLayout(row)
+        self.tabs.addTab(page, "已选")
+        actions = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        self.apply_button = actions.button(QDialogButtonBox.Ok)
+        self.apply_button.setText("应用")
+        actions.button(QDialogButtonBox.Cancel).setText("取消")
+        actions.accepted.connect(self.accept); actions.rejected.connect(self.reject)
+        layout.addWidget(actions)
+        self.tree.itemChanged.connect(self._update_selection)
+        self._update_selection()
+
+    def _update_selection(self):
+        self.selection.clear()
+        for rid in self.selected_ids():
+            it = self._by_id[rid]
+            label = " · ".join(text for text in (it.text(0), it.text(1), it.text(2), str(rid)) if text)
+            entry = QListWidgetItem(label, self.selection)
+            entry.setData(Qt.UserRole, rid)
+            entry.setToolTip(label)
+        count = self.selection.count()
+        self.tabs.setTabText(1, f"已选（{count}）")
+        self.remove_button.setEnabled(False)
+        self.clear_button.setEnabled(bool(count))
+        self.apply_button.setEnabled(bool(count))
+        self.apply_button.setToolTip("" if count else "请先在图谱树中勾选至少一个脑区。")
+
+    def _uncheck_items(self, entries):
+        self.tree.blockSignals(True)
+        for entry in entries:
+            self._by_id[entry.data(Qt.UserRole)].setCheckState(0, Qt.Unchecked)
+        self.tree.blockSignals(False)
+        self._update_selection()
 
     def _filter(self, *_):
         key = self.search.text().strip().lower()
-        only = self.only.isChecked()
+        only = self.only is not None and self.only.isChecked()
 
         def visit(it) -> bool:
             kids = [visit(it.child(i)) for i in range(it.childCount())]
-            hit = (not key or any(key in it.text(c).lower() for c in range(3))) and (not only or it.data(0, Qt.UserRole))
+            matches = (it.text(3) == key if key.isdecimal() else any(key in it.text(c).lower() for c in range(3)))
+            hit = (not key or matches) and (not only or it.data(0, Qt.UserRole + 1))
             show = hit or any(kids)
             it.setHidden(not show)
             if (key or only) and any(kids):

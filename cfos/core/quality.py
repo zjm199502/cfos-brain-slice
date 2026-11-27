@@ -4,7 +4,7 @@
 1. 配准重合度：最终脑区图（含非线性贴合和修正点）的脑轮廓与组织轮廓的 Dice。
 2. 模糊：把组织分成约 100 µm 的小块，算每块的清晰度（高频细节 / 亮度）；
    比同一张脑片最清晰的那些块低很多的，算作模糊块。整张脑片都偏糊时，与项目中其他脑片比较。
-3. 过曝：组织内各通道达到最大灰度（饱和）的像素比例。饱和的地方亮度已经失真，强度分级和亮度比较都不可靠。
+3. 过曝：组织内各通道达到最大灰度（饱和）的像素比例。饱和的地方亮度已经失真，亮度比较不可靠。
 4. 组织缺损：图谱认为有脑组织、实际却没有组织的面积比例（脑室除外；已画排除区域的部分不算）。
    未配准时，改为组织轮廓内的空洞比例。
 5. 阳性细胞落在白质 / 脑室：标记物通道（c-Fos、NeuN 等，不算 DAPI）的阳性细胞落在图谱白质（fiber tracts）
@@ -16,8 +16,10 @@
 """
 from __future__ import annotations
 
+from .atlas_choice import project_atlas, current, STAM
 import hashlib
 import json
+from pathlib import Path
 
 import numpy as np
 from scipy import ndimage as ndi
@@ -42,6 +44,13 @@ VERSION = 2
 def _signature(project, im, s) -> str:
     d = {"v": VERSION, "bbox": list(s.bbox0), "reg": s.registration, "exc": im.exclusions,
          "z": project.z_mode}
+    path = Path(im.path)
+    if path.suffix.lower() == ".czi":
+        try:
+            source = path.stat()
+            d["czi"] = [im.scene_id, source.st_size, source.st_mtime_ns]
+        except OSError:
+            d["czi"] = [im.scene_id, None]
     return hashlib.md5(json.dumps(d, sort_keys=True, default=str).encode()).hexdigest()
 
 
@@ -77,17 +86,19 @@ def _indices_under(*paths):
     p = st["path"].astype(str)
     sel = np.zeros(len(st), bool)
     for q in paths:
-        sel |= (p == q) | p.str.startswith(q + "/")
+        roots = st.loc[st["acronym"] == q, "path"].astype(str) if current() == STAM else [q]
+        for root in roots:
+            sel |= (p == root) | p.str.startswith(root + "/")
     return st.loc[sel, "index"].to_numpy(int)
 
 
 def _ventricle_indices():
-    return _indices_under("997/73")
+    return _indices_under("VS") if current() == STAM else _indices_under("997/73")
 
 
 def _wm_ventricle_indices():
     """白质（fiber tracts）和脑室的全部下级脑区。"""
-    return _indices_under("997/1009", "997/73")
+    return _indices_under("fiber tract", "VS") if current() == STAM else _indices_under("997/1009", "997/73")
 
 
 def _label_map(project, im, s, mask_shape):
@@ -97,7 +108,7 @@ def _label_map(project, im, s, mask_shape):
         return None
     H, W = mask_shape
     warp = None
-    wp = R.warp_path(project.results_dir, im.key, s.name)
+    wp = R.warp_path(project.results_dir, im.key, s.name, reg)
     if reg.nonlinear and wp.exists():
         w = np.load(wp)
         if w.shape[1:] == (H, W):
@@ -107,6 +118,7 @@ def _label_map(project, im, s, mask_shape):
 
 
 # ------------------------------------------------------------------ 各项指标
+@project_atlas
 def registration_metrics(project, im, sl, s, nuc, thumb=None):
     """返回 (dice 或 None, 组织缺损 %)。在配准缩略图（8 µm）上算。"""
     img, mask, ds = thumb or R.section_thumbnail(sl, s, nuc)
@@ -118,7 +130,15 @@ def registration_metrics(project, im, sl, s, nuc, thumb=None):
         return None, round(100.0 * holes.sum() / max(filled.sum(), 1), 2)
     mo = R.orient(mask, reg.orientation)
     lab = _label_map(project, im, s, mo.shape)
-    brain = lab > 0
+    if reg.fit_atlas == STAM:
+        from .stam_refinement import tissue_mask
+        wp = R.warp_path(project.results_dir, im.key, s.name, reg)
+        warp = np.load(wp, mmap_mode="r") if reg.nonlinear else None
+        h, w = mo.shape
+        reference = R.sample_grid(reg, w, h, warp, np.arange(w)+.5, np.arange(h)+.5, ("reference",))["reference"]
+        brain = tissue_mask(reference, ds * sl.pixel_size_um)
+    else:
+        brain = lab > 0
     d = R.dice(brain, mo)
     vent = np.isin(lab, _ventricle_indices())
     # 脑室旁一圈也常常是空的（切片时脑室会张开），稍微放宽
@@ -128,6 +148,7 @@ def registration_metrics(project, im, sl, s, nuc, thumb=None):
     return round(float(d), 3), round(float(dmg), 2)
 
 
+@project_atlas
 def marker_misplaced(project, im, s, cells, nuc, mask_shape, ds) -> dict:
     """标记物通道（不算细胞核通道）的阳性细胞落在白质或脑室里的比例，返回 {通道名: %}。
     只算落在图谱脑组织内的细胞；阳性细胞少于 MISPLACED_MIN_CELLS 个的通道不返回。未配准返回 {}。"""
@@ -299,11 +320,10 @@ def _misplaced_entry(project, im, s, nuc, mask_shape, ds, cells=None) -> dict:
             "cells_sig": _cells_signature(project, im)}
 
 
-def check_image(project, im, sl=None, redo=False, progress=None) -> dict:
+def check_image(project, im, sl=None, redo=False, progress=None, *, section_names=None) -> dict:
     """计算（或从缓存读取）一张图片所有脑片的指标。返回 {脑片名: 指标}。"""
-    from .slide_io import open_slide
     cache = load_cache(project, im)
-    secs = [s for s in im.sections if s.enabled]
+    secs = [s for s in im.sections if s.enabled and (section_names is None or s.name in section_names)]
     todo = [s for s in secs if redo or cache.get(s.name, {}).get("signature") != _signature(project, im, s)]
     # 只有识别结果变了：只重算“阳性细胞落在白质 / 脑室”这一项（快）
     csig = _cells_signature(project, im)
@@ -311,7 +331,7 @@ def check_image(project, im, sl=None, redo=False, progress=None) -> dict:
                and cache.get(s.name, {}).get("cells_sig") != csig]
     if todo or recells:
         own = sl is None
-        sl = sl or open_slide(im.path)
+        sl = sl or im.open_slide()
         try:
             for k, s in enumerate(todo):
                 if progress:
@@ -367,8 +387,7 @@ def _dapi_density(project):
 
 def project_pixel_um(project, im) -> float:
     if getattr(im, "_px", None) is None:
-        from .slide_io import open_slide
-        sl = open_slide(im.path); im._px = sl.pixel_size_um; sl.close()
+        sl = im.open_slide(); im._px = sl.pixel_size_um; sl.close()
     return im._px
 
 
@@ -440,7 +459,16 @@ def quality_table(project, progress=None, redo=False):
     df = pd.DataFrame(rows)
     summ = {f"{r['图片']}/{r['脑片']}": {"level": r["质量"], "why": r["需要检查的问题"],
                                        "signature": allm[(r["图片"], r["脑片"])].get("signature")} for r in rows}
-    _summary_path(project).write_text(json.dumps(summ, ensure_ascii=False, indent=1), encoding="utf-8")
+    path = _summary_path(project)
+    if getattr(project, "scope_tag", "") and path.exists():
+        try:
+            previous = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            previous = {}
+        summ = {**previous, **summ}
+    if rows:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(summ, ensure_ascii=False, indent=1), encoding="utf-8")
     return df
 
 

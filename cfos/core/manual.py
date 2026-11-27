@@ -40,11 +40,13 @@ def save_manual(project, image, d: dict):
 
 
 def section_of(image, x, y) -> str:
-    """点所在的脑片（按方框判断），不在任何脑片里返回空字符串。"""
+    """Locate a point in the tissue outline; legacy sections may only have a box."""
+    from matplotlib.path import Path as Outline
     for s in image.sections:
         bx, by, bw, bh = s.bbox0
         if s.enabled and bx <= x < bx + bw and by <= y < by + bh:
-            return s.name
+            if not s.contour0 or Outline(s.vertices()).contains_point((x, y)):
+                return s.name
     return ""
 
 

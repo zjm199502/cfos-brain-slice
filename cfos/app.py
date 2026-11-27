@@ -63,9 +63,22 @@ def main():
         updater.mark_started_ok()
         print(updater.version_text(), cfos.__file__, flush=True)
         sys.exit(0)
+    if "--install-cellpose-offline" in sys.argv:
+        from cfos.core.cellpose_setup import install
+        from cfos.core.log import setup_logging, log
+        setup_logging()
+        try:
+            log.info(install(report=log.info, require_offline=True))
+        except Exception:
+            log.exception("Cellpose 离线安装失败")
+            sys.exit(1)
+        return
     if "--selftest" in sys.argv:
         selftest_cli()
     _raise_priority()
+    if sys.platform == "darwin":
+        from cfos.mac_cocoa import configure_plugins
+        configure_plugins()
     splash = _splash()
     from napari.qt import get_qapp
 
@@ -112,8 +125,10 @@ def _after_start(w):
         msg = os.environ.get("CFOS_PATCH_DISABLED")
         if msg:
             w.info(msg + "。\n现在使用的是安装时的版本。\n请点“① 项目与图片 → 导出诊断包”，把 zip 文件发给开发者。")
+        from qtpy.QtCore import QTimer
+        QTimer.singleShot(0, w.device_box.preload)
+        QTimer.singleShot(0, w.device_box.offer_offline_setup)
         if updater.auto_check_enabled() and "--no-update-check" not in sys.argv:
-            from qtpy.QtCore import QTimer
             QTimer.singleShot(4000, lambda: w.check_updates(silent=True))
     except Exception:  # noqa: BLE001
         from cfos.core.log import log

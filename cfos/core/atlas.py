@@ -15,7 +15,8 @@ import numpy as np
 import pandas as pd
 from scipy import ndimage as ndi
 
-from .resources import resources_dir
+from .resources import allen_atlas_dir
+from . import atlas_choice, stam
 
 SHAPE_ASR = (528, 320, 456)
 
@@ -32,9 +33,21 @@ class Atlas:
         return len(self.structures)
 
 
-@lru_cache(maxsize=1)
-def load_atlas() -> Atlas:
-    d = resources_dir() / "atlas"
+def load_atlas(name=None) -> Atlas:
+    return _load_atlas(atlas_choice.current() if name is None else name)
+
+
+@lru_cache(maxsize=2)
+def _load_atlas(name):
+    if name == atlas_choice.STAM:
+        from .region_sets import ZH
+        reference, labels = stam.volumes()
+        structures = pd.read_csv(stam.DATA / "structures.csv", keep_default_na=False)
+        structures["name_zh"] = structures["acronym"].map(ZH).fillna("")
+        return Atlas(labels, reference, np.where(labels > 0, 2, 0).astype(np.uint8), structures)
+    if name != atlas_choice.CCF:
+        raise ValueError(f"未知图谱：{name}")
+    d = allen_atlas_dir()
     z = np.load(d / "allen_ccfv3_25um.npz")
     st = pd.read_csv(d / "structures.csv")
     zh = d / "structures_zh.csv"
@@ -45,6 +58,14 @@ def load_atlas() -> Atlas:
         st["name_zh"] = ""
     st["name_zh"] = st["name_zh"].fillna("")
     return Atlas(z["annotation"], z["reference"], z["hemispheres"], st)
+
+
+def native_mm(edit_coords):
+    return np.asarray(edit_coords)[..., (0, 2, 1)] * np.array([.025, -.025, -.025])
+
+
+def edit_coords(native):
+    return np.asarray(native)[..., (0, 2, 1)] * np.array([40., -40., -40.])
 
 
 def qn_to_asr(p: np.ndarray) -> np.ndarray:
@@ -58,6 +79,7 @@ class Plane:
     o: np.ndarray
     u: np.ndarray
     v: np.ndarray
+    atlas: str = atlas_choice.CCF
 
     def to_list(self):
         return [float(x) for x in np.concatenate([self.o, self.u, self.v])]
@@ -73,6 +95,8 @@ class Plane:
 
     def ap_mm(self):
         """平面中心的前后位置（相对 Bregma，mm；Bregma 约在 QuickNII y=540·… 这里用常用近似值）。"""
+        if self.atlas == atlas_choice.STAM:
+            return float(5.230 - native_mm(self.center())[2])
         y = self.center()[1]
         return (y - 332.0) * 0.025  # 约定：QuickNII y≈332 对应 Bregma 0（Allen CCF 常用换算）
 
@@ -80,7 +104,7 @@ class Plane:
 def sample_plane(plane: Plane, width: int, height: int, which=("annotation",), order_ref=1,
                  warp: tuple[np.ndarray, np.ndarray] | None = None) -> dict[str, np.ndarray]:
     """按平面切出 height×width 的图谱图像。warp=(dx, dy) 为每个像素的额外位移（像素单位，非线性修正）。"""
-    at = load_atlas()
+    at = load_atlas(plane.atlas)
     t, s = np.mgrid[0:height, 0:width].astype(np.float32)
     if warp is not None:
         s = s + warp[0]
@@ -88,6 +112,11 @@ def sample_plane(plane: Plane, width: int, height: int, which=("annotation",), o
     s = (s + 0.5) / width
     t = (t + 0.5) / height
     p = plane.o[None, None, :] + s[..., None] * plane.u[None, None, :] + t[..., None] * plane.v[None, None, :]
+    if plane.atlas == atlas_choice.STAM:
+        coords = np.moveaxis(native_mm(p)[..., ::-1], -1, 0)
+        return {key: ndi.map_coordinates(getattr(at, key), coords / (.032 if key == "reference" else .040),
+                                         order=order_ref if key == "reference" else 0, mode="constant")
+                for key in which}
     idx = qn_to_asr(p)
     coords = [idx[..., 0], idx[..., 1], idx[..., 2]]
     out = {}

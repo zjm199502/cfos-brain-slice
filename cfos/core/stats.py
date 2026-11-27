@@ -8,7 +8,8 @@
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, asdict
+from .atlas_choice import project_atlas
+from dataclasses import dataclass, asdict, field
 
 import numpy as np
 import pandas as pd
@@ -29,6 +30,7 @@ class StatsParams:
     max_depth: int = 0              # 只比较不超过第几级的脑区（0 = 全部）
     region_set: str = ""             # 比较哪些脑区：见 core/region_sets.py（空 = 旧设置，按 max_depth）
     alpha: float = 0.05             # 校正后 q 值小于它算显著
+    region_ids: list[int] = field(default_factory=list)
 
     def to_dict(self):
         return asdict(self)
@@ -36,11 +38,11 @@ class StatsParams:
 
 def count_columns(df: pd.DataFrame) -> list[str]:
     """细胞数的列：“X+”和“X+Y 共标”。"""
-    return [c for c in df.columns if (c.endswith("+") or c.endswith(" 共标") or c[-3:] in ("+ 弱", "+ 中", "+ 强"))
+    return [c for c in df.columns if (c.endswith("+") or c.endswith(" 共标"))
             and pd.api.types.is_numeric_dtype(df[c])]
 
 
-def metric_options(channel_names, nucleus_name="DAPI", grading=None) -> list[str]:
+def metric_options(channel_names, nucleus_name="DAPI") -> list[str]:
     """界面上可选的指标：每个通道和每种共标的密度，以及双标占单标的百分比。
     v0.8.3：有 DAPI 通道时，“X+ 占 DAPI+ 的比例 %”放在最前面，作为推荐主指标（不受切片厚度、组织收缩、面积误差影响）。"""
     from itertools import combinations
@@ -59,11 +61,6 @@ def metric_options(channel_names, nucleus_name="DAPI", grading=None) -> list[str
         opts.append(f"{a}+{b} 共标 密度 (个/mm²)")
         opts.append(f"{a}+{b} 共标 占 {a}+ 的比例 %")
         opts.append(f"{a}+{b} 共标 占 {b}+ 的比例 %")
-    for nm in (grading or {}):
-        if nm in channel_names:
-            for lab in ("强", "中", "弱"):
-                opts.append(f"{nm}+ {lab} 密度 (个/mm²)")
-            opts.append(f"{nm}+ 强 占 {nm}+ 的比例 %")
     if nucleus_name in channel_names:
         opts.append(f"{nucleus_name}+ 密度 (个/mm²)")
     if not markers and channel_names:
@@ -77,8 +74,6 @@ def add_metrics(t: pd.DataFrame) -> pd.DataFrame:
     area = t["面积 (mm²)"].replace(0, np.nan)
     for c in count_columns(t):
         t[f"{c} 密度 (个/mm²)"] = t[c] / area
-        if c[-3:] in ("+ 弱", "+ 中", "+ 强") and c[:-2] in t.columns:
-            t[f"{c} 占 {c[:-2]} 的比例 %"] = 100.0 * t[c] / t[c[:-2]].replace(0, np.nan)
         if c.endswith(" 共标"):
             parts = c[:-3].split("+")
             if len(parts) == 2:
@@ -153,7 +148,8 @@ def per_animal(region_sec: pd.DataFrame, samples: dict) -> pd.DataFrame:
     counts = count_columns(df)
     g = df.groupby(["组别", "动物"] + KEY_COLS, as_index=False, dropna=False)
     t = g[counts + ["面积 (mm²)"]].sum()
-    n_sec = df.groupby(["组别", "动物"])["脑片"].nunique().rename("脑片数").reset_index()
+    n_sec = (df[["组别", "动物", "图片", "脑片"]].drop_duplicates()
+             .groupby(["组别", "动物"]).size().rename("脑片数").reset_index())
     t = t.merge(n_sec, on=["组别", "动物"], how="left")
     return add_metrics(t)
 
@@ -168,32 +164,79 @@ def bh_fdr(p: np.ndarray) -> np.ndarray:
 
 
 def _test(a: np.ndarray, b: np.ndarray, test: str):
-    a, b = a[~np.isnan(a)], b[~np.isnan(b)]
+    a, b = a[np.isfinite(a)], b[np.isfinite(b)]
     if len(a) < 2 or len(b) < 2:
         return np.nan
-    if np.all(a == a[0]) and np.all(b == b[0]):
-        return 1.0 if a[0] == b[0] else np.nan
     if test == "mannwhitney":
         return float(st.mannwhitneyu(a, b, alternative="two-sided").pvalue)
+    if np.all(a == a[0]) and np.all(b == b[0]):
+        return 1.0 if a[0] == b[0] else np.nan
     return float(st.ttest_ind(a, b, equal_var=False).pvalue)
 
 
-def compare_groups(animal: pd.DataFrame, params: StatsParams) -> tuple[pd.DataFrame, pd.DataFrame]:
+def eligible_rows(animal: pd.DataFrame, params: StatsParams) -> pd.DataFrame:
+    a = animal[animal["半脑"] == params.hemisphere]
+    a = _RS.filter_table(a, params.region_set, params.max_depth, region_ids=params.region_ids)
+    return a.loc[a["面积 (mm²)"] >= params.min_area_mm2]
+
+
+def _apply_fdr(table: pd.DataFrame, alpha: float):
+    table["q 值 (FDR 校正)"] = bh_fdr(table["p 值"].to_numpy())
+    table["显著"] = np.where(table["q 值 (FDR 校正)"] < alpha, "是", "")
+
+
+def _overall_comparison(eligible: pd.DataFrame, groups: list[str], params: StatsParams) -> pd.DataFrame:
+    """One omnibus test per region, using the same expected groups for every region."""
+    rows = []
+    rank_test = params.test == "mannwhitney"
+    for key, region in eligible.groupby(KEY_COLS, dropna=False):
+        values = []
+        row = dict(zip(KEY_COLS, key))
+        row["检验"] = "Kruskal–Wallis H" if rank_test else "Welch ANOVA"
+        for group in groups:
+            v = region.loc[region["组别"] == group, params.metric].to_numpy(float)
+            v = v[np.isfinite(v)]
+            values.append(v)
+            row[f"{group} 动物数"] = len(v)
+        statistic = p = np.nan
+        note = ""
+        if any(len(v) < 2 for v in values):
+            note = "未检验：至少一组的有效动物数不足 2"
+        elif all(np.all(v == values[0][0]) for v in values):
+            note = "未检验：所有动物的数值相同"
+        elif not rank_test and any(np.all(v == v[0]) for v in values):
+            note = "未检验：至少一组的组内方差为零"
+        else:
+            result = st.kruskal(*values) if rank_test else st.f_oneway(*values, equal_var=False)
+            statistic, p = result.statistic, result.pvalue
+            if rank_test and any(len(v) < 5 for v in values):
+                note = "有组少于 5 只动物，卡方近似需谨慎解释"
+        rows.append({**row, "统计量": statistic, "p 值": p, "说明": note})
+    result = pd.DataFrame(rows)
+    if not result.empty:
+        _apply_fdr(result, params.alpha)
+        result = result.sort_values("p 值", kind="stable").reset_index(drop=True)
+    return result
+
+
+def compare_groups(animal: pd.DataFrame, params: StatsParams, groups=None) -> tuple[pd.DataFrame, pd.DataFrame]:
     """返回 (按组汇总, 组间比较)。组间比较：每个“对照组 vs 其他组”一组行，每行一个脑区。"""
     if animal.empty:
         return pd.DataFrame(), pd.DataFrame()
     m = params.metric or next((c for c in animal.columns if c.endswith("密度 (个/mm²)")), None)
     if m not in animal.columns:
         raise ValueError(f"没有这个指标：{m}")
-    a = animal[animal["半脑"] == params.hemisphere]
-    a = _RS.filter_table(a, params.region_set, params.max_depth)
-    a = a[a["面积 (mm²)"] >= params.min_area_mm2]
-    groups = sorted(a["组别"].unique().tolist())
+    a = eligible_rows(animal, params)
+    groups = sorted(animal["组别"].unique()) if groups is None else groups
+    return _compare_eligible(a, params, m, groups)
+
+
+def _compare_eligible(a, params, m, groups):
     ctrl = params.control if params.control in groups else (groups[0] if groups else "")
     # 按组汇总
     rows = []
     for (grp, *k), g in a.groupby(["组别"] + KEY_COLS, dropna=False):
-        v = g[m].to_numpy(float); v = v[~np.isnan(v)]
+        v = g[m].to_numpy(float); v = v[np.isfinite(v)]
         rows.append(dict(zip(["组别"] + KEY_COLS, [grp] + list(k)),
                          **{"动物数": len(v), "平均值": v.mean() if len(v) else np.nan,
                             "标准误 (SEM)": v.std(ddof=1) / np.sqrt(len(v)) if len(v) > 1 else np.nan,
@@ -207,21 +250,23 @@ def compare_groups(animal: pd.DataFrame, params: StatsParams) -> tuple[pd.DataFr
         for k, g in a[a["组别"].isin([ctrl, other])].groupby(KEY_COLS, dropna=False):
             va = g.loc[g["组别"] == ctrl, m].to_numpy(float)
             vb = g.loc[g["组别"] == other, m].to_numpy(float)
-            ma, mb = np.nanmean(va) if len(va) else np.nan, np.nanmean(vb) if len(vb) else np.nan
+            va, vb = va[np.isfinite(va)], vb[np.isfinite(vb)]
+            ma, mb = va.mean() if len(va) else np.nan, vb.mean() if len(vb) else np.nan
             rows.append(dict(zip(KEY_COLS, k), **{
                 "比较": f"{other} vs {ctrl}",
-                f"{ctrl} 平均": ma, f"{ctrl} 动物数": int(np.sum(~np.isnan(va))),
-                f"{other} 平均": mb, f"{other} 动物数": int(np.sum(~np.isnan(vb))),
+                "对照组": ctrl, "比较组": other,
+                f"{ctrl} 平均": ma, f"{ctrl} 动物数": len(va),
+                f"{other} 平均": mb, f"{other} 动物数": len(vb),
                 "倍数变化": mb / ma if ma and not np.isnan(ma) else np.nan,
                 "log2 倍数变化": np.log2((mb + 1e-9) / (ma + 1e-9)) if ma > 0 or mb > 0 else np.nan,
                 "p 值": _test(va, vb, params.test)}))
         c = pd.DataFrame(rows)
         if c.empty:
             continue
-        c["q 值 (FDR 校正)"] = bh_fdr(c["p 值"].to_numpy())
-        c["显著"] = np.where(c["q 值 (FDR 校正)"] < params.alpha, "是", "")
         comps.append(c.sort_values("p 值"))
     comp = pd.concat(comps, ignore_index=True) if comps else pd.DataFrame()
+    if not comp.empty:
+        _apply_fdr(comp, params.alpha)
     note = dapi_note(a, m)
     if note is not None:
         gsum = gsum.merge(note, on=KEY_COLS, how="left") if not gsum.empty else gsum
@@ -315,6 +360,7 @@ def bar_plot(animal: pd.DataFrame, comp: pd.DataFrame, params: StatsParams, metr
     fig.tight_layout(); fig.savefig(path, dpi=150); plt.close(fig)
 
 
+@project_atlas
 def run_group_stats(project, out_dir, params: StatsParams, region_sec: pd.DataFrame | None = None, progress=None):
     """计算并保存：组间统计.xlsx + 火山图 + 柱状图。返回 (输出文件夹, 摘要文字, 图片路径列表)。"""
     from pathlib import Path
@@ -323,14 +369,14 @@ def run_group_stats(project, out_dir, params: StatsParams, region_sec: pd.DataFr
     if region_sec is None:
         if progress:
             progress(0, 3, "正在统计每张脑片的脑区结果…")
-        skip, depth, rset = project.export_skip_layers, project.export_max_depth, project.export_region_set
-        project.export_skip_layers, project.export_max_depth, project.export_region_set = False, 0, "all"
-        try:
-            region_sec = build_tables(project, intensity=False).get("按脑区×脑片")
-        finally:
-            project.export_skip_layers, project.export_max_depth, project.export_region_set = skip, depth, rset
+        region_sec = build_tables(project, intensity=False, all_regions=True).get("按脑区×脑片")
     if region_sec is None or region_sec.empty:
         raise ValueError("还没有按脑区的结果。请先完成细胞识别和“⑥ 脑图谱配准”。")
+    covered = region_sec.loc[region_sec["半脑"] == params.hemisphere]
+    if params.region_set == _RS.CUSTOM:
+        covered = _RS.filter_table(covered, params.region_set, region_ids=params.region_ids)
+        if covered.empty:
+            raise ValueError("所选脑片在指定半脑未覆盖勾选的脑区。请调整脑区、半脑或脑片范围。")
     used = set(region_sec["图片"].astype(str) + "/" + region_sec["脑片"].astype(str))
     errs, warns = check_samples({k: v for k, v in project.samples.items() if k in used})
     if errs:
@@ -338,49 +384,79 @@ def run_group_stats(project, out_dir, params: StatsParams, region_sec: pd.DataFr
     animal = per_animal(region_sec, project.samples)
     if animal.empty:
         raise ValueError("还没有填写分组。请在表格中为每张脑片填写“动物编号”和“组别”。")
-    groups = sorted(animal["组别"].unique())
+    assigned = {r["组别"] for r in project.sample_rows() if r["组别"] and r["动物"]}
+    groups = sorted(assigned | set(animal["组别"]))
     if len(groups) < 2:
         raise ValueError(f"只有一个组（{groups[0]}），至少需要两个组才能比较。")
-    n_by_group = animal.groupby("组别")["动物"].nunique()
+    control = params.control if params.control in groups else groups[0]
     if progress:
         progress(1, 3, "正在做组间比较…")
-    metric = params.metric or metric_options(project.channel_names, grading=project.grading)[0]
+    metric = params.metric or metric_options(project.channel_names)[0]
     params.metric = metric
-    gsum, comp = compare_groups(animal, params)
-    show = animal[(animal["半脑"] == params.hemisphere)].copy()
+    eligible = eligible_rows(animal, params)
+    if metric not in eligible.columns:
+        raise ValueError(f"没有这个指标：{metric}")
+    if eligible.empty:
+        raise ValueError("指定半脑、脑区和最小面积范围内没有可纳入的动物数据。")
+    gsum, comp = _compare_eligible(eligible, params, metric, groups)
+    overall = _overall_comparison(eligible, groups, params) if len(groups) >= 3 else pd.DataFrame()
+    n_by_group = (eligible.loc[np.isfinite(eligible[metric]), :].groupby("组别")["动物"]
+                  .nunique().reindex(groups, fill_value=0))
+    show = eligible.copy()
     for c in show.columns:
         if pd.api.types.is_float_dtype(show[c]):
             show[c] = show[c].round(3)
     info = pd.DataFrame([
-        ("比较指标", metric), ("统计方法", "Welch t 检验" if params.test == "welch" else "Mann-Whitney U 检验（非参数）"),
-        ("多重比较校正", "Benjamini-Hochberg（FDR），按每个比较内的所有脑区校正"),
+        ("比较指标", metric), ("组别数量", len(groups)),
+        ("与对照组比较", "Welch t 检验" if params.test == "welch" else "Mann-Whitney U 检验"),
+        ("多重比较校正", "使用 Benjamini-Hochberg 分别校正两类检验：各脑区的总体检验，以及跨脑区和组别的对照比较。"),
         ("统计单位", "动物（同一动物的多张脑片先合并：细胞数相加、面积相加，再算密度）"),
-        ("对照组", params.control or groups[0]), ("半脑", params.hemisphere),
+        ("对照组", control), ("半脑", params.hemisphere),
         ("纳入条件", f"该动物在该脑区面积 ≥ {params.min_area_mm2} mm²"),
-        ("脑区范围", _RS.describe(params.region_set, params.max_depth)),
+        ("脑区范围", _RS.describe(params.region_set, params.max_depth, region_ids=params.region_ids)),
+        *_RS.selection_details(params.region_set, params.region_ids),
         ("显著标准", f"q < {params.alpha}"),
-    ] + [(f"组 {g} 动物数", int(n)) for g, n in n_by_group.items()], columns=["项目", "内容"])
+    ] + ([("多组总体检验", "Welch ANOVA" if params.test == "welch" else "Kruskal–Wallis H")]
+         if len(groups) >= 3 else [])
+      + [(f"组 {g} 有效动物数", int(n)) for g, n in n_by_group.items()], columns=["项目", "内容"])
     xlsx = out_dir / "组间统计.xlsx"
-    _write_xlsx({"组间比较": comp, "按组汇总": gsum, "按动物×脑区": show, "统计方法": info}, xlsx)
+    tables = {"多组总体检验": overall} if len(groups) >= 3 else {}
+    tables.update({"组间比较": comp, "按组汇总": gsum, "按动物×脑区": show, "统计方法": info})
+    _write_xlsx(tables, xlsx)
+    from .workflow_status import record_table_output
+    record_table_output(project, "group", covered)
     if progress:
         progress(2, 3, "正在画图…")
     figs = []
     if not comp.empty:
-        for k, (name, c) in enumerate(comp.groupby("比较", sort=False)):
-            safe = name.replace("/", "_").replace(" ", "")
+        import re
+        for k, (other, c) in enumerate(comp.dropna(subset=["p 值"]).groupby("比较组", sort=False), 1):
+            label = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", f"{other} vs {control}")
+            safe = f"{k:02d}_{label[:60]}"
             p1 = out_dir / f"火山图_{safe}.png"; volcano_plot(c, metric, p1, params.alpha); figs.append(p1)
             p2 = out_dir / f"柱状图_{safe}.png"
-            bar_plot(animal[animal["组别"].isin([params.control or groups[0], name.split(" vs ")[0]])], c, params, metric, p2)
+            bar_plot(eligible[eligible["组别"].isin([control, other])], c, params, metric, p2)
             figs.append(p2)
     if not gsum.empty:
         from .heatmap import heatmap_figure, default_ap_levels
-        p3 = out_dir / "脑区热图.png"
-        heatmap_figure(gsum, comp, metric, params.control or groups[0], default_ap_levels(project), p3, params.alpha)
-        figs.insert(0, p3)
+        levels = default_ap_levels(project)
+        observed = set(gsum["组别"])
+        others = [g for g in groups if g != control and g in observed]
+        heatmaps = []
+        for start in range(0, max(1, len(others)), 2):
+            page = [control, *others[start:start + 2]]
+            name = f"脑区热图_{start // 2 + 1:02d}.png" if len(others) > 2 else "脑区热图.png"
+            path = out_dir / name
+            heatmap_figure(gsum[gsum["组别"].isin(page)], comp, metric, control, levels, path, params.alpha)
+            heatmaps.append(path)
+        figs = heatmaps + figs
     nsig = int((comp["显著"] == "是").sum()) if not comp.empty else 0
     summary = (f"{len(groups)} 个组（" + "，".join(f"{g} {int(n)} 只" for g, n in n_by_group.items()) + "），"
-               f"比较了 {comp['脑区缩写'].nunique() if not comp.empty else 0} 个脑区，"
-               f"q<{params.alpha} 的有 {nsig} 个。")
+               f"与对照组的比较中有 {nsig} 项达到 q<{params.alpha}。")
+    if len(groups) >= 3:
+        tested = int(overall["p 值"].notna().sum()) if not overall.empty else 0
+        significant = int(overall["显著"].eq("是").sum()) if not overall.empty else 0
+        summary += f"\n{tested} 个脑区完成多组总体检验，{significant} 个达到 q<{params.alpha}。"
     if (n_by_group < 3).any():
         summary += "\n注意：有的组少于 3 只动物，统计结果不可靠，仅供参考。"
     for w in warns:

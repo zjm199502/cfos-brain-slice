@@ -8,6 +8,7 @@ from __future__ import annotations
 import datetime as _dt
 import hashlib
 import json
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -82,6 +83,15 @@ def record(project, image, section: str, channel: int, box0, res: dict, model: s
     r["检查时参数"] = encoded
     r["参数编号"] = hashlib.sha256(encoded.encode()).hexdigest()[:12]
     r["原图"] = image.path
+    if image.scene_id is not None:
+        if Path(image.path).suffix.lower() == ".czi":
+            r["CZI 场景"] = image.scene_name
+            r["CZI S"] = image.scene_id
+            if image.czi_time_index is not None:
+                r["CZI T"] = image.czi_time_index
+        else:
+            r["VSI 扫描区"] = image.scene_name
+            r["VSI stack"] = image.scene_id
     r["视野类型"] = res.get("field_type", "常规")
     r["检查面积 mm²"] = res.get("field_area_mm2")
     r["动物"] = project.samples.get(f"{image.key}/{section}", {}).get("animal", "")
@@ -134,9 +144,16 @@ def miss_details(project, image, channel, points, px_um, cells=None):
             if saved is not None:
                 p = SimpleNamespace(**saved)
             else:
-                p = (effective_settings(project.detection, image, sections[name]) if name in sections
+                p = (effective_settings(project.detection, image, sections[name], project) if name in sections
                      else project.detection).channels[channel]
             raw = project.load_part(image, sections[name]) if name in sections else None
+            if raw is not None and cells is not None:
+                # A cancelled rerun can leave newer candidates beside older accepted results.
+                recorded_models = cells.attrs.get("section_models", {}).get(name, {})
+                if channel in recorded_models and raw.attrs.get("channel_models", {}).get(channel) != recorded_models[channel]:
+                    raw = None
+                elif "inference_settings" in settings and raw.attrs.get("inference_settings") != settings["inference_settings"]:
+                    raw = None
             candidates = raw[raw["channel"] == channel] if raw is not None else None
             tree = cKDTree(candidates[["x", "y"]]) if candidates is not None and len(candidates) else None
             tiles = raw.attrs.get("dark_tiles") if raw is not None else None
@@ -148,7 +165,8 @@ def miss_details(project, image, channel, points, px_um, cells=None):
             for i in nearby:
                 row = candidates.iloc[i]
                 failed = []
-                if not p.min_area_um2 <= row.area_um2 <= p.max_area_um2:
+                # Only historical result snapshots may contain an upper area limit.
+                if row.area_um2 < p.min_area_um2 or row.area_um2 > getattr(p, "max_area_um2", np.inf):
                     failed.append("面积")
                 if row[f"mean_ch{channel}"] < max(p.min_intensity, p.bg_fold * row.get("background", 0)):
                     failed.append("强度")

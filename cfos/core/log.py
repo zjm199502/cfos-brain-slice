@@ -54,7 +54,7 @@ def attach_project(folder):
 def friendly(e: BaseException) -> str:
     """把常见的异常翻译成学生能看懂的中文说明。"""
     if isinstance(e, MemoryError):
-        return "内存不足。请关闭其他程序后重试；或在“④ 细胞识别”中关闭去卷积。"
+        return "内存不足。请关闭其他程序后重试；或在“③ 亮度 / 对比度”中关闭去卷积。"
     if isinstance(e, FileNotFoundError):
         return f"找不到文件：{e.filename or e}。图片可能被移动、改名，或移动硬盘没有插上。"
     if isinstance(e, PermissionError):

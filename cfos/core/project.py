@@ -2,12 +2,15 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field, asdict
+import re
+import unicodedata
+from dataclasses import dataclass, field, asdict, replace
 from pathlib import Path
 
 import pandas as pd
 
 from .coloc import ColocParams
+from .segmentation import default_model
 from .detection import ChannelParams, DetectionSettings
 from .sections import Section
 
@@ -43,6 +46,23 @@ COLOR_PRESETS = {"蓝": (0, 0, 255), "绿": (0, 255, 0), "红": (255, 0, 0), "�
                  "黄": (255, 255, 0), "青": (0, 255, 255), "白": (255, 255, 255)}
 
 
+def _check_czi_channels(expected: list[str] | tuple[str, ...], actual: list[str]):
+    def identity(name):
+        name = " ".join(unicodedata.normalize("NFKC", name).casefold().split())
+        if re.fullmatch(r"(?:(?:channel|ch|c|通道)\s*[:#_-]?\s*)?\d+", name):
+            return ""
+        return name
+
+    if len(expected) == len(actual):
+        for before, after in zip(map(identity, expected), map(identity, actual)):
+            if before and after and before != after:
+                break
+        else:
+            return
+    raise ValueError(f"CZI 仪器通道的名称或顺序不匹配。项目记录为 {' / '.join(expected)}，"
+                     f"当前文件为 {' / '.join(actual)}。请在 ZEN 统一通道顺序和名称，或使用独立项目。")
+
+
 @dataclass
 class ImageEntry:
     path: str
@@ -59,6 +79,45 @@ class ImageEntry:
     storage_key: str = ""
     review_settings: dict = field(default_factory=dict)
     field_reviews: list = field(default_factory=list)
+    scene_id: int | None = None        # VSI 的 stack 编号或 CZI 的 S 维编号
+    scene_name: str = ""
+    vsi_channels: list[str] = field(default_factory=list)  # ordered scanner labels, independent of user-assigned dyes
+    czi_channels: list[str] = field(default_factory=list)
+    czi_time_index: int | None = None
+    czi_time_count: int | None = None
+    display_overrides: dict = field(default_factory=dict)
+    model_display: dict = field(default_factory=dict)  # section name (empty = whole image) → channel → bool
+    section_display: dict = field(default_factory=dict)  # section name → channel → changed display fields
+
+    # Empty token marks a removed section. Saved outputs remain available on disk.
+    changed_outlines: dict = field(default_factory=dict)
+
+    def replace_sections(self, sections):
+        previous = {s.name: s for s in self.sections}
+        new_names = {s.name for s in sections}
+        changed = set(previous) - new_names
+        for name in changed:
+            self.changed_outlines[name] = ""
+        for s in sections:
+            old = previous.get(s.name)
+            if old is s:
+                continue
+            key = s.geometry_key()
+            if old is not None and old.geometry_key() == key:
+                # Preserve numerical representation used in legacy raw signatures.
+                s.contour0 = old.contour0
+                if not s.registration:
+                    s.registration = old.registration
+                s.other_registrations = {**old.other_registrations, **s.other_registrations}
+            else:
+                changed.add(s.name)
+                self.changed_outlines[s.name] = key
+        self.sections = sections
+        return changed
+
+    def stale_result_names(self, recorded):
+        return {name for name, outline in self.changed_outlines.items()
+                if not outline or recorded.get(name) != outline}
 
     def __post_init__(self):
         if self.storage_key and (self.storage_key in (".", "..") or
@@ -66,7 +125,16 @@ class ImageEntry:
             raise ValueError("项目图片标识无效")
 
     def to_dict(self):
-        return {"path": self.path, "review_settings": self.review_settings, "field_reviews": self.field_reviews, "storage_key": self.key, "rel": self.rel, "size": self.size, "status": self.status, "error": self.error,
+        return {"path": self.path, "scene_id": self.scene_id, "scene_name": self.scene_name,
+                **({"vsi_channels": self.vsi_channels} if self.vsi_channels else {}),
+                **({"czi_channels": self.czi_channels} if self.czi_channels else {}),
+                **({"display_overrides": self.display_overrides} if self.display_overrides else {}),
+                **({"model_display": self.model_display} if self.model_display else {}),
+                **({"changed_outlines": self.changed_outlines} if self.changed_outlines else {}),
+                **({"section_display": self.section_display} if self.section_display else {}),
+                **({"czi_time_index": self.czi_time_index, "czi_time_count": self.czi_time_count}
+                   if self.czi_time_index is not None else {}),
+                "review_settings": self.review_settings, "field_reviews": self.field_reviews, "storage_key": self.key, "rel": self.rel, "size": self.size, "status": self.status, "error": self.error,
                 "sections": [s.to_dict() for s in self.sections],
                 "exclusions": [[list(map(float, p)) for p in poly] for poly in self.exclusions],
                 "rois": [{"name": r["name"], "polygon": [list(map(float, p)) for p in r["polygon"]]} for r in self.rois],
@@ -75,7 +143,14 @@ class ImageEntry:
 
     @staticmethod
     def from_dict(d):
-        return ImageEntry(path=d["path"], review_settings=d.get("review_settings", {}),
+        return ImageEntry(path=d["path"], scene_id=d.get("scene_id"), scene_name=d.get("scene_name", ""),
+                          vsi_channels=list(d.get("vsi_channels") or []),
+                          czi_channels=list(d.get("czi_channels") or []),
+                          display_overrides=d.get("display_overrides") or {},
+                          changed_outlines=d.get("changed_outlines") or {},
+                          section_display=d.get("section_display") or {}, model_display=d.get("model_display") or {},
+                          czi_time_index=d.get("czi_time_index"), czi_time_count=d.get("czi_time_count"),
+                          review_settings=d.get("review_settings", {}),
                           field_reviews=d.get("field_reviews", []), storage_key=d.get("storage_key", ""), rel=d.get("rel"), size=d.get("size"),
                           status=d.get("status", "未处理"), error=d.get("error", ""),
                           sections=[Section.from_dict(s) for s in d.get("sections", [])],
@@ -86,6 +161,44 @@ class ImageEntry:
     @property
     def key(self) -> str:
         return self.storage_key or Path(self.path).stem
+
+    @property
+    def display_name(self) -> str:
+        from .relocate import file_name
+        name = file_name(self.path)
+        if self.scene_id is None:
+            return name
+        return f"{name} · {self.scene_name or self.scene_code}"
+
+    @property
+    def scene_code(self) -> str:
+        return f"S{self.scene_id}" if Path(self.path).suffix.lower() == ".czi" else f"stack{self.scene_id}"
+
+    @property
+    def scene_description(self) -> str:
+        code = self.scene_code
+        if not self.scene_name:
+            return code
+        if self.scene_name == code or self.scene_name.endswith(f"({code})"):
+            return self.scene_name
+        return f"{self.scene_name} ({code})"
+
+    @property
+    def source_id(self):
+        return self.path if self.scene_id is None else (self.path, self.scene_id)
+
+    def open_slide(self, z_mode: str | None = None):
+        from .slide_io import open_slide
+        if self.vsi_channels:
+            return open_slide(self.path, z_mode=z_mode, scene_id=self.scene_id, vsi_channels=self.vsi_channels)
+        slide = open_slide(self.path, z_mode=z_mode, scene_id=self.scene_id)
+        if self.czi_channels:
+            try:
+                _check_czi_channels(self.czi_channels, [c.name for c in slide.channels])
+            except ValueError:
+                slide.close()
+                raise
+        return slide
 
 
 def processed_section_names(image: ImageEntry, cells: pd.DataFrame | None) -> set[str]:
@@ -139,7 +252,7 @@ class Project:
     stats: dict = field(default_factory=dict)     # 组间统计参数（stats.StatsParams 的字典）
     network: dict = field(default_factory=dict)   # 功能网络分析参数（network.NetParams 的字典）
     relocated: int = 0                             # 打开项目时自动找回的图片数（不保存）
-    grading: dict = field(default_factory=dict)   # 强度分级：{通道名: [弱/中分界, 中/强分界]}（倍背景）
+    grading: dict = field(default_factory=dict)   # 仅在旧项目读写时保留历史设置。
     figure: dict = field(default_factory=dict)    # 截图制图设置（figure.FigureSettings 的字典）
     accuracy: list = field(default_factory=list)  # 识别准确率检查记录（accuracy.check 的结果）
     behavior: dict = field(default_factory=dict)  # 每只动物的行为分数：{动物编号: 数值}（v0.8.1）
@@ -148,36 +261,167 @@ class Project:
     section_channels: list = field(default_factory=list)  # 找组织轮廓、拆分脑片用哪些通道（空 = 所有在用的通道）（v0.8.2）
     unmix: dict = field(default_factory=dict)  # 识别前去除通道串色的设置（unmix.UnmixSettings 的字典）（v0.8.2）
 
+    model_display: dict = field(default_factory=dict)  # project-wide channel defaults
     reserved_keys: list = field(default_factory=list)
+    previous_stam: dict = field(default_factory=dict)
+    export_region_ids: list[int] = field(default_factory=list)  # Excel 自选的 Allen 结构 ID
+
+    registration_atlas: str = "CCFv3"
+    atlas_settings: dict = field(default_factory=dict)
+
+    def select_atlas(self, name):
+        from .atlas_choice import CCF, STAM, has_registration
+        if name not in (CCF, STAM):
+            raise ValueError(f"未知图谱：{name}")
+        old = self.registration_atlas
+        if name == old:
+            return
+        def selection(params):
+            return {k: params[k] for k in ("region_ids", "region_set") if k in params}
+        self.atlas_settings[old] = {"export_region_ids": self.export_region_ids,
+                                   "export_region_set": self.export_region_set,
+                                   "stats": selection(self.stats), "behavior": selection(self.behavior_params)}
+        settings = self.atlas_settings.get(name, {})
+        self.export_region_ids = list(settings.get("export_region_ids", []))
+        self.export_region_set = settings.get("export_region_set", "")
+        for params, key in ((self.stats, "stats"), (self.behavior_params, "behavior")):
+            for field_name in ("region_ids", "region_set"):
+                params.pop(field_name, None)
+            params.update(settings.get(key, {}))
+        for im in self.images:
+            for sec in im.sections:
+                if sec.registration:
+                    sec.other_registrations[old] = sec.registration
+                sec.registration = sec.other_registrations.pop(name, {})
+            if im.sections and ("配准" in im.status or any(s.registration or s.other_registrations for s in im.sections)):
+                enabled = [s for s in im.sections if s.enabled]
+                done = sum(has_registration(s.registration) for s in enabled)
+                im.status = f"{name} 已配准 {done}/{len(enabled)} 张脑片" if done else f"待配准至 {name}"
+        self.registration_atlas = name
 
     def __post_init__(self):
         from . import slide_io
         slide_io.Z_MODE = self.z_mode
 
     def import_image(self, path):
+        """兼容单条返回值，同时加入该文件的所有可读扫描区。"""
+        entries, notes = self.import_images(path)
+        if len(entries) > 1 and Path(path).suffix.lower() == ".vsi":
+            from .vsi import list_vsi_scenes
+            by_id = {entry.scene_id: entry for entry in entries}
+            for scene in list_vsi_scenes(path):
+                if scene.scene_id in by_id:
+                    return by_id[scene.scene_id], notes
+        return entries[0], notes
+
+    def import_images(self, path):
+        """同一原文件可有多个扫描区，各自保存坐标、通道设置来源和分析结果。"""
+        from collections import Counter
+        from contextlib import closing
         from uuid import uuid4
-        from .slide_io import open_slide
         path = Path(path).resolve()
-        for entry in self.images:
-            if Path(entry.path).resolve() == path:
-                return entry, []
-        slide = open_slide(str(path))
-        try:
-            if self.channel_names and len(slide.channels) != len(self.channel_names):
-                raise ValueError(f"通道数（{len(slide.channels)}）与项目中其他图片不同")
-            self.ensure_channels(slide.channels)
-            notes = list(getattr(slide, "notes", []))
-        finally:
-            slide.close()
+        existing = {im.scene_id: im for im in self.images if Path(im.path).resolve() == path}
+        notes = []
+        legacy = None
+        channel_order = []
+        anchor = None
+        suffix = path.suffix.lower()
+        prefix = "S" if suffix == ".czi" else "stack"
+        if suffix in (".vsi", ".czi"):
+            if suffix == ".vsi":
+                from .vsi import list_vsi_scenes as list_scenes
+            else:
+                from .czi import list_czi_scenes as list_scenes
+            scenes = list_scenes(path, notes=notes)
+            name_counts = Counter(s.name for s in scenes)
+            choices = []
+            for s in sorted(scenes, key=lambda s: s.scene_id):
+                code = f"{prefix}{s.scene_id}"
+                name = s.name or code
+                if s.name and name_counts[s.name] > 1:
+                    name = f"{s.name} ({code})"
+                choices.append((s.scene_id, name))
+        else:
+            choices = [(None, "")]
+        if suffix == ".vsi":
+            legacy = existing.pop(None, None)
+            if legacy is not None:
+                with closing(legacy.open_slide(self.z_mode)) as old_slide:
+                    default_id = old_slide.scene_id
+                    channel_order = list(old_slide.vsi_channels)
+                existing[default_id] = legacy
+                anchor = legacy
+            elif existing:
+                anchor = next(iter(existing.values()))
+                channel_order = list(anchor.vsi_channels)
+                if not channel_order:
+                    with closing(anchor.open_slide(self.z_mode)) as original:
+                        channel_order = list(original.vsi_channels)
+
         used = {key.casefold() for key in self.reserved_keys}
         used.update(im.key.casefold() for im in self.images)
-        key = path.stem
-        while key.casefold() in used:
-            key = f"{path.stem}~{uuid4().hex[:12]}"
-        self.reserved_keys.append(key)
-        entry = ImageEntry(path=str(path), storage_key=key)
-        self.images.append(entry)
-        return entry, notes
+        entries, added = [], []
+        channels = None
+        channel_count = len(self.channel_names)
+        czi_orders = dict.fromkeys(tuple(im.czi_channels) for im in self.images if im.czi_channels) if suffix == ".czi" else {}
+        for scene_id, name in choices:
+            if scene_id in existing:
+                entries.append(existing[scene_id])
+                continue
+            base = path.stem
+            if len(choices) > 1:
+                label = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", name or "").strip(" .")[:64]
+                base += f"~{label or f'{prefix}{scene_id}'}"
+            key = base
+            while key.casefold() in used:
+                key = f"{base}~{uuid4().hex[:12]}"
+            entry = ImageEntry(str(path), storage_key=key, scene_id=scene_id, scene_name=name or "",
+                               vsi_channels=list(channel_order))
+            try:
+                slide = entry.open_slide(self.z_mode)
+            except (ValueError, OSError) as exc:
+                if len(choices) == 1:
+                    raise
+                notes.append(f"跳过 {entry.display_name}：{exc}")
+                continue
+            try:
+                if channel_count and len(slide.channels) != channel_count:
+                    msg = f"{entry.display_name} 的通道数（{len(slide.channels)}）与项目中其他图片不同"
+                    if len(choices) == 1:
+                        raise ValueError(msg)
+                    notes.append(f"跳过：{msg}。")
+                    continue
+                channel_count = len(slide.channels)
+                if suffix == ".vsi" and not channel_order:
+                    channel_order = list(slide.vsi_channels)
+                    entry.vsi_channels = list(channel_order)
+                if suffix == ".czi":
+                    labels = [ch.name for ch in slide.channels]
+                    for expected in czi_orders:
+                        _check_czi_channels(expected, labels)
+                    czi_orders[tuple(labels)] = None
+                    entry.czi_channels = labels
+                    entry.czi_time_index = slide.czi_time_index
+                    entry.czi_time_count = slide.czi_time_count
+                if channels is None:
+                    channels = slide.channels
+                notes.extend(slide.notes)
+            finally:
+                slide.close()
+            entries.append(entry)
+            added.append(entry)
+            used.add(key.casefold())
+        if not entries:
+            raise ValueError("；".join(notes) or "没有可导入的扫描区")
+        if channels is not None:
+            self.ensure_channels(channels)
+        if legacy is not None:
+            legacy.scene_id, legacy.scene_name = default_id, dict(choices)[default_id]
+        if anchor is not None and not anchor.vsi_channels:
+            anchor.vsi_channels = list(channel_order)
+        self.images.extend(added)
+        self.reserved_keys.extend(im.key for im in added)
+        return entries, list(dict.fromkeys(notes))
 
     # ---------- 读写 ----------
     @property
@@ -197,12 +441,14 @@ class Project:
             "version": 1, "reserved_keys": self.reserved_keys,
             "images": [im.to_dict() for im in self.images],
             "channel_names": self.channel_names,
-            "display": {str(k): _display_dict(v) for k, v in self.display.items()},
+            "model_display": self.model_display,
+                "display": {str(k): _display_dict(v) for k, v in self.display.items()},
             # 显示颜色单独存（v0.8.3）：放进 display 里的话，“恢复到安装时的版本”后旧版本软件会打不开项目
             "display_colors": {str(k): list(v.color) for k, v in self.display.items() if v.color},
             "detection": {
-                "pixel_um": self.detection.pixel_um,
+                "resolution_percent": self.detection.resolution_percent, "pixel_um": self.detection.pixel_um,
                 "tile": self.detection.tile,
+                "tile_in_source_pixels": self.detection.tile_in_source_pixels,
                 "overlap": self.detection.overlap,
                 "channels": {str(k): v.to_dict() for k, v in self.detection.channels.items()},
             },
@@ -210,6 +456,10 @@ class Project:
             "thickness": self.thickness, "z_mode": self.z_mode,
             "export_skip_layers": self.export_skip_layers, "export_max_depth": self.export_max_depth,
             "export_region_set": self.export_region_set,
+            "registration_atlas": self.registration_atlas,
+            "atlas_settings": self.atlas_settings,
+            "previous_stam": self.previous_stam,
+            "export_region_ids": self.export_region_ids,
             "export_hemisphere": self.export_hemisphere,
             "export_intensity": self.export_intensity,
             "samples": self.samples, "stats": self.stats, "grading": self.grading, "network": self.network,
@@ -256,6 +506,7 @@ class Project:
                 im.error = "旧结果归属不明，已保留原文件。"
             else:
                 im.storage_key = im.key
+        p.model_display = d.get("model_display") or {}
         p.channel_names = d.get("channel_names", [])
         p.display = {int(k): DisplayChannel(**{kk: vv for kk, vv in v.items() if kk in DisplayChannel.__dataclass_fields__})
                      for k, v in d.get("display", {}).items()}
@@ -263,14 +514,55 @@ class Project:
             p.display.setdefault(int(k), DisplayChannel()).color = [int(x) for x in col][:3]
         det = d.get("detection", {})
         p.detection = DetectionSettings(
-            pixel_um=det.get("pixel_um", 0.5), tile=det.get("tile", 2048), overlap=det.get("overlap", 96),
-            channels={int(k): ChannelParams.from_dict(v) for k, v in det.get("channels", {}).items()})
+            resolution_percent=det.get("resolution_percent"), pixel_um=det.get("pixel_um", 0.5),
+            tile=det.get("tile", 2048), overlap=det.get("overlap", 96),
+            tile_in_source_pixels=det.get("tile_in_source_pixels", det.get("resolution_percent") is not None),
+            channels={int(k): ChannelParams.from_dict(v, p.channel_names[int(k)] if int(k) < len(p.channel_names) else "") for k, v in det.get("channels", {}).items()})
         p.coloc = ColocParams(**{k: v for k, v in d.get("coloc", {}).items() if k in ColocParams.__dataclass_fields__})
         p.thickness = d.get("thickness", "thin")
         p.z_mode = d.get("z_mode", "max")
         p.export_skip_layers = bool(d.get("export_skip_layers", False))
         p.export_max_depth = int(d.get("export_max_depth", 0))
         p.export_region_set = str(d.get("export_region_set", "") or "")
+        p.previous_stam = dict(d.get("previous_stam") or {})
+        region_ids = d.get("export_region_ids", [])
+        from .atlas_choice import CCF, STAM
+        saved_atlas = d.get("registration_atlas")
+        if saved_atlas not in (CCF, STAM):
+            existing = [sec.registration for im in p.images for sec in im.sections if sec.registration]
+            saved_atlas = STAM if existing and all(r.get("plane_native_mm") for r in existing) else CCF
+        p.registration_atlas = saved_atlas
+        p.atlas_settings = dict(d.get("atlas_settings") or {})
+        if "export_region_ids" in p.previous_stam:
+            p.atlas_settings.setdefault(STAM, {}).setdefault("export_region_ids", p.previous_stam["export_region_ids"])
+        legacy = dict(p.previous_stam.pop("registrations", {}) or {})
+        for key, sections in (d.get("giraff_registrations") or {}).items():
+            for name, record in sections.items():
+                legacy.setdefault(key, {}).setdefault(name, record)
+        for im in p.images:
+            archived = legacy.get(im.key, {})
+            for sec in im.sections:
+                records = sec.other_registrations
+                native = archived.get(sec.name) or {}
+                if native.get("plane_native_mm") and tuple(native.get("bbox0") or sec.bbox0) == tuple(sec.bbox0):
+                    records.setdefault(STAM, native)
+                    archived.pop(sec.name)
+                record = sec.registration
+                if record.get("plane_native_mm"):
+                    records[STAM] = record
+                elif record.get("plane") and record.get("fit_atlas", CCF) == CCF:
+                    records[CCF] = record
+                elif record.get("plane"):
+                    # Keep experimental bridge-space planes separate from native atlas records.
+                    records.setdefault("legacy_bridge", record)
+                sec.registration = records.pop(p.registration_atlas, {})
+        # Once migrated the per-section records own these values, including subsequent edits to the crop.
+        for key, unmatched in legacy.items():
+            if unmatched:
+                p.previous_stam.setdefault("unmatched_registrations", {}).setdefault(key, {}).update(unmatched)
+        p.previous_stam.pop("export_region_ids", None)
+        if isinstance(region_ids, list):
+            p.export_region_ids = list(dict.fromkeys(i for i in region_ids if type(i) is int and i > 0))
         mode = d.get("export_hemisphere")
         if isinstance(mode, str) and mode in EXPORT_HEMISPHERES:
             p.export_hemisphere = mode
@@ -348,13 +640,14 @@ class Project:
     def template_dict(self) -> dict:
         """不含图片的参数（识别、共标、显示、厚度、z-stack），可以保存成模板给别的项目用。"""
         return {"kind": "cfos参数模板", "version": 1, "channel_names": self.channel_names,
-                "detection": {"pixel_um": self.detection.pixel_um, "tile": self.detection.tile,
-                              "overlap": self.detection.overlap,
+                "detection": {"resolution_percent": self.detection.resolution_percent, "pixel_um": self.detection.pixel_um, "tile": self.detection.tile,
+                              "tile_in_source_pixels": self.detection.tile_in_source_pixels, "overlap": self.detection.overlap,
                               "channels": {str(k): v.to_dict() for k, v in self.detection.channels.items()}},
                 "coloc": self.coloc.to_dict(), "thickness": self.thickness, "z_mode": self.z_mode,
-                "grading": self.grading, "unused_channels": self.unused_channels,
+                "unused_channels": self.unused_channels,
                 "section_channels": self.section_channels,
                 "unmix": {k: v for k, v in self.unmix.items() if k in ("enabled", "scale")},
+                "model_display": self.model_display,
                 "display": {str(k): _display_dict(v) for k, v in self.display.items()},
                 "display_colors": {str(k): list(v.color) for k, v in self.display.items() if v.color}}
 
@@ -372,7 +665,13 @@ class Project:
             notes.append(f"模板有 {len(names)} 个通道，当前项目有 {len(self.channel_names)} 个，按通道名称对应。")
         by_name = {n: i for i, n in enumerate(names)}
         det = d.get("detection", {})
+        self.detection.resolution_percent = det.get("resolution_percent")
         self.detection.pixel_um = det.get("pixel_um", self.detection.pixel_um)
+        if "tile" in det:
+            self.detection.tile = det["tile"]
+            self.detection.tile_in_source_pixels = det.get("tile_in_source_pixels", det.get("resolution_percent") is not None)
+        if "overlap" in det:
+            self.detection.overlap = det["overlap"]
         chs = det.get("channels", {})
         targets = self.channel_names or names
         for i, nm in enumerate(targets):
@@ -380,8 +679,9 @@ class Project:
             if j is None or str(j) not in chs:
                 notes.append(f"模板中没有“{nm}”通道的参数，保持原样。")
                 continue
-            self.detection.channels[i] = ChannelParams.from_dict(chs[str(j)])
+            self.detection.channels[i] = ChannelParams.from_dict(chs[str(j)], nm)
             if str(j) in d.get("display", {}):
+                self.model_display[str(i)] = bool(d.get("model_display", {}).get(str(j)))
                 self.display[i] = DisplayChannel(**{k: v for k, v in d["display"][str(j)].items()
                                                     if k in DisplayChannel.__dataclass_fields__})
                 col = (d.get("display_colors") or {}).get(str(j))
@@ -391,7 +691,6 @@ class Project:
             self.channel_names = list(names)
         self.coloc = ColocParams(**{k: v for k, v in d.get("coloc", {}).items() if k in ColocParams.__dataclass_fields__})
         self.thickness = d.get("thickness", self.thickness)
-        self.grading = d.get("grading", self.grading)
         self.z_mode = d.get("z_mode", self.z_mode)
         if len(names) == len(self.channel_names):
             self.unused_channels = list(d.get("unused_channels", self.unused_channels))
@@ -402,10 +701,75 @@ class Project:
         return notes
 
     # ---------- 显示颜色（v0.8.3） ----------
-    def custom_color(self, c: int) -> tuple[int, int, int] | None:
+    def channel_display(self, c: int, image=None, section=None) -> DisplayChannel:
+        """Resolve one channel from project defaults, image and section overrides."""
+        values = {}
+        if image is not None:
+            values.update(image.display_overrides.get(str(c), {}))
+            if section is not None:
+                values.update(image.section_display.get(section.name, {}).get(str(c), {}))
+        base = self.display.get(c)
+        return replace(base if base is not None else DisplayChannel(high=0), **values)
+
+    def model_window(self, c, image, section=None):
+        key = str(c)
+        enabled = self.model_display.get(key, False)
+        if image is not None:
+            enabled = image.model_display.get("", {}).get(key, enabled)
+            if section is not None:
+                enabled = image.model_display.get(section.name, {}).get(key, enabled)
+        if enabled:
+            display = self.channel_display(c, image, section)
+            if display.high > display.low:
+                return (float(display.low), float(display.high), float(display.gamma))
+        return None
+
+    def set_model_display(self, selection, c, enabled):
+        key = str(c)
+        if selection is None:
+            self.model_display[key] = bool(enabled)
+            return
+        for im in self.images:
+            if im.key not in selection:
+                continue
+            names = selection[im.key]
+            if names is None:
+                for overrides in im.model_display.values():
+                    overrides.pop(key, None)
+                names = [""]
+            for name in names:
+                im.model_display.setdefault(name, {})[key] = bool(enabled)
+
+    def update_display(self, selection, c: int, **changes):
+        """Apply only the edited fields. Whole-image edits supersede those fields on its sections."""
+        if selection is None:
+            self.display[c] = replace(self.display.get(c, DisplayChannel()), **changes)
+            return
+        key = str(c)
+        for image in self.images:
+            if image.key not in selection:
+                continue
+            names = selection[image.key]
+            if names is None:
+                image.display_overrides.setdefault(key, {}).update(changes)
+                for name, overrides in list(image.section_display.items()):
+                    channel = overrides.get(key, {})
+                    for attr in changes:
+                        channel.pop(attr, None)
+                    if not channel:
+                        overrides.pop(key, None)
+                    if not overrides:
+                        del image.section_display[name]
+            else:
+                for section in image.sections:
+                    if section.name in names:
+                        overrides = image.section_display.setdefault(section.name, {})
+                        overrides.setdefault(key, {}).update(changes)
+
+    def custom_color(self, c: int, image=None, section=None) -> tuple[int, int, int] | None:
         """用户选的（或沿用显微镜的）显示颜色；没有设置时返回 None，由调用处按通道名用默认颜色。"""
-        d = self.display.get(c)
-        if d is None or not d.color or len(d.color) < 3:
+        d = self.channel_display(c, image, section)
+        if not d.color or len(d.color) < 3:
             return None
         return tuple(int(max(0, min(255, v))) for v in d.color[:3])
 
@@ -452,6 +816,9 @@ class Project:
             if p is not None:
                 p.detect = True
             self.display.setdefault(c, DisplayChannel()).visible = True
+        params = self.detection.channels.get(c)
+        if params and not params.model_override:
+            params.model = default_model(name)
         self.channel_names[c] = name
         self.save()
         return ""
@@ -500,9 +867,9 @@ class Project:
             self.display.setdefault(i, DisplayChannel())
             if i not in self.detection.channels:
                 if nm == "DAPI":
-                    self.detection.channels[i] = ChannelParams(min_area_um2=10, max_area_um2=200, gamma=0.5)
+                    self.detection.channels[i] = ChannelParams(model=default_model(nm), min_area_um2=10, gamma=0.5)
                 else:
-                    self.detection.channels[i] = ChannelParams(min_area_um2=30, max_area_um2=600)
+                    self.detection.channels[i] = ChannelParams(min_area_um2=30)
 
     # ---------- 结果 ----------
     # v0.8.1 起结果文件改用紧凑格式（见 core/contours.py），换了文件名：
@@ -514,6 +881,10 @@ class Project:
         return self.results_dir / f"{image.key}_cells.pkl"
 
     def has_cells(self, image: ImageEntry) -> bool:
+        if image.changed_outlines:
+            from .workflow_status import current_cell_summary
+            summary = current_cell_summary(self, image)
+            return bool(summary and summary[0])
         return self.cells_path(image).exists() or self._old_cells_path(image).exists()
 
     @staticmethod
@@ -526,7 +897,11 @@ class Project:
 
     def save_cells(self, image: ImageEntry, df: pd.DataFrame):
         from .contours import pack
-        self._dump(self.cells_path(image), pack(df))
+        from .workflow_status import save_cell_summary
+        path = self.cells_path(image)
+        df.attrs["result_outlines"] = {name: key for name,key in image.changed_outlines.items() if key}
+        self._dump(path, pack(df))
+        save_cell_summary(path, df)
         old = self._old_cells_path(image)
         if old.exists():
             old.unlink()
@@ -543,7 +918,8 @@ class Project:
     def save_part(self, image: ImageEntry, section, signature: str, df: pd.DataFrame):
         from .contours import pack
         self._dump(self.part_path(image, section.name),
-                   {"signature": signature, "bbox0": tuple(section.bbox0), **pack(df)})
+                   {"signature": signature, "outline": image.changed_outlines.get(section.name),
+                    "bbox0": tuple(section.bbox0), **pack(df)})
         old = self._old_part_path(image, section.name)
         if old.exists():
             old.unlink()
@@ -559,6 +935,8 @@ class Project:
         try:
             with open(p, "rb") as f:
                 d = pickle.load(f)
+            if d.get("outline") != image.changed_outlines.get(section.name):
+                return None
             if tuple(d.get("bbox0", ())) != tuple(section.bbox0):
                 return None
             if signature is not None and d.get("signature") != signature:
@@ -574,6 +952,23 @@ class Project:
         p = self.cells_path(image)
         if p.exists():
             with open(p, "rb") as f:
-                return unpack(pickle.load(f))
-        p = self._old_cells_path(image)
-        return normalize(pd.read_pickle(p)) if p.exists() else None
+                df = unpack(pickle.load(f))
+        else:
+            p = self._old_cells_path(image)
+            if not p.exists():
+                return None
+            df = normalize(pd.read_pickle(p))
+        stale = image.stale_result_names(df.attrs.get("result_outlines", {}))
+        if not stale:
+            return df
+        if "section" not in df:
+            return None
+        df = df[~df["section"].isin(stale)].copy()
+        done = processed_section_names(image, df) - stale
+        df.attrs["processed_sections"] = sorted(done)
+        if "carried_forward_sections" in df.attrs:
+            df.attrs["carried_forward_sections"] = [name for name in df.attrs["carried_forward_sections"] if name not in stale]
+        for key in ("section_models", "section_devices", "section_settings", "result_outlines"):
+            if key in df.attrs:
+                df.attrs[key] = {name: val for name,val in df.attrs[key].items() if name not in stale}
+        return df if done or len(df) else None

@@ -31,27 +31,35 @@ def make_patch(project, slide, image, center_xy, ch: int, cancel=None):
     settings = project.detection
     from .unmix import prepare as _prepare_unmix
     _prepare_unmix(project, slide, image)      # 与正式识别一致：开启了串色校正时，标注块也用校正后的图
+    sec = next((s for s in image.sections if s.enabled and s.bbox0[0] <= center_xy[0] < s.bbox0[0] + s.bbox0[2]
+                and s.bbox0[1] <= center_xy[1] < s.bbox0[1] + s.bbox0[3]), None)
+    if sec is not None:
+        from .field_review import effective_settings
+        settings = effective_settings(settings, image, sec, project)
     p = settings.channels[ch]
-    lv = slide.level_for_pixel_size(settings.pixel_um)
-    ds = slide.downsample(lv)
+    lv, ds = det.detection_grid(slide, settings, ch)
     pix = slide.pixel_size_um * ds
-    n = int(PATCH_UM / pix) // 16 * 16
+    n = max(1, min(int(np.floor(min(slide.level_shapes[0]) / ds)), max(1, int(PATCH_UM / pix) // 16 * 16)))
     size0 = n * ds
     x0 = int(center_xy[0] - size0 / 2); y0 = int(center_xy[1] - size0 / 2)
     H0, W0 = slide.level_shapes[0]
     x0 = int(np.clip(x0, 0, max(W0 - size0, 0))); y0 = int(np.clip(y0, 0, max(H0 - size0, 0)))
-    raw = det.read_unmixed(slide, lv, (x0, y0, size0, size0), ch, getattr(project.detection, "unmix", None))[:n, :n]
+    width, height = min(size0, W0 - x0), min(size0, H0 - y0)
+    a = det.read_detection_tile(slide, lv, (x0, y0, width, height), n, n, ds)
+    if settings.unmix is not None:
+        from .unmix import apply
+        a = apply(a,settings.unmix)
+    raw = a[ch]
     # 归一化范围：用这块所在脑片的范围（与正式识别一致）
-    sec = next((s for s in image.sections if s.enabled and s.bbox0[0] <= center_xy[0] < s.bbox0[0] + s.bbox0[2]
-                and s.bbox0[1] <= center_xy[1] < s.bbox0[1] + s.bbox0[3]), None)
     if sec is not None:
         lo, hi, _ = det.section_norms(slide, sec, {ch: p}, getattr(project.detection, "unmix", None), cancel)[ch]
     else:
         lo, hi = np.percentile(raw, [p.norm_low, p.norm_high])
-    x = det.prepare_input(raw, p, lo, hi, pix)
-    lab = det.cellpose4.predict_labels(x, cellprob_threshold=p.cellprob_threshold, cancel=cancel)
-    meta = {"image": image.key, "x0": x0, "y0": y0, "ds": ds, "n": n, "channel": project.channel_names[ch],
-            "model": det.cellpose4.MODEL_KEY, "cellprob_threshold": p.cellprob_threshold,
+    x = det.prepare_input(raw, p, lo, hi, pix, project.model_window(ch, image, sec))
+    lab, _ = det.segmentation.predict(x, p, cancel)
+    meta = {"image": image.key, "x0": x0, "y0": y0, "width0": width, "height0": height,
+            "ds": ds, "n": n, "channel": project.channel_names[ch],
+            "model": p.model, "cellprob_threshold": p.cellprob_threshold,
             "time": f"{_dt.datetime.now():%Y-%m-%d %H:%M}"}
     return x, lab.astype(np.int32), meta
 

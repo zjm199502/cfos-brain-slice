@@ -1,0 +1,10 @@
+Stereotaxic Topographic Atlas of the Mouse Brain, HUST-Suzhou Institute for Brainsmatics.
+Feng et al., A mouse brain stereotaxic topographic atlas with isotropic 1-μm resolution (2025).
+https://doi.org/10.1038/s41586-025-09211-8
+https://atlas.brainsmatics.cn/STAM/
+Data terms: https://atlas.brainsmatics.cn/STAM/agreement.html
+CC BY-NC 4.0: https://creativecommons.org/licenses/by-nc/4.0/
+FosFolio adaptations: contrast-inverted Nissl green channel from RGB_raw at 32 μm,
+native unilateral seg_half at 40 μm, compact indices, region colors and hierarchy.
+structures.csv records the native segment ID. IDs above 1000000 (inclusive) denote
+local grouping nodes without an annotated segment. No labels were mirrored.

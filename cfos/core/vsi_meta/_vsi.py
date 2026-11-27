@@ -570,6 +570,20 @@ def list_image_volumes(tree: VsiTree) -> list[FieldNode]:
     )
 
 
+def stack_image_types(tree: VsiTree) -> dict[int, int | None]:
+    """Read stack roles even when invalid dimensions prevent full metadata parsing."""
+    types = {}
+    for vol in list_image_volumes(tree):
+        path = f"{tree.path}/2001[{vol.second}]"
+        try:
+            props = unique_child(vol, 2005, path=path)
+            role = node_value(props, path=f"{path}/2005", tag=2074) if props else None
+            types[vol.second] = read_optional_int(role, path=path, field="2074")
+        except errors.VsiError:
+            continue
+    return types
+
+
 def parse_single_image(tree: VsiTree) -> ImageVolumeMeta:
     volumes = list_image_volumes(tree)
     if not volumes:
@@ -610,7 +624,7 @@ def document_properties(tree: VsiTree) -> dict[str, Any]:
     }
 
 
-def parse_all_images(tree: VsiTree) -> tuple[list[ImageVolumeMeta], list[str]]:
+def parse_all_images(tree: VsiTree, *, missing_external: list[int] | None = None) -> tuple[list[ImageVolumeMeta], list[str]]:
     """FosMap：解析文件里的每一幅图（slide scanner 的 .vsi 常有标签、预览图和一幅或多幅主扫描图）。
     单幅图的元数据不合规时跳过这一幅并记下原因，不影响其他图。"""
     metas: list[ImageVolumeMeta] = []
@@ -620,4 +634,6 @@ def parse_all_images(tree: VsiTree) -> tuple[list[ImageVolumeMeta], list[str]]:
             metas.append(_parse_volume_node(tree, vol))
         except errors.VsiError as e:
             problems.append(f"stack{vol.second}: {e}")
+            if missing_external is not None and isinstance(e, errors.MissingPixelFileError):
+                missing_external.append(vol.second)
     return metas, problems

@@ -20,7 +20,7 @@ def _versions() -> dict:
         from importlib import metadata
         for p in ("numpy", "scipy", "pandas", "tensorflow", "tensorflow-cpu", "keras", "onnxruntime",
                   "onnxruntime-directml", "onnxruntime-gpu",
-                  "napari", "PySide6", "itk-elastix", "DeepSlice", "tifffile", "imagecodecs", "scikit-image"):
+                  "napari", "PySide6", "itk-elastix", "tifffile", "imagecodecs", "scikit-image"):
             try:
                 out[p] = metadata.version(p)
             except Exception:  # noqa: BLE001
@@ -78,12 +78,13 @@ def system_info() -> dict:
 
 def _image_info(project) -> list[dict]:
     rows = []
-    from .slide_io import open_slide
     for im in project.images:
         r = {"图片": im.key, "路径": im.path, "存在": Path(im.path).exists(), "脑片数": len(im.sections)}
+        if im.scene_id is not None:
+            r["原图扫描区"] = im.scene_description
         try:
             r["文件大小 MB"] = round(Path(im.path).stat().st_size / 2**20, 1)
-            sl = open_slide(im.path)
+            sl = im.open_slide()
             try:
                 r.update({"像素大小 µm": sl.pixel_size_um, "层数": sl.n_levels, "z 层数": sl.n_z,
                           "第0层大小": list(sl.level_shapes[0]), "通道": list(sl.channels)})

@@ -26,13 +26,17 @@ from pathlib import Path
 
 REPO = "zjm199502/cfos-brain-slice"
 BRANCH = "installers"
+SERIES = "1.0"
+SERIES_CHANNEL = f"updates/v{SERIES}"
+PLATFORM = {"win32": "windows", "darwin": "macos"}.get(sys.platform)
+CHANNEL = f"{SERIES_CHANNEL}/{PLATFORM}" if PLATFORM else SERIES_CHANNEL
 MANIFEST_URLS = [
-    f"https://raw.githubusercontent.com/{REPO}/{BRANCH}/updates/latest.json",
-    f"https://cdn.jsdelivr.net/gh/{REPO}@{BRANCH}/updates/latest.json",      # 国内访问 GitHub 不稳定时
-    f"https://fastly.jsdelivr.net/gh/{REPO}@{BRANCH}/updates/latest.json",
+    f"https://raw.githubusercontent.com/{REPO}/{BRANCH}/{CHANNEL}/latest.json",
+    f"https://cdn.jsdelivr.net/gh/{REPO}@{BRANCH}/{CHANNEL}/latest.json",
+    f"https://fastly.jsdelivr.net/gh/{REPO}@{BRANCH}/{CHANNEL}/latest.json",
 ]
-DOWNLOAD_PAGE = f"https://github.com/{REPO}/tree/{BRANCH}/updates"
-FULL_PAGE = f"https://github.com/{REPO}/tree/{BRANCH}"
+DOWNLOAD_PAGE = f"https://github.com/{REPO}/tree/{BRANCH}/{CHANNEL}"
+FULL_PAGE = f"https://github.com/{REPO}/releases/tag/v1.0.0"
 SOURCE_URL = f"https://github.com/{REPO}"
 CONTACT = "zjm199502@163.com，" + SOURCE_URL
 MAX_FAILED_STARTS = 2
@@ -56,7 +60,7 @@ def updates_dir() -> Path:
         base = Path(os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")) / "cfos脑片分析"
     else:
         base = Path(os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share")) / "cfos脑片分析"
-    return Path(os.environ.get("CFOS_UPDATES_DIR") or (base / "更新"))
+    return Path(os.environ.get("CFOS_UPDATES_DIR") or (base / "更新" / f"v{SERIES}"))
 
 
 def _read_version_file(init_py: Path) -> str:
@@ -104,12 +108,18 @@ def active_patch() -> dict | None:
     if not v or not d or st.get("disabled"):
         return None
     app = updates_dir() / d / "app"
+    # 旧客户端共用一个清单。通过这个入口安装时，版本号和路径取自本系列的原生补丁。
+    series_app = app / "_series" / SERIES
+    if (series_app / "cfos" / "__init__.py").is_file():
+        app = series_app
+        v = _read_version_file(app / "cfos" / "__init__.py")
     if not (app / "cfos" / "__init__.py").exists():
         return None
     bv = base_version()
-    if vtuple(v) <= vtuple(bv) or vtuple(st.get("min_base", "0")) > vtuple(bv):
+    if (vtuple(v)[:2] != vtuple(bv)[:2] or vtuple(v) <= vtuple(bv)
+            or vtuple(st.get("min_base", "0")) > vtuple(bv)):
         return None
-    return {**st, "app": str(app)}
+    return {**st, "version": v, "app": str(app)}
 
 
 def current_version() -> str:
@@ -182,16 +192,25 @@ def manifest_urls() -> list[str]:
 
 
 def fetch_manifest() -> tuple[dict, str]:
-    """返回 (latest.json 内容, 它的网址)。全部连不上时抛出最后一个错误。"""
-    err = None
-    for u in manifest_urls():
-        try:
-            m = json.loads(_get(u).decode("utf-8"))
-            if "version" in m:
-                return m, u
-        except Exception as e:  # noqa: BLE001
-            err = e
-    raise ConnectionError(f"连不上更新服务器（GitHub）：{err}")
+    """Choose the newest usable platform manifest, even when a CDN mirror lags."""
+    from concurrent.futures import ThreadPoolExecutor
+    urls = manifest_urls()
+    def fetch(url):
+        result = json.loads(_get(url).decode("utf-8"))
+        if not result.get("version") or (PLATFORM and result.get("platform") != PLATFORM):
+            raise ValueError("更新清单不适用于当前平台")
+        return result
+    errors, candidates = [], []
+    with ThreadPoolExecutor(max_workers=len(urls)) as pool:
+        jobs = [(url, pool.submit(fetch, url)) for url in urls]
+        for url, job in jobs:
+            try:
+                candidates.append((job.result(), url))
+            except Exception as exc:
+                errors.append(str(exc))
+    if not candidates:
+        raise ConnectionError("无法读取更新清单：" + "；".join(errors))
+    return max(candidates, key=lambda item: vtuple(item[0]["version"]))
 
 
 def check() -> dict:
@@ -201,7 +220,7 @@ def check() -> dict:
     cur, base = current_version(), base_version()
     if vtuple(m["version"]) <= vtuple(cur):
         return {"status": "latest", "manifest": m, "url": url}
-    if vtuple(m.get("min_base", "0")) > vtuple(base):
+    if vtuple(m["version"])[:2] != vtuple(base)[:2] or vtuple(m.get("min_base", "0")) > vtuple(base):
         return {"status": "full", "manifest": m, "url": url}
     return {"status": "patch", "manifest": m, "url": url}
 
@@ -215,7 +234,8 @@ def skip_version(v: str):
 
 
 def auto_check_enabled() -> bool:
-    return _load_state().get("auto_check", True)
+    default = not (base_app_dir() / "resources" / "cellpose4").is_dir()
+    return _load_state().get("auto_check", default)
 
 
 def set_auto_check(on: bool):
@@ -258,6 +278,8 @@ def read_patch_info(zip_path: Path) -> dict:
     for k in ("version", "min_base", "files"):
         if k not in info:
             raise ValueError(f"补丁包信息不完整（缺少 {k}）。")
+    if "platform" in info and info["platform"] != PLATFORM:
+        raise ValueError(f"此补丁仅适用于 {info['platform']}。请下载当前平台的补丁。")
     return info
 
 
@@ -266,6 +288,8 @@ def install_patch(zip_path: Path) -> dict:
     zip_path = Path(zip_path)
     info = read_patch_info(zip_path)
     v, base = info["version"], base_version()
+    if vtuple(v)[:2] != vtuple(base)[:2]:
+        raise ValueError(f"补丁 {v} 与当前基础版本 {base} 的版本系列不同。请使用相应版本的完整安装包。")
     if vtuple(info["min_base"]) > vtuple(base):
         raise ValueError(f"这个补丁（{v}）需要先安装 {info['min_base']} 或更新的完整安装包，"
                          f"你现在装的是 {base}。请到 GitHub 下载完整安装包：{FULL_PAGE}")

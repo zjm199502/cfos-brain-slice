@@ -19,6 +19,5 @@ def resources_dir() -> Path:
     return app_root() / "resources"
 
 
-def stardist_model_dir() -> Path | None:
-    d = resources_dir() / "models" / "2D_versatile_fluo"
-    return d if (d / "config.json").exists() else None
+def allen_atlas_dir() -> Path:
+    return Path(__file__).with_name("ccf_data")

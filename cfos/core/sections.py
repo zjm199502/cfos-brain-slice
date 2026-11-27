@@ -20,6 +20,37 @@ class Section:
     flip_h: bool = False
     registration: dict = field(default_factory=dict)  # 见 registration.Registration
 
+    other_registrations: dict = field(default_factory=dict)
+
+    def vertices(self):
+        """Editable scanner coordinates; support old projects with only a crop rectangle."""
+        if len(self.contour0) >= 3:
+            points = np.asarray(self.contour0, dtype=float)
+            if len(points) > 3 and np.array_equal(points[0], points[-1]):
+                points = points[:-1]
+            return points
+        x, y, w, h = self.bbox0
+        return np.array([[x,y], [x+w,y], [x+w,y+h], [x,y+h]], dtype=float)
+
+    def geometry_key(self):
+        """Identify the same closed boundary across vertex rotations, windings and straight-edge insertions."""
+        import hashlib
+        pts = self.vertices().astype(np.float32).astype(np.float64)
+        pts = pts[np.any(pts != np.roll(pts, 1, axis=0), axis=1)]
+        if len(pts) >= 3:
+            prev_edge = pts - np.roll(pts, 1, axis=0)
+            next_edge = np.roll(pts, -1, axis=0) - pts
+            cross = prev_edge[:,0]*next_edge[:,1] - prev_edge[:,1]*next_edge[:,0]
+            keep = (cross != 0) | ((prev_edge * next_edge).sum(axis=1) < 0)
+            pts = pts[keep]
+        def ring_bytes(points):
+            if not len(points):
+                return b""
+            start = np.lexsort((points[:,1], points[:,0]))[0]
+            return np.roll(points, -int(start), axis=0).astype("<f8").tobytes()
+        return hashlib.sha256(np.asarray(self.bbox0, dtype="<i8").tobytes() +
+                              min(ring_bytes(pts), ring_bytes(pts[::-1]))).hexdigest()
+
     def to_dict(self):
         return asdict(self)
 
@@ -63,55 +94,108 @@ def tissue_mask(img: np.ndarray, pixel_um: float, sensitivity: float = 1.0) -> n
     return mask
 
 
-def _tissue_image(slide, channels):
-    """Build the tissue thumbnail in bands when a large scan has no usable lower level."""
+def _tissue_image(slide, channels, bbox0=None):
+    """Read the available pyramid level in bands; return thumbnail and level-zero geometry."""
     lv = slide.level_for_pixel_size(8.0)
     ds = slide.downsample(lv)
-    pix = slide.pixel_size_um * ds
     h, w = slide.level_shapes[lv]
-    step = max(1, round(8.0 / pix)) if pix > 0 else 1
+    if bbox0 is None:
+        x0, y0, x1, y1 = 0, 0, w, h
+    else:
+        x, y, width, height = bbox0
+        x0, y0 = max(0, int(x / ds)), max(0, int(y / ds))
+        x1, y1 = min(w, int(np.ceil((x+width)/ds))), min(h, int(np.ceil((y+height)/ds)))
     channels = _valid(slide, channels)
-    if ds != 1 or step < 2 or min(h, w) < 8 * step or h * w < 8_000_000:
-        return slide.read(lv, None, channels), ds
-    rows, cols = h // step, w // step
+    channels = list(range(len(slide.channels))) if channels is None else channels
+    step = max(1, round(8.0 / (slide.pixel_size_um * ds)))
+    if step == 1 or min(y1-y0, x1-x0) < step:
+        return slide.read(lv, bbox0, channels), ds, x0*ds, y0*ds
+    rows, cols = (y1-y0+step-1)//step, (x1-x0+step-1)//step
     out = np.empty((len(channels), rows, cols), np.float32)
-    # Keep the float32 working band near 16 MiB.
-    band = max(1, (4 * 1024**2) // (len(channels) * w * step))
+    band = max(1, (4 * 1024**2) // (len(channels) * (x1-x0) * step))
     for r in range(0, rows, band):
-        n = min(band, rows - r)
-        a = slide.read(lv, (0, r * step, cols * step, n * step), channels)
-        out[:, r:r+n] = a.astype(np.float32).reshape(len(channels), n, step, cols, step).mean(axis=(2, 4))
-    return out, ds * step
+        n = min(band, rows-r)
+        sy = y0+r*step
+        height = min(n*step, y1-sy)
+        # Move read boundaries slightly inside level pixels to avoid rounding down/up
+        # when a scanner level has a fractional downsample ratio.
+        box = ((x0+.25)*ds, (sy+.25)*ds, (x1-x0-.5)*ds, (height-.5)*ds)
+        a = slide.read(lv, box, channels).astype(np.float32)
+        a = np.pad(a, ((0,0), (0,n*step-height), (0,cols*step-(x1-x0))), mode="edge")
+        out[:,r:r+n] = a.reshape(len(channels), n, step, cols, step).mean(axis=(2,4))
+    return out, ds*step, x0*ds, y0*ds
 
 
-def find_sections(slide: Slide, min_area_mm2: float = 3.0, pad_um: float = 200.0,
-                  sensitivity: float = 1.0, channels: list[int] | None = None) -> list[Section]:
-    """channels：用哪些通道找组织轮廓（None = 全部通道）。某个通道背景太亮时可以不用它（v0.8.2）。"""
-    img, ds = _tissue_image(slide, channels)
-    pix = slide.pixel_size_um * ds
-    mask = tissue_mask(img, pix, sensitivity)
-    lab = measure.label(mask)
-    min_px = min_area_mm2 * 1e6 / pix ** 2
-    H0, W0 = slide.level_shapes[0]
-    secs = []
-    for rp in measure.regionprops(lab):
-        if rp.area < min_px:
+def _fit_components(img, pixel_um, sensitivity, min_pixels):
+    """Group fragments at section scale, then follow the local fluorescence edge."""
+    if min(img.shape[1:]) < 2:
+        return []
+    signal = np.zeros(img.shape[1:], np.float32)
+    for channel in img:
+        lo, hi = np.percentile(channel, [1, 99.5])
+        if hi <= lo:
+            hi = channel.max()
+        if hi > lo:
+            np.maximum(signal, np.clip((channel.astype(np.float32)-lo)/(hi-lo), 0, 1), out=signal)
+    if signal.max() == signal.min():
+        return []
+    coarse = filters.gaussian(signal, sigma=max(1., 20/pixel_um))
+    threshold = filters.threshold_otsu(coarse) * 0.6 / sensitivity
+    edge = filters.gaussian(signal, sigma=max(.7, 10/pixel_um)) > threshold
+    # Pad before closing so sections touching the scan boundary keep their tissue.
+    radius = max(1, round(150/pixel_um))
+    support = np.pad(coarse > threshold, radius, mode="edge")
+    support = morphology.isotropic_closing(support, radius)[radius:-radius, radius:-radius]
+    grouped = measure.label(ndi.binary_fill_holes(support))
+    margin = max(2, int(np.ceil(100/pixel_um)))
+    contours = []
+    for region in measure.regionprops(grouped):
+        if region.area < min_pixels:
             continue
-        y0, x0, y1, x1 = rp.bbox
-        pad = pad_um / pix
-        x0 = max(0, x0 - pad); y0 = max(0, y0 - pad)
-        x1 = min(mask.shape[1], x1 + pad); y1 = min(mask.shape[0], y1 + pad)
-        bbox0 = (int(x0 * ds), int(y0 * ds), int(min(W0, (x1 - x0) * ds)), int(min(H0, (y1 - y0) * ds)))
-        cs = measure.find_contours(np.pad(lab == rp.label, 1), 0.5)
-        c = max(cs, key=len) - 1
-        c = measure.approximate_polygon(c, tolerance=1.0)
-        contour0 = [(float(x * ds), float(y * ds)) for y, x in c]
-        secs.append((bbox0, contour0))
-    # 按从上到下、从左到右排序（同一行的容差为脑片高度的一半）
-    if secs:
-        hmed = np.median([b[3] for b, _ in secs])
-        secs.sort(key=lambda s: (round(s[0][1] / max(hmed, 1)), s[0][0]))
-    return [Section(id=i + 1, bbox0=b, contour0=c, name=f"S{i + 1:02d}") for i, (b, c) in enumerate(secs)]
+        y0, x0, y1, x1 = region.bbox
+        y0, x0 = max(0,y0-margin), max(0,x0-margin)
+        y1, x1 = min(edge.shape[0],y1+margin), min(edge.shape[1],x1+margin)
+        labels = grouped[y0:y1,x0:x1]
+        component = labels == region.label
+        # Only refit a narrow outer band. Keep dim interiors and exclude neighbours.
+        pad = margin + 2
+        core = np.pad(component, pad)
+        nearby = ndi.distance_transform_edt(~core) <= margin
+        interior = ndi.distance_transform_edt(core) > margin
+        foreground = np.pad(edge[y0:y1,x0:x1], pad)
+        fit = morphology.isotropic_closing(foreground & nearby, max(1., 32/pixel_um))
+        fit = ndi.binary_fill_holes(interior | fit)
+        fit = morphology.isotropic_dilation(fit, max(1., 12/pixel_um))[pad:-pad,pad:-pad]
+        fit &= (labels == 0) | component
+        candidates = measure.label(fit)
+        overlap = np.bincount(candidates[component], minlength=2)
+        overlap[0] = 0
+        mask = candidates == overlap.argmax() if overlap.max() else component
+        loops = measure.find_contours(np.pad(mask, 1), .5)
+        loop = max(loops, key=len) - 1
+        # Thumbnail pixel centres are offset half a pixel from scanner box corners.
+        loop = measure.approximate_polygon(loop, tolerance=.8) + [y0+.5,x0+.5]
+        contours.append((region.area, loop[:, ::-1]))
+    return contours
+
+
+def find_sections(slide: Slide, min_area_mm2: float = 3.0, pad_um: float = 16.0,
+                  sensitivity: float = 1.0, channels: list[int] | None = None) -> list[Section]:
+    """Fit tissue contours and bound each section by its contour plus a small crop margin."""
+    img, ds, ox, oy = _tissue_image(slide, channels)
+    pix = slide.pixel_size_um * ds
+    h, w = slide.level_shapes[0]
+    sections = []
+    for _, path in _fit_components(img, pix, sensitivity, min_area_mm2 * 1e6 / pix**2):
+        path = np.clip(path * ds + [ox, oy], [0, 0], [w, h])
+        pad = max(0, pad_um) / slide.pixel_size_um
+        x, y = np.maximum(0, np.floor(path.min(axis=0)-pad)).astype(int)
+        x1, y1 = np.minimum([w,h], np.ceil(path.max(axis=0)+pad)).astype(int)
+        sections.append(((int(x),int(y),int(x1-x),int(y1-y)), path.tolist()))
+    if sections:
+        height = np.median([b[3] for b, _ in sections])
+        sections.sort(key=lambda s: (round(s[0][1] / max(height, 1)), s[0][0]))
+    return [Section(id=i+1, bbox0=b, contour0=c, name=f"S{i+1:02d}") for i,(b,c) in enumerate(sections)]
 
 
 def _valid(slide: Slide, channels):
@@ -119,26 +203,13 @@ def _valid(slide: Slide, channels):
     return chs or None
 
 
-def contour_in_bbox(slide: Slide, bbox0: tuple[int, int, int, int],
-                    channels: list[int] | None = None) -> list[tuple[float, float]]:
-    """用户手动调整矩形后，在矩形内重新找组织轮廓（取最大的一块组织）。"""
-    level = slide.level_for_pixel_size(8.0)
-    ds = slide.downsample(level)
-    pix = slide.pixel_size_um * ds
-    img = slide.read(level, bbox0, _valid(slide, channels))
-    x0, y0 = bbox0[0], bbox0[1]
-    rect = [(x0, y0), (x0 + bbox0[2], y0), (x0 + bbox0[2], y0 + bbox0[3]), (x0, y0 + bbox0[3])]
-    if img.shape[1] < 4 or img.shape[2] < 4:
-        return rect
-    try:
-        mask = tissue_mask(img, pix)
-    except Exception:
-        return rect
-    lab = measure.label(mask)
-    if lab.max() == 0:
-        return rect
-    rp = max(measure.regionprops(lab), key=lambda r: r.area)
-    cs = measure.find_contours(np.pad(lab == rp.label, 1), 0.5)
-    c = measure.approximate_polygon(max(cs, key=len) - 1, tolerance=1.0)
-    x0l, y0l = int(x0 / ds), int(y0 / ds)
-    return [(float((x + x0l) * ds), float((y + y0l) * ds)) for y, x in c]
+def contour_in_bbox(slide: Slide, bbox0: tuple[int,int,int,int],
+                    channels: list[int] | None = None) -> list[tuple[float,float]]:
+    """Fit the largest component inside the selected section; no evidence leaves it untouched."""
+    img, ds, ox, oy = _tissue_image(slide, channels, bbox0)
+    fits = _fit_components(img, slide.pixel_size_um * ds, 1., 1)
+    if not fits:
+        return []
+    path = max(fits, key=lambda item:item[0])[1] * ds + [ox,oy]
+    x, y, w, h = bbox0
+    return np.clip(path, [x,y], [x+w,y+h]).tolist()

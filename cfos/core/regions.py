@@ -1,6 +1,9 @@
 """把细胞分配到脑区，并按脑区（含上级脑区）汇总。"""
 from __future__ import annotations
 
+from .atlas_choice import structure_id
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 
@@ -114,6 +117,8 @@ def _intensity_signature(slide: Slide, section: Section, reg, warp_file, exclusi
          "reg": reg.to_dict(), "warp": stat(warp_file) if reg.nonlinear else None,
          "exclusions": [np.asarray(e, float).round(1).tolist() for e in (exclusions or [])],
          "z": getattr(slide_io, "Z_MODE", ""), "um": INTENSITY_UM, "n_ch": len(slide.channels)}
+    if getattr(slide, "scene_id", None) is not None:
+        d[Path(slide.path).suffix.lower().lstrip(".")] = slide.scene_source_signature()
     um = _usable_unmix(slide, unmix_model)
     if um is not None:   # v0.8.3：去除串色的比例也决定结果；没开启时签名与 v0.8.2 相同，旧缓存照样能用
         d["unmix"] = [np.asarray(um.matrix, float).round(5).tolist(), np.asarray(um.offsets, float).round(3).tolist()]
@@ -163,25 +168,21 @@ def assign_regions(cells: pd.DataFrame, slide: Slide, sections: list[Section], r
             continue
         ds, (H, W), _ = _thumb_geometry(slide, s)
         warp = None
-        wp = R.warp_path(results_dir, image_key, s.name)
+        wp = R.warp_path(results_dir, image_key, s.name, reg)
         if reg.nonlinear and wp.exists():
             w = np.load(wp)
             if w.shape[1:] == (H, W):
                 warp = (w[0], w[1])
         lab, hemi = R.label_maps(reg, W, H, warp)
-        lab = np.where(_excluded_mask(s, (H, W), ds, exclusions, reg.orientation), 0, lab)
+        excluded = _excluded_mask(s, (H, W), ds, exclusions, reg.orientation)
+        lab = np.where(excluded, 0, lab)
         # 只统计组织内的面积
         sel = cells["section"] == s.name
         if sel.any():
-            bx, by = s.bbox0[0], s.bbox0[1]
-            px = (cells.loc[sel, "x"].to_numpy() - bx) / ds
-            py = (cells.loc[sel, "y"].to_numpy() - by) / ds
-            if reg.orientation == "r180":
-                px, py = W - 1 - px, H - 1 - py
-            ix = np.clip(np.round(px).astype(int), 0, W - 1)
-            iy = np.clip(np.round(py).astype(int), 0, H - 1)
-            cells.loc[sel, "region_index"] = lab[iy, ix]
-            cells.loc[sel, "hemisphere"] = hemi[iy, ix]
+            regions, sides = R.cell_labels(cells.loc[sel, "x"].to_numpy(), cells.loc[sel, "y"].to_numpy(),
+                                            s, reg, ds, lab, hemi, warp, excluded)
+            cells.loc[sel, "region_index"] = regions
+            cells.loc[sel, "hemisphere"] = sides
         pix_mm2 = (ds * px0 / 1000.0) ** 2
         inten = cached_intensity_sums(slide, s, lab, hemi, ds, reg, results_dir, image_key, exclusions, wp,
                                       unmix_model) \
@@ -230,7 +231,8 @@ def dense_regions() -> set:
     return out
 
 
-def region_summary(cells: pd.DataFrame, areas: pd.DataFrame, channel_names, group_cols, require_nucleus=True):
+def region_summary(cells: pd.DataFrame, areas: pd.DataFrame, channel_names, group_cols, require_nucleus=True,
+                   *, include_allen_id=False):
     """返回按 (分组, 脑区, 半脑) 汇总的表，脑区包括所有上级脑区（每个细胞同时计入它的所有上级）。"""
     from .coloc import summarize
     st = load_atlas().structures.set_index("index")
@@ -265,6 +267,8 @@ def region_summary(cells: pd.DataFrame, areas: pd.DataFrame, channel_names, grou
     t.insert(len(group_cols), "脑区缩写", t["region"].map(st["acronym"]))
     t.insert(len(group_cols) + 1, "脑区名称", t["region"].map(st["name"]))
     t.insert(len(group_cols) + 2, "层级", t["region"].map(lambda i: len(anc.get(i, [])) - 1))
+    if include_allen_id:
+        t.insert(len(group_cols), structure_id(), t["region"].map(st["id"]))
     t["面积 (mm²)"] = t.pop("area_mm2")
     for nm in channel_names:
         col = f"{nm}+"

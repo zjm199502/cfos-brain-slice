@@ -100,10 +100,31 @@ def release_device_cache():
         torch.mps.empty_cache()
 
 
-def evaluate(model, source, batch_size, threshold):
+def evaluate(model, source, batch_size, threshold, report=None):
     import numpy as np
-    labels, _, _ = model.eval(source, channel_axis=-1, normalize=False, batch_size=batch_size,
-                              cellprob_threshold=threshold)
+    hook = None
+    if report is not None:
+        from math import ceil
+        from cellpose.transforms import get_pad_yx
+        # Same 2-D grid as the pinned Cellpose 4.2.1 run_net. Get the tile
+        # size from the actual forward input, including after a device retry.
+        seen = 0
+        def after_forward(module, args, output):
+            nonlocal seen
+            subtiles, _, by, bx = args[0].shape
+            h, w = source.shape[:2]
+            top, bottom, left, right = get_pad_yx(h, w, min_size=(by, bx))
+            ny = 1 if h + top + bottom <= by else ceil(1.2 * (h + top + bottom) / by)
+            nx = 1 if w + left + right <= bx else ceil(1.2 * (w + left + right) / bx)
+            seen += subtiles
+            report(ceil(seen / batch_size), ceil(ny * nx / batch_size))
+        hook = model.net.register_forward_hook(after_forward)
+    try:
+        labels, _, _ = model.eval(source, channel_axis=-1, normalize=False, batch_size=batch_size,
+                                  cellprob_threshold=threshold)
+    finally:
+        if hook is not None:
+            hook.remove()
     return np.asarray(labels, dtype=np.int32).reshape(source.shape[:2])
 
 
@@ -128,6 +149,10 @@ def serve(weights, pref):
     commands = queue.Queue()
     threading.Thread(target=listen, args=(commands,), daemon=True).start()
     protocol = sys.stdout.buffer
+    def report(done, total):
+        protocol.write((json.dumps({"batch": [done, total]}) + "\n").encode("ascii"))
+        protocol.flush()
+
     model = None
     batch_size = 4
     while True:
@@ -153,7 +178,8 @@ def serve(weights, pref):
                 source[..., 0] = x
                 while True:
                     try:
-                        labels = evaluate(model, source, batch_size, command["threshold"])
+                        labels = evaluate(model, source, batch_size, command["threshold"],
+                                          report if command.get("progress") else None)
                         break
                     except (RuntimeError, NotImplementedError) as e:
                         if model.device.type == "cpu" or not device_error(e):

@@ -8,6 +8,7 @@ from qtpy.QtCore import QThread, Signal
 
 class Task(QThread):
     progress = Signal(int, int, str)   # 已完成, 总数, 说明
+    detection_event = Signal(object)
     finished_ok = Signal(object)
     failed = Signal(str)
 

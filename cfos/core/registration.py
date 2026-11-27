@@ -1,24 +1,18 @@
-"""脑片与 Allen CCFv3 图谱的配准。
-
-流程：
-1. 每张脑片生成一张约 8 µm/像素 的缩略图（DAPI），交给 DeepSlice 估计它在图谱中的切片平面。
-   切片在玻片上可能是倒放的，所以同时试 0° 和 180° 两个方向，选与图谱轮廓重合最好的方向。
-2. 自动校正前后位置（v0.8.5）：前后挪动切面，取图谱模板与 DAPI 最像的位置（refine_ap）。
-3. 可选：用 elastix 做非线性贴合（组织轮廓 + DAPI 纹理），修正切片变形。
-4. 用户可以手动调整：前后位置、两个倾斜角、缩放、旋转、平移，以及在图上拖动“修正点”做局部修正。
-5. 最终得到一张与缩略图对齐的脑区标签图，用来给每个细胞分配脑区和左右半脑。
-"""
+"""Registration geometry, tissue refinement and atlas sampling for CCFv3 and STAM."""
 from __future__ import annotations
 
 import os
 import threading
+import hashlib
+import tempfile
+from pathlib import Path
 from dataclasses import dataclass, field, asdict
 
 import numpy as np
 from scipy import ndimage as ndi
 
-from .atlas import Plane, sample_plane, load_atlas
-from .resources import resources_dir
+from .atlas import Plane, sample_plane, load_atlas, edit_coords, native_mm
+from .atlas_choice import CCF, STAM
 from .sections import Section, tissue_mask
 from .slide_io import Slide
 
@@ -29,8 +23,8 @@ THUMB_UM = 8.0  # 配准使用的分辨率（µm/像素）
 class Registration:
     orientation: str = "r0"                # 'r0' 或 'r180'：缩略图相对原图的旋转
     mirror: bool = False                   # 左右翻转（只影响左右半脑的判定）
-    plane: list = field(default_factory=list)   # DeepSlice 给出的 9 个数（联合校正后为校正后的值）
-    plane_raw: list = field(default_factory=list)  # 联合校正前 DeepSlice 的原始结果（用于撤销）
+    plane: list = field(default_factory=list)   # 定位得到的 9 个数（联合校正后为校正后的值）
+    plane_raw: list = field(default_factory=list)  # 联合校正前的原始定位结果（用于撤销）
     ap_shift: float = 0.0                  # 前后平移（体素，25 µm）
     ap_auto: float = 0.0                   # 自动校正的前后平移（体素，v0.8.5）；与 ap_shift 相加，滑块只显示手动部分
     tilt_dv: float = 0.0                   # 背腹方向倾斜（度）
@@ -46,14 +40,38 @@ class Registration:
     warnings: list = field(default_factory=list)  # 自动配准后需要人工重点检查的原因（v0.8.5）；手动调整后清空
     status: str = "未配准"
 
-    def to_dict(self):
-        return asdict(self)
+    # None is the legacy CCFv3 filename convention. New results reference immutable fields.
+    warp_file: str | None = None
 
-    @staticmethod
-    def from_dict(d):
-        if not d:
-            return Registration()
-        return Registration(**{k: v for k, v in d.items() if k in Registration.__dataclass_fields__})
+    fit_atlas: str = CCF
+    method: str = "DeepSlice"     # Historical untagged CCF results.
+    bbox0: list = field(default_factory=list)
+    shape_hw: list = field(default_factory=list)
+    downsample: float = 1.
+    initialization: dict = field(default_factory=dict)
+    metrics: dict = field(default_factory=dict)
+
+    def to_dict(self):
+        record = asdict(self)
+        if self.fit_atlas == STAM:
+            plane = record.pop("plane")
+            record["plane_native_mm"] = native_mm(np.reshape(plane, (3, 3))).ravel().tolist() if plane else []
+        return record
+
+    @classmethod
+    def from_dict(cls, record):
+        if not record:
+            return cls()
+        if record.get("fit_atlas") == STAM and not record.get("plane_native_mm"):
+            return cls(fit_atlas=STAM, method="giRAff")
+        values = {k: v for k, v in record.items() if k in cls.__dataclass_fields__}
+        if record.get("plane_native_mm"):
+            values["plane"] = edit_coords(np.reshape(record["plane_native_mm"], (3, 3))).ravel().tolist()
+            values.update(fit_atlas=STAM, method="giRAff")
+            values.setdefault("status", "STAM · giRAff")
+            if values.get("nonlinear"):
+                values.setdefault("nl_method", "轮廓 + DAPI 纹理")
+        return cls(**values)
 
     @property
     def done(self):
@@ -83,116 +101,6 @@ def orient(img: np.ndarray, orientation: str) -> np.ndarray:
     return img
 
 
-# ------------------------------------------------------------------ DeepSlice
-_DS = None
-
-
-def _deepslice():
-    global _DS
-    if _DS is None:
-        from DeepSlice import DSModel
-        from DeepSlice.metadata import metadata_loader
-        from DeepSlice.neural_network import neural_network
-
-        d = resources_dir() / "deepslice"
-        orig = metadata_loader.get_data_path
-
-        def local_path(url_path_dict, path):
-            p = d / os.path.basename(url_path_dict["path"])
-            return str(p) if p.exists() else orig(url_path_dict, path)
-
-        metadata_loader.get_data_path = local_path
-        import DeepSlice.main as dsmain
-        dsmain.metadata_loader.get_data_path = local_path
-        m = DSModel.__new__(DSModel)
-        m.species = "mouse"
-        m.config, m.metadata_path = metadata_loader.load_config()
-        def _patched(model, weights, species="mouse"):
-            _load_deepslice_weights(model, weights)
-            return model
-        neural_network.load_xception_weights = _patched
-        # DeepSlice 的权重文件覆盖了 Xception 的全部卷积层，只有最顶上的 ImageNet 分类层（predictions，8 MB）
-        # 不在里面，所以 v0.8 起只带这一层（xception_top.npz），不再带 92 MB 的完整 Xception 预训练文件；
-        # 两种方式的输出完全相同（实测差值 0）。旧安装（v0.7，补丁升级）仍有完整文件时照旧用它。
-        full = d / "xception_weights_tf_dim_ordering_tf_kernels.h5"
-        top = d / "xception_top.npz"
-        if top.exists():
-            model = neural_network.initialise_network(None, None, "mouse")
-            z = np.load(top)
-            model.layers[0].get_layer("predictions").set_weights([z["kernel"], z["bias"]])
-        else:
-            model = neural_network.initialise_network(str(full), None, "mouse")
-        _load_deepslice_weights(model, str(d / "Allen_Mixed_Best.h5"))
-        m.model = model
-        _DS = m
-    return _DS
-
-
-def _load_deepslice_weights(model, path):
-    """按层名加载 DeepSlice 权重。Keras 会给未命名的层自动编号（conv2d_2、batch_normalization_5 …），
-    同一进程里先建过其他模型（如 StarDist）时编号会错位，所以这里按出现顺序把它们换成标准名字再对应。"""
-    import re
-    import h5py
-    with h5py.File(path, "r") as f:
-        for k, nm in ((1, "dense"), (2, "dense_1"), (3, "dense_2")):
-            g = f[nm][nm]
-            model.layers[k].set_weights([np.array(g["kernel:0"]), np.array(g["bias:0"])])
-        x = f["xception"]
-        counters = {}
-        for layer in model.layers[0].layers:
-            if not layer.weights:
-                continue
-            name = layer.name
-            mt = re.match(r"^(conv2d|batch_normalization)(_\d+)?$", name)
-            if mt:
-                base = mt.group(1)
-                i = counters.get(base, 0)
-                counters[base] = i + 1
-                name = base if i == 0 else f"{base}_{i}"
-            if name not in x:
-                continue
-            g = x[name]
-            wn = []
-            for w in layer.weights:
-                short = w.name.split("/")[-1]
-                short = short if short.endswith(":0") else f"{short}:0"
-                wn.append(short)
-            layer.set_weights([np.array(g[k]) for k in wn])
-
-
-def deepslice_predict(images: list[np.ndarray], workdir) -> list[Plane]:
-    """对若干张缩略图预测切片平面。
-
-    v0.8.1 起默认用 ONNX 版本（core/deepslice_onnx.py，不需要 TensorFlow；与 TensorFlow 结果最大差
-    0.0001 体素）。找不到 ONNX 文件或设置了 CFOS_NET=tf 时用原来的 DeepSlice（需要 TensorFlow）。"""
-    from . import accel, deepslice_onnx as DO
-    d = resources_dir() / "deepslice"
-    if accel.net_backend() == "onnx" and DO.available(d):
-        return [Plane.from_list(v) for v in DO.predict(images, d)]
-    from .components import require_tensorflow
-    require_tensorflow("脑图谱自动定位（DeepSlice）")
-    return _deepslice_predict_tf(images, workdir)
-
-
-def _deepslice_predict_tf(images: list[np.ndarray], workdir) -> list[Plane]:
-    from PIL import Image
-    import tempfile
-    m = _deepslice()
-    with tempfile.TemporaryDirectory(dir=workdir) as td:
-        names = []
-        for i, im in enumerate(images):
-            n = os.path.join(td, f"img_{i:04d}.png")
-            Image.fromarray(im).save(n)
-            names.append(n)
-        m.predict(image_list=names, ensemble=True, section_numbers=False)
-        p = m.predictions.copy()
-    p["base"] = p["Filenames"].map(lambda f: os.path.basename(str(f)))
-    planes = []
-    for n in names:
-        row = p[p["base"] == os.path.basename(n)].iloc[0]
-        planes.append(Plane.from_list(row[["ox", "oy", "oz", "ux", "uy", "uz", "vx", "vy", "vz"]].to_numpy(float)))
-    return planes
-
 
 def dice(a: np.ndarray, b: np.ndarray) -> float:
     s = a.sum() + b.sum()
@@ -200,40 +108,18 @@ def dice(a: np.ndarray, b: np.ndarray) -> float:
 
 
 def auto_register(slide: Slide, sections: list[Section], nucleus_ch, workdir, progress=None,
-                  return_thumbs: bool = False):
-    """返回 {section.name: Registration}；return_thumbs=True 时再返回 {section.name: (缩略图, 掩膜)}，
-    后面的前后位置校正和非线性贴合直接用，不用再读一遍图。"""
-    thumbs = {}
-    imgs = []
-    keys = []
-    for s in sections:
-        img, mask, ds = section_thumbnail(slide, s, nucleus_ch)
-        thumbs[s.name] = (img, mask)
-        for o in ("r0", "r180"):
-            imgs.append(orient(img, o))
-            keys.append((s.name, o))
-    if progress:
-        progress(1, 3, "正在用 DeepSlice 估计切片位置…")
-    planes = deepslice_predict(imgs, workdir)
-    best = {}
-    for (name, o), pl in zip(keys, planes):
-        img, mask = thumbs[name]
-        H, W = mask.shape
-        lab = sample_plane(pl, W, H)["annotation"]
-        d = dice(lab > 0, orient(mask, o))
-        if name not in best or d > best[name][0]:
-            best[name] = (d, o, pl)
-    out = {}
-    for s in sections:
-        d, o, pl = best[s.name]
-        r = Registration(orientation=o, plane=pl.to_list(), status=f"自动配准（轮廓重合度 {d:.2f}）")
-        out[s.name] = r
-    if return_thumbs:
-        return out, thumbs
-    return out
+                  return_thumbs: bool = False, *, atlas=CCF):
+    """Fit each section with giRAff and optionally return the thumbnails for older callers."""
+    from .autoreg import fit_section
+    results, thumbnails = {}, {}
+    for section in sections:
+        thumb = section_thumbnail(slide, section, nucleus_ch)
+        results[section.name] = fit_section(slide, section, nucleus_ch, workdir, False, atlas, progress, thumb=thumb)
+        if return_thumbs:
+            thumbnails[section.name] = thumb[:2]
+    return (results, thumbnails) if return_thumbs else results
 
 
-# ------------------------------------------------------------------ 手动调整
 def _rot(axis, deg):
     axis = axis / (np.linalg.norm(axis) + 1e-12)
     a = np.deg2rad(deg)
@@ -261,7 +147,7 @@ def adjusted_plane(reg: Registration) -> Plane:
     v2 = A[0, 1] * u + A[1, 1] * v
     c = c - reg.shift_x * u - reg.shift_y * v
     o2 = c - 0.5 * u2 - 0.5 * v2
-    return Plane(o2, u2, v2)
+    return Plane(o2, u2, v2, reg.fit_atlas)
 
 
 def tps_warp(points: list, W: int, H: int):
@@ -317,10 +203,56 @@ def tps_warp_cached(points: list, W: int, H: int):
     return _TPS_CACHE["val"]
 
 
-def warp_path(results_dir, image_key, section_name):
-    d = results_dir / "registration"
-    d.mkdir(parents=True, exist_ok=True)
-    return d / f"{image_key}_{section_name}_warp.npy"
+def warp_path(results_dir, image_key, section_name, reg):
+    folder = Path(results_dir) / ("stam_giraff" if reg.fit_atlas == STAM else "registration")
+    name = reg.warp_file
+    if name is None:
+        path = folder / f"{image_key}_{section_name}_warp.npy"
+    elif not name:
+        path = folder / "no-warp"
+    elif len(name) == 68 and name.endswith(".npy") and all(c in "0123456789abcdef" for c in name[:-4]):
+        path = folder / name
+    else:
+        raise ValueError("配准位移场文件名无效。")
+    return path
+
+
+def save_warp(results_dir, warp, atlas=CCF):
+    folder = Path(results_dir) / ("stam_giraff" if atlas == STAM else "registration")
+    folder.mkdir(exist_ok=True, parents=True)
+    data = np.ascontiguousarray(warp, dtype=np.float32)
+    # Immutable warp names keep existing projects and backups valid if a job is interrupted.
+    digest = hashlib.sha256()
+    digest.update(str(data.shape).encode("ascii"))
+    digest.update(data.data)
+    name = digest.hexdigest() + ".npy"
+    if not (folder / name).exists():
+        with tempfile.NamedTemporaryFile(dir=folder, suffix=".tmp", delete=False) as f:
+            tmp = Path(f.name)
+        try:
+            with tmp.open("wb") as f:
+                np.save(f, data, allow_pickle=False)
+            os.replace(tmp, folder / name)
+        finally:
+            tmp.unlink(missing_ok=True)
+    return name
+
+
+def refit_outline(reg, image, mask, results_dir, pixel_um):
+    from . import stam_refinement
+    h, w = image.shape
+    plane = adjusted_plane(reg)
+    ref = sample_plane(plane, w, h, ("reference",))["reference"]
+    if reg.fit_atlas == STAM:
+        tissue = stam_refinement.tissue_mask(ref, pixel_um)
+    else:
+        tissue = sample_plane(plane, w, h)["annotation"] > 0
+    warp, reg.metrics = stam_refinement.refine(orient(image, reg.orientation), orient(mask, reg.orientation),
+                                               ref, tissue, pixel_um)
+    reg.nonlinear = warp is not None
+    reg.warp_file = save_warp(results_dir, warp, reg.fit_atlas) if reg.nonlinear else ""
+    reg.nl_method = "轮廓 + DAPI 纹理" if reg.nonlinear else ""
+    reg.warnings = [] if reg.nonlinear else [reg.metrics["reason"]]
 
 
 NL_GRIDS = (40.0, 60.0)   # B 样条控制点间距（缩略图像素），依次尝试：先 40，出现折叠再放宽到 60。
@@ -452,13 +384,6 @@ def _nonlinear_fit(reg: Registration, mask_oriented: np.ndarray, img_oriented: n
 
 
 # ------------------------------------------------------------------ 自动校正前后位置（v0.8.5）
-AP_RANGE_UM = 600.0     # 最多前后各挪这么多
-AP_COARSE_UM = 200.0    # 粗找的步长
-AP_FINE_UM = 100.0      # 在最好的位置两侧再细找一步
-AP_MIN_GAIN = 1.05      # 相似度至少比原位置高 5% 才挪动（否则认为 DeepSlice 的位置已经够好）
-AP_BIG_UM = 500.0       # 挪动量达到这个值时提示人工检查
-
-
 def similarity(ref: np.ndarray, img: np.ndarray, mask: np.ndarray) -> float:
     """图谱平均模板与 DAPI 缩略图在组织范围内的互信息（越大越像）。"""
     a = ndi.gaussian_filter(ref.astype(np.float32), 2)
@@ -473,53 +398,63 @@ def similarity(ref: np.ndarray, img: np.ndarray, mask: np.ndarray) -> float:
     return float((p[nz] * np.log(p[nz] / q[nz])).sum())
 
 
-def refine_ap(reg: Registration, mask_oriented: np.ndarray, img_oriented: np.ndarray, cancelled=None) -> dict:
-    """DeepSlice 给的前后位置（Bregma）常有几百微米的误差。这里把切面前后挪动试几个位置，
-    每个位置先做一次快速的仿射对齐（只用轮廓），再比较图谱模板与 DAPI 的相似度，取最像的位置，写进 reg.ap_auto。
+def registered_samples(reg, W, H, warp, x, y, which=("annotation", "hemispheres")):
+    """Sample the original atlas at arbitrary oriented section corner coordinates."""
+    from .atlas import SHAPE_ASR
+    from .edge_drag import is_fine, transport
+    x, y = np.broadcast_arrays(np.asarray(x, dtype=float), np.asarray(y, dtype=float))
+    for point in reversed(reg.control_points):
+        if is_fine(point):
+            x, y = transport(x, y, point, W, H, inverse=True)
+    legacy = [p for p in reg.control_points if not is_fine(p)]
+    manual = tps_warp_cached(legacy, W, H)
+    for field in (manual, warp if reg.nonlinear else None):
+        if field is not None:
+            coords = [y - .5, x - .5]
+            x = x + ndi.map_coordinates(field[0], coords, order=1, mode="nearest")
+            y = y + ndi.map_coordinates(field[1], coords, order=1, mode="nearest")
+    plane = adjusted_plane(reg)
+    s, t = x / W, y / H
+    xyz = np.stack([plane.o[k] + s * plane.u[k] + t * plane.v[k] for k in range(3)])
+    atlas = load_atlas(reg.fit_atlas)
+    if reg.fit_atlas == STAM:
+        coords = np.stack((-xyz[1], -xyz[2], xyz[0])) * .025
+        result = {k: ndi.map_coordinates(getattr(atlas, k), coords / (.032 if k == "reference" else .040),
+                                         order=int(k == "reference"), mode="constant") for k in which}
+    else:
+        coords = [size - 1 - xyz[k] for size, k in zip(SHAPE_ASR, (1, 2, 0))]
+        result = {k: ndi.map_coordinates(getattr(atlas, k), coords, order=int(k == "reference"), mode="constant")
+                  for k in which}
+    if "hemispheres" in result and reg.mirror:
+        h = result["hemispheres"]
+        result["hemispheres"] = np.where(h == 1, 2, np.where(h == 2, 1, h)).astype(h.dtype)
+    return result
 
-    示例图（两张相邻脑片）实测：DeepSlice 给 +0.77 和 +0.11 mm，本方法给 +0.37 和 +0.41 mm；
-    不参与配准的 NeuN 通道“灰质/白质亮度比”从 2.0 左右提高到 2.6 左右。
-    返回 {"shift_um": 挪动量, "scores": {挪动量: 相似度}, "edge": 最好的位置是否在搜索范围边上}。"""
-    H, W = mask_oriented.shape
-    fixed = ndi.gaussian_filter(mask_oriented.astype(np.float32), 2)
-    f2 = ndi.gaussian_filter(img_oriented.astype(np.float32), 1) / 255.0
-    r2 = Registration.from_dict(reg.to_dict())
-    scores: dict[float, float] = {}
 
-    def score(um: float) -> float:
-        if um not in scores:
-            if cancelled is not None and cancelled():
-                raise InterruptedError
-            r2.ap_auto = um / 25.0
-            pl = adjusted_plane(r2)
-            smp = sample_plane(pl, W, H, ("annotation", "reference"))
-            lab, ref = smp["annotation"], smp["reference"].astype(np.float32)
-            if ref.max() <= 0 or (lab > 0).mean() < 0.02:    # 挪出了脑子
-                scores[um] = 0.0
-            else:
-                moving = ndi.gaussian_filter((lab > 0).astype(np.float32), 2)
-                w = _elastix(fixed, moving, f2, ndi.gaussian_filter(ref, 1) / float(ref.max()),
-                             bspline=False, iters=100)
-                scores[um] = similarity(sample_plane(pl, W, H, ("reference",), warp=w)["reference"],
-                                        img_oriented, mask_oriented)
-        return scores[um]
-
-    n = int(round(AP_RANGE_UM / AP_COARSE_UM))
-    for k in range(-n, n + 1):
-        score(k * AP_COARSE_UM)
-    best = max(scores, key=scores.get)
-    for um in (best - AP_FINE_UM, best + AP_FINE_UM):
-        if abs(um) <= AP_RANGE_UM:
-            score(um)
-    best = max(scores, key=scores.get)
-    if best != 0.0 and scores[best] < scores[0.0] * AP_MIN_GAIN:
-        best = 0.0
-    reg.ap_auto = best / 25.0
-    return {"shift_um": best, "scores": dict(sorted(scores.items())), "edge": abs(best) >= AP_RANGE_UM}
+def sample_grid(reg, W, H, warp, xs, ys, which):
+    """Bound temporary coordinate memory independently of export and preview size."""
+    if reg.nonlinear and np.shape(warp) != (2, H, W):
+        raise ValueError("配准位移场缺失或尺寸与脑片不符，请重新配准。")
+    atlas = load_atlas(reg.fit_atlas)
+    out = {k: np.empty((len(ys), len(xs)), getattr(atlas, k).dtype) for k in which}
+    rows = max(1, 192000 // max(1, len(xs)))
+    for start in range(0, len(ys), rows):
+        sl = slice(start, start + rows)
+        values = registered_samples(reg, W, H, warp, xs[None, :], ys[sl, None], which)
+        for k in which:
+            out[k][sl] = values[k]
+    return out
 
 
 def label_maps(reg: Registration, W: int, H: int, warp=None):
     """在“方向已校正”的缩略图坐标下，生成脑区标签图和半脑图。"""
+    if reg.nonlinear and np.shape(warp) != (2, H, W):
+        raise ValueError("配准位移场缺失或尺寸与脑片不符，请重新配准。")
+    from .edge_drag import is_fine
+    if any(is_fine(p) for p in reg.control_points):
+        r = sample_grid(reg, W, H, warp, np.arange(W) + .5, np.arange(H) + .5,
+                        ("annotation", "hemispheres"))
+        return r["annotation"], r["hemispheres"]
     pl = adjusted_plane(reg)
     total = None
     t = tps_warp_cached(reg.control_points, W, H)
@@ -546,6 +481,12 @@ def assign_cells(x0: np.ndarray, y0: np.ndarray, section: Section, reg: Registra
     """细胞坐标（第 0 层像素）→ (脑区 index, 半脑 1/2)。"""
     H, W = shape_hw
     lab, hemi = label_maps(reg, W, H, warp)
+    return cell_labels(x0, y0, section, reg, ds, lab, hemi, warp)
+
+
+def cell_labels(x0, y0, section, reg, ds, lab, hemi, warp=None, excluded=None):
+    from .edge_drag import is_fine, transport
+    H, W = lab.shape
     bx, by = section.bbox0[0], section.bbox0[1]
     px = (np.asarray(x0) - bx) / ds
     py = (np.asarray(y0) - by) / ds
@@ -553,7 +494,25 @@ def assign_cells(x0: np.ndarray, y0: np.ndarray, section: Section, reg: Registra
         px, py = W - 1 - px, H - 1 - py
     ix = np.clip(np.round(px).astype(int), 0, W - 1)
     iy = np.clip(np.round(py).astype(int), 0, H - 1)
-    return lab[iy, ix], hemi[iy, ix]
+    regions, sides = lab[iy, ix], hemi[iy, ix]
+    edits = [point for point in reg.control_points if is_fine(point)]
+    if edits:
+        # Legacy cell indexing used rounded thumbnail pixels. Only recompute cells
+        # within new stroke supports or whose old pixel centre was affected.
+        x, y = (np.asarray(x0)-bx)/ds, (np.asarray(y0)-by)/ds
+        if reg.orientation == "r180":
+            x, y = W-x, H-y
+        moved = np.zeros(x.shape, bool)
+        for p in edits:
+            for cx, cy in ((x,y), (ix+.5,iy+.5)):
+                sx, sy = transport(cx, cy, p, W, H, inverse=True)
+                moved |= (sx != cx) | (sy != cy)
+        if moved.any():
+            values = registered_samples(reg,W,H,warp,x[moved],y[moved])
+            regions[moved], sides[moved] = values["annotation"], values["hemispheres"]
+    if excluded is not None:
+        regions[excluded[iy, ix]] = 0
+    return regions, sides
 
 
 HEMI_NAMES = {0: "", 1: "左", 2: "右"}

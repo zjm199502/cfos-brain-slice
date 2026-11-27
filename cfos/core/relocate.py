@@ -11,7 +11,7 @@ import os
 import re
 from pathlib import Path
 
-IMAGE_EXT = {".qptiff", ".tif", ".tiff", ".kfbf", ".vsi"}
+IMAGE_EXT = {".qptiff", ".tif", ".tiff", ".kfbf", ".vsi", ".czi"}
 
 
 def file_name(path: str) -> str:
@@ -86,20 +86,26 @@ def relocate(project, search_dir, progress=None, cancel=None) -> dict:
     taken = {Path(im.path).resolve() for im in project.images if Path(im.path).exists()}
     for name, ims in want.items():
         cands = [c for c in found.get(name, []) if c.resolve() not in taken]
+        by_source = {}
         for im in ims:
-            ok = [c for c in cands if _size_ok(im, c)]
+            by_source.setdefault(im.path, []).append(im)
+        for old, entries in by_source.items():
+            ok = [c for c in cands if all(_size_ok(im, c) for im in entries)]
             if len(ok) > 1:  # 同名同大小：优先上一级文件夹名也相同的
-                same = [c for c in ok if c.parent.name == parent_name(im.path)]
+                same = [c for c in ok if c.parent.name == parent_name(old)]
                 ok = same if len(same) == 1 else ok
             if len(ok) == 1:
-                old = im.path
-                im.path = str(ok[0]); cands.remove(ok[0]); taken.add(ok[0].resolve())
-                im.error = ""
-                fixed.append((old, im.path))
+                target = ok[0]
+                cands.remove(target)
+                taken.add(target.resolve())
+                for im in entries:
+                    im.path = str(target)
+                    im.error = ""
+                    fixed.append((old, im.path))
             elif ok:
-                amb.append((im.path, [str(c) for c in ok]))
+                amb.append((old, [str(c) for c in ok]))
             else:
-                still.append(im.path)
+                still.append(old)
     if fixed:
         project.save()
     return {"fixed": fixed, "missing": still, "ambiguous": amb}

@@ -1,7 +1,10 @@
 """导出 Excel：脑片和脑区的汇总表及分析参数。"""
 from __future__ import annotations
 
+from .atlas_choice import STAM, project_atlas, structure_id
+from .atlas_choice import has_registration
 import datetime as _dt
+import json
 from contextlib import closing
 from pathlib import Path
 
@@ -15,23 +18,76 @@ from .project import EXPORT_HEMISPHERES, Project, processed_section_names, secti
 from .. import APP_NAME
 
 
-def build_tables(project: Project, intensity: bool | None = None, *, for_excel=False) -> dict[str, pd.DataFrame]:
+_RESULT_TILE_COLUMN = "结果使用的核心图块（不含重叠）"
+
+
+def _tile_size_text(edge, percent, source_pixels):
+    if percent is None:
+        unit = "原图像素" if source_pixels else "识别层像素"
+        return f"{edge} × {edge} {unit}"
+    result = f"{edge} × {edge} 原图像素"
+    if percent != 100:
+        effective = max(1, round(edge / (100 / percent)))
+        result += f"（识别层 {effective} × {effective} 像素）"
+    return result
+
+
+def _recorded_tile_size(section_settings, channel_names):
+    """Read the saved inference settings; old results can lack this information."""
+    settings = section_settings.get("inference_settings") if isinstance(section_settings, dict) else None
+    if isinstance(settings, str):
+        try:
+            settings = json.loads(settings)
+        except ValueError:
+            settings = None
+    if not isinstance(settings, dict) or not isinstance(settings.get("tile"), int) or settings["tile"] <= 0:
+        return "历史结果未记录"
+    channels = settings.get("ch")
+    if not isinstance(channels, dict):
+        return "历史结果未记录"
+    groups = {}
+    for key, channel in channels.items():
+        if not str(key).isdigit() or not isinstance(channel, dict):
+            continue
+        index = int(key)
+        name = channel_names[index] if index < len(channel_names) else f"通道 {index + 1}"
+        percent = channel.get("resolution_percent", settings.get("resolution_percent"))
+        if percent is not None and not (isinstance(percent, (int, float)) and 0 < percent <= 100):
+            return "历史结果未记录"
+        size = _tile_size_text(settings["tile"], percent, settings.get("tile_in_source_pixels", False))
+        groups.setdefault(size, []).append(name)
+    return "；".join(f"{'、'.join(names)} {size}" for size, names in groups.items()) or "历史结果未记录"
+
+
+@project_atlas
+def build_tables(project: Project, intensity: bool | None = None, *, for_excel=False, all_regions=False) -> dict[str, pd.DataFrame]:
     """intensity：是否统计脑区 / 自定义区域的平均荧光强度（要按原始分辨率读原图，较慢）。
-    None = 按项目设置（“⑧ 导出 Excel”里的勾选框）；组间统计、行为相关、功能网络用不到，传 False。"""
+    None = 按项目设置（“⑧ 导出 Excel”里的勾选框）。组间统计等内部分析可用 all_regions 读取完整脑区表。"""
+    from . import region_sets as RS
+    custom = not all_regions and project.export_region_set == RS.CUSTOM
+    selected_ids = getattr(project, "export_region_ids", [])
+    if custom:
+        RS.custom_regions(selected_ids)
     if intensity is None:
         intensity = bool(getattr(project, "export_intensity", False))
     names = project.channel_names
     from .unmix import model_from_settings
-    from .cellpose4 import MODEL_KEY
+    from .segmentation import recorded_model_name
     um = model_from_settings(project.unmix, names) if intensity else None   # v0.8.3：强度也用去除串色后的图
     per_section, region_sec, roi_rows = [], [], []
+    roi_counts = []
     section_info = []
     from . import registration
     from .pipeline import drop_excluded
-    from .slide_io import open_slide
     for im in project.images:
         df = drop_excluded(project.load_cells(im), im)
         enabled = processed_section_names(im, df)
+        if for_excel and im.rois and df is not None:
+            from .roi_counts import count_rois, saved_coverage
+            channels = [(c, name) for c, name in enumerate(names) if c not in project.unused_channels]
+            counts = count_rois(df, im.rois, saved_coverage(im, df), channels)
+            counts.insert(0, "图片", im.key)
+            roi_counts.append(counts)
         states = section_result_states(im, df) if for_excel else {}
         carried = set(df.attrs.get("carried_forward_sections", [])) if df is not None else set()
         for sec in im.sections:
@@ -47,22 +103,21 @@ def build_tables(project: Project, intensity: bool | None = None, *, for_excel=F
                 row["筛选说明"] = "沿用上次结果" if sec.name in carried else ""
                 model_map = df.attrs.get("section_models", {}).get(sec.name, {}) if df is not None else {}
                 used = set(model_map.values())
-                model_names = {MODEL_KEY: "Cellpose 4（cpsam_v2）", "": "StarDist（通用模型）"}
-                row["结果使用的识别模型"] = "、".join(sorted(model_names.get(name, name) for name in used))
+                row["结果使用的识别模型"] = "、".join(sorted({recorded_model_name(name) for name in used}))
                 if not used and sec.name in enabled:
                     row["结果使用的识别模型"] = "历史结果（模型未记录）"
                 devices = df.attrs.get("section_devices", {}).get(sec.name, {}) if df is not None else {}
                 row["结果使用的推理设备"] = "、".join(sorted({device for values in devices.values() for device in values}))
+                settings = df.attrs.get("section_settings", {}).get(sec.name) if sec.name in enabled else None
+                row[_RESULT_TILE_COLUMN] = _recorded_tile_size(settings, names) if sec.name in enabled else ""
             section_info.append(row)
         if not enabled:
             continue
         df = df[df["section"].isin(enabled)]
         if len(df) and "combo" not in df.columns:
-            with closing(open_slide(im.path)) as slide:
+            with closing(im.open_slide()) as slide:
                 df = colocalize(df, slide.pixel_size_um, project.coloc, nucleus_channel(names))
         cells = merged_cells(df, len(names))
-        from .grading import add_grades
-        cells = add_grades(cells, names, project.grading)
         cells.insert(0, "图片", im.key)
         s = summarize(cells, names, group_cols=("图片", "section"), require_nucleus=project.coloc.require_nucleus)
         from .coloc import add_nucleus_ratios
@@ -86,10 +141,10 @@ def build_tables(project: Project, intensity: bool | None = None, *, for_excel=F
                 s[f"{nm} 人工删除"] = rem
                 s[f"{nm} 人工改动比例 %"] = (100 * (add + rem) / n_auto.replace(0, np.nan)).round(2)
         per_section.append(s)
-        reg_secs = [s_ for s_ in im.sections if s_.name in enabled and s_.registration.get("plane")]
+        reg_secs = [s_ for s_ in im.sections if s_.name in enabled and has_registration(s_.registration)]
         if not reg_secs and not im.rois:
             continue
-        with closing(open_slide(im.path)) as slide:
+        with closing(im.open_slide()) as slide:
             px = slide.pixel_size_um
             if reg_secs:
                 from .regions import assign_regions, region_summary
@@ -97,19 +152,26 @@ def build_tables(project: Project, intensity: bool | None = None, *, for_excel=F
                                               intensity=intensity, unmix_model=um)
                 areas["图片"] = im.key
                 rcells = cells[cells["section"].isin({s_.name for s_ in reg_secs})]
-                region_sec.append(region_summary(rcells, areas, names, ("图片", "section"), project.coloc.require_nucleus))
+                region_sec.append(region_summary(rcells, areas, names, ("图片", "section"), project.coloc.require_nucleus,
+                                                 include_allen_id=custom))
             if im.rois:
                 from .pipeline import inside_any
                 for r in im.rois:
+                    boxes = getattr(project, "scope_boxes", {}).get(im.key)
+                    area = _roi_area_mm2(r["polygon"], im.exclusions, px, boxes=boxes)
                     inn = inside_any(cells["x"].to_numpy(float), cells["y"].to_numpy(float), [r["polygon"]])
+                    if boxes is not None:
+                        inn &= _in_boxes(cells["x"].to_numpy(float), cells["y"].to_numpy(float), boxes)
+                        if not area and not inn.any():
+                            continue
                     sub = cells[inn].copy()
                     sub["区域"] = r["name"]
                     t = summarize(sub, names, group_cols=("图片", "区域"), require_nucleus=project.coloc.require_nucleus) \
                         if len(sub) else pd.DataFrame({"图片": [im.key], "区域": [r["name"]]})
-                    area = _roi_area_mm2(r["polygon"], im.exclusions, px)
                     t["面积 (mm²)"] = round(area, 4)
                     if intensity:
-                        for nm, v in zip(names, roi_mean_intensity(slide, r["polygon"], im.exclusions, unmix_model=um)):
+                        for nm, v in zip(names, roi_mean_intensity(slide, r["polygon"], im.exclusions, unmix_model=um,
+                                                                   boxes=boxes)):
                             t[f"{nm} 平均荧光强度"] = round(v, 1) if v == v else None
                     for nm in names:
                         if f"{nm}+" in t.columns and area > 0:
@@ -117,18 +179,31 @@ def build_tables(project: Project, intensity: bool | None = None, *, for_excel=F
                     from .coloc import add_nucleus_ratios
                     roi_rows.append(add_nucleus_ratios(t, names))
     out = {}
+    if roi_counts:
+        out["ROI细胞计数"] = pd.concat(roi_counts, ignore_index=True)
     if per_section:
         # 只保留三张表：按脑片汇总、按脑区×脑片、分析参数（分析参数在 export_excel 里加）
         t = pd.concat(per_section, ignore_index=True).rename(columns={"section": "脑片"})
-        t = pd.DataFrame(section_info).merge(t, on=["图片", "脑片"], how="left")
+        sections = pd.DataFrame(section_info)
+        t = sections.merge(t, on=["图片", "脑片"], how="left")
         if t["动物"].astype(bool).any():
             t = t.sort_values(["组别", "动物", "约 Bregma (mm)"], ascending=[True, True, False], na_position="last")
         out["按脑片汇总"] = t.reset_index(drop=True)
         if region_sec:
             t = pd.concat(region_sec, ignore_index=True).rename(columns={"section": "脑片"})
-            from .region_sets import filter_table
-            t = filter_table(t, project.export_region_set, project.export_max_depth, project.export_skip_layers)
+            if not all_regions:
+                t = RS.filter_table(t, project.export_region_set, project.export_max_depth, project.export_skip_layers,
+                                    region_ids=selected_ids)
             out["按脑区×脑片"] = t
+        elif custom and for_excel:
+            out["按脑区×脑片"] = pd.DataFrame(columns=["图片", "脑片", structure_id(), "脑区缩写", "脑区名称", "层级",
+                                                   "半脑", "面积 (mm²)", *(f"{name}+" for name in names)])
+        if for_excel and "按脑区×脑片" in out:
+            keys = ["图片", "脑片"]
+            regions = out["按脑区×脑片"].set_index(keys)
+            samples = sections[keys + ["组别", "动物"]].drop_duplicates().set_index(keys)
+            labels = samples.reindex(regions.index)
+            out["按脑区×脑片"] = pd.concat([labels, regions], axis=1).reset_index()
         if roi_rows:  # 只有画了自定义区域时才有这张表
             out["按自定义区域"] = pd.concat(roi_rows, ignore_index=True)
     return _drop_unused(out, project)
@@ -145,7 +220,14 @@ def _drop_unused(tables: dict, project: Project) -> dict:
     return {k: v.loc[:, [c for c in v.columns if not unused(c)]] for k, v in tables.items()}
 
 
-def roi_mean_intensity(slide, polygon, exclusions, target_um: float = 0.0, unmix_model=None) -> list[float]:
+def _in_boxes(x, y, boxes):
+    inside = np.zeros(np.broadcast_shapes(x.shape, y.shape), dtype=bool)
+    for left, top, width, height in boxes:
+        inside |= (x >= left) & (x < left + width) & (y >= top) & (y < top + height)
+    return inside
+
+
+def roi_mean_intensity(slide, polygon, exclusions, target_um: float = 0.0, unmix_model=None, *, boxes=None) -> list[float]:
     """自定义区域内（去掉排除区域）每个通道的平均荧光强度，原始灰度值。
     开启了串色校正时（unmix_model），先逐像素去除串色再求平均（v0.8.3）。"""
     from .regions import _usable_unmix
@@ -159,6 +241,15 @@ def roi_mean_intensity(slide, polygon, exclusions, target_um: float = 0.0, unmix
     ds = slide.downsample(lv)
     x0, y0 = a[:, 0].min(), a[:, 1].min()
     bb = (int(x0), int(y0), int(np.ceil(a[:, 0].max() - x0)) + 1, int(np.ceil(a[:, 1].max() - y0)) + 1)
+    if boxes is not None:
+        cuts = [(max(bb[0], x), max(bb[1], y), min(bb[0]+bb[2], x+w), min(bb[1]+bb[3], y+h))
+                for x, y, w, h in boxes]
+        cuts = [c for c in cuts if c[0] < c[2] and c[1] < c[3]]
+        if not cuts:
+            return [float("nan")] * n_ch
+        x0 = min(c[0] for c in cuts)
+        y0 = min(c[1] for c in cuts)
+        bb = (x0, y0, max(c[2] for c in cuts) - x0, max(c[3] for c in cuts) - y0)
     sums, n = np.zeros(n_ch), 0
     ox, oy = int(bb[0] / ds) * ds, int(bb[1] / ds) * ds
     full = None
@@ -171,6 +262,8 @@ def roi_mean_intensity(slide, polygon, exclusions, target_um: float = 0.0, unmix
             H, W = img.shape
             m = np.zeros((H, W), bool)
             rr, cc = skpoly((a[:, 1] - oy) / ds, (a[:, 0] - ox) / ds, (H, W)); m[rr, cc] = True
+            if boxes is not None:
+                m &= _in_boxes(ox + np.arange(W)[None, :] * ds, oy + np.arange(H)[:, None] * ds, boxes)
             for e in exclusions or []:
                 e = np.asarray(e, float)
                 if len(e) >= 3:
@@ -181,7 +274,7 @@ def roi_mean_intensity(slide, polygon, exclusions, target_um: float = 0.0, unmix
     return [s / n if n else float("nan") for s in sums]
 
 
-def _roi_area_mm2(polygon, exclusions, px_um) -> float:
+def _roi_area_mm2(polygon, exclusions, px_um, *, boxes=None) -> float:
     """自定义区域面积（减去与排除区域重叠的部分），在 10 µm 网格上估算。"""
     import numpy as np
     from .pipeline import inside_any
@@ -192,6 +285,8 @@ def _roi_area_mm2(polygon, exclusions, px_um) -> float:
     gx, gy = np.meshgrid(xs, ys)
     gx, gy = gx.ravel(), gy.ravel()
     inn = inside_any(gx, gy, [polygon])
+    if boxes is not None:
+        inn &= _in_boxes(gx, gy, boxes)
     if exclusions:
         inn &= ~inside_any(gx, gy, exclusions)
     return float(inn.sum()) * (10.0 / 1000.0) ** 2
@@ -204,16 +299,18 @@ def _version() -> str:
 
 def _net_text(project: Project) -> str:
     """列出此会话的推理状态，项目可以包含由其他设备生成的旧结果。"""
-    from . import cellpose4
+    from .segmentation import NAMES
     if any(p.detect and c not in project.unused_channels for c, p in project.detection.channels.items()):
-        return f"Cellpose 4（当前识别设置，本次会话设备：{cellpose4.backend_text()}）"
+        return "、".join(sorted({NAMES[p.model] for c,p in project.detection.channels.items() if p.detect and c not in project.unused_channels}))
     return "未启用识别通道"
 
 
+@project_atlas
 def _registration_rows(project: Project) -> list:
     """每张脑片的配准方法汇总（论文方法部分用）。"""
     from .registration import Registration
-    n = {"lin": 0, "tex": 0, "cont": 0, "old": 0}
+    from collections import Counter
+    methods = Counter()
     fixes, fixed_secs, total = 0, 0, 0
     ap_n, ap_um, unified = 0, [], 0
     for im in project.images:
@@ -222,14 +319,10 @@ def _registration_rows(project: Project) -> list:
             if not r.done:
                 continue
             total += 1
-            if not r.nonlinear:
-                n["lin"] += 1
-            elif r.nl_method == "轮廓 + DAPI 纹理":
-                n["tex"] += 1
-            elif r.nl_method == "只用轮廓":
-                n["cont"] += 1
-            else:
-                n["old"] += 1
+            method = r.method + " 定位"
+            if r.nonlinear:
+                method += " + 非线性贴合" + (f"（{r.nl_method}）" if r.nl_method else "")
+            methods[method] += 1
             if r.control_points:
                 fixes += len(r.control_points); fixed_secs += 1
             if r.ap_auto:
@@ -238,11 +331,9 @@ def _registration_rows(project: Project) -> list:
                 unified += 1
     if not total:
         return []
-    parts = [f"{k} {v} 张" for k, v in (("DeepSlice 定位 + 非线性贴合（轮廓 + DAPI 纹理）", n["tex"]),
-                                       ("DeepSlice 定位 + 非线性贴合（只用轮廓）", n["cont"]),
-                                       ("DeepSlice 定位 + 非线性贴合（只用轮廓，v0.7 之前配准）", n["old"]),
-                                       ("DeepSlice 定位，未做非线性贴合", n["lin"])) if v]
-    return [("图谱", "Allen 小鼠脑图谱 CCFv3（25 µm）"),
+    parts = [f"{name} {count} 张" for name, count in sorted(methods.items())]
+    atlas = "STAM（官方单侧分区，40 µm）" if project.registration_atlas == STAM else "Allen 小鼠脑图谱 CCFv3（25 µm）"
+    return [("图谱", atlas),
             (f"配准方法（共 {total} 张脑片）", "；".join(parts)),
             ("前后位置自动校正（图谱模板与 DAPI 互信息最大）",
              f"{ap_n} 张脑片校正过，挪动 {min(ap_um):.0f}–{max(ap_um):.0f} µm" if ap_n else "无"),
@@ -250,12 +341,13 @@ def _registration_rows(project: Project) -> list:
             ("手动修正", f"{fixed_secs} 张脑片，共 {fixes} 个修正点" if fixes else "无")]
 
 
-def params_table(project: Project) -> pd.DataFrame:
+@project_atlas
+def params_table(project: Project, section_summary=None) -> pd.DataFrame:
+    from .detection import channel_percent
     rows = [("导出时间", _dt.datetime.now().strftime("%Y-%m-%d %H:%M")),
             ("软件版本", f"{APP_NAME} v{_version()}"),
             ("细胞识别神经网络", _net_text(project)),
             *_registration_rows(project),
-            ("识别分辨率 (µm/像素)", project.detection.pixel_um),
             ("共标距离阈值 (µm)", project.coloc.max_dist_um),
             ("共标：中心落入轮廓也算", "是" if project.coloc.use_contour else "否"),
             ("轮廓内 DAPI 信号足够强也算有核", "是" if project.coloc.nucleus_by_intensity else "否"),
@@ -278,29 +370,39 @@ def params_table(project: Project) -> pd.DataFrame:
         on = m is not None and not np.allclose(m.matrix, np.eye(len(m.matrix)))
         rows.append(("脑区平均荧光强度", "按去除串色后的图测量（与细胞识别一致）" if on else "按原图测量"))
     from . import region_sets as RS
-    rows.append(("导出的脑区范围", RS.describe(project.export_region_set, project.export_max_depth, project.export_skip_layers)))
+    region_ids = getattr(project, "export_region_ids", [])
+    rows.append(("导出的脑区范围", RS.describe(project.export_region_set, project.export_max_depth,
+                                              project.export_skip_layers, region_ids=region_ids)))
+    rows.extend(RS.selection_details(project.export_region_set, region_ids))
     rows.append(("脑区表半脑导出方式", project.export_hemisphere))
     rows.append(("脑区类别说明", RS.CATEGORY_HELP))
     tc = project.tissue_channels()
     rows.append(("拆分脑片用的通道", "全部通道" if tc is None else "、".join(project.channel_names[c] for c in tc)))
     if project.unused_channels:
         rows.append(("不使用的通道", "、".join(f"第 {c + 1} 通道" for c in sorted(project.unused_channels))))
-    for nm, cuts in (project.grading or {}).items():
-        rows.append((f"{nm} 强度分级（倍背景）", f"弱 < {cuts[0]} ≤ 中 < {cuts[1]} ≤ 强"))
     for c, nm in enumerate(project.channel_names):
         p = project.detection.channels.get(c)
         if p is None or c in project.unused_channels:
             continue
+        percent = channel_percent(project.detection, c)
         rows += [(f"{nm} 是否识别", "是" if p.detect else "否"),
-                 (f"{nm} 识别模型", "Cellpose 4（cpsam_v2）"),
+                 (f"{nm} 识别分辨率（原图宽高）", f"{percent}%" if percent else f"旧项目 {project.detection.pixel_um} µm/像素"),
+                 (f"{nm} 当前核心图块（不含重叠）",
+                  _tile_size_text(project.detection.tile, percent, project.detection.tile_in_source_pixels)),
+                 (f"{nm} 识别模型", p.model),
                  (f"{nm} Cellpose 掩膜阈值", p.cellprob_threshold),
-                 (f"{nm} 面积范围 (µm²)", f"{p.min_area_um2} – {p.max_area_um2}"),
+                 (f"{nm} 最小面积 (µm²)", p.min_area_um2),
                  (f"{nm} 最低平均强度", p.min_intensity),
                  (f"{nm} 识别前伽马增强", p.gamma),
                  (f"{nm} 自动阳性阈值（倍背景）", p.bg_fold if p.bg_fold else "不使用"),
                  (f"{nm} 局部对比度下限（倍周围）", p.min_contrast if p.min_contrast else "不使用"),
                  (f"{nm} 识别前减背景半径 (µm)", p.bg_radius_um if p.bg_radius_um else "不减背景"),
                  (f"{nm} 识别前去卷积", f"是（模糊 {p.deconv_blur_um} µm，{p.deconv_iter} 次）" if p.deconv else "否")]
+    if section_summary is not None:
+        recorded = section_summary[["图片", "脑片", _RESULT_TILE_COLUMN]]
+        for image, section, size in recorded.itertuples(index=False, name=None):
+            if size:
+                rows.append((f"{image} · {section} 结果使用的核心图块（不含重叠）", size))
     from . import quality as Q
     rows.append(("质量检查标准（注意 / 可疑）",
                  f"配准重合度 < {Q.DICE_WARN} / {Q.DICE_BAD}；模糊面积 ≥ {Q.BLUR_WARN:g}% / {Q.BLUR_BAD:g}%；"
@@ -317,6 +419,12 @@ def params_table(project: Project) -> pd.DataFrame:
     except Exception:  # noqa: BLE001
         pass
     rows += [("图片", im.path) for im in project.images]
+    for im in project.images:
+        if im.scene_id is not None:
+            label = "CZI 场景" if Path(im.path).suffix.lower() == ".czi" else "VSI 扫描区"
+            rows.append((f"{label}（{im.key}）", im.scene_description))
+            if im.czi_time_index is not None:
+                rows.append((f"CZI 时间点（{im.key}）", f"第 1 个（原始 T={im.czi_time_index}，共 {im.czi_time_count} 个）"))
     return pd.DataFrame(rows, columns=["参数", "值"])
 
 
@@ -334,6 +442,14 @@ def add_quality(table: pd.DataFrame, q: pd.DataFrame) -> pd.DataFrame:
     return t[cols[:k] + front + cols[k:] + metrics]
 
 
+def companion_dir(project: Project, path: str | Path, prefix: str) -> Path:
+    path = Path(path)
+    tag = getattr(project, "scope_tag", "")
+    suffix = f"_范围_{tag}" if tag else ""
+    return path.parent / f"{prefix}_{path.stem}{suffix}"
+
+
+@project_atlas
 def export_excel(project: Project, path: str | Path, masks: bool = True, progress=None, qc: bool = True,
                  quality: bool = True) -> Path:
     path = Path(path)
@@ -377,17 +493,23 @@ def export_excel(project: Project, path: str | Path, masks: bool = True, progres
         tables["准确率汇总"] = summary(project)
         fields = pd.DataFrame(project.accuracy)
         tables["准确率视野"] = fields.drop(columns=["人工点", "漏检线索"], errors="ignore")
-    tables["分析参数"] = params_table(project)
+    tables["分析参数"] = params_table(project, tables["按脑片汇总"])
+    from .region_sets import CUSTOM
+    if project.export_region_set == CUSTOM and tables["按脑区×脑片"].empty:
+        tables["分析参数"].loc[len(tables["分析参数"])] = [
+            "自选脑区导出结果", "当前已分析并配准的脑片在所选半脑中没有覆盖所选脑区，脑区表为空。"]
     try:
         _write_xlsx(tables, path)
     except PermissionError:
         raise PermissionError(13, "Excel 文件正在被打开，无法覆盖。请在 Excel 中关闭它，或换一个文件名", str(path))
+    from .workflow_status import record_table_output
+    record_table_output(project, "excel", tables["按脑片汇总"])
     if masks:
         from .masks import export_masks
-        export_masks(project, path.parent / f"细胞mask_{path.stem}", progress=progress)
+        export_masks(project, companion_dir(project, path, "细胞mask"), progress=progress)
     if qc:
         from .qc import export_qc
-        export_qc(project, path.parent / f"质控图_{path.stem}", progress=progress)
+        export_qc(project, companion_dir(project, path, "质控图"), progress=progress)
     return path
 
 
@@ -396,7 +518,13 @@ def _write_xlsx(tables, path):
         for name, df in tables.items():
             df.to_excel(xw, sheet_name=name, index=False)
             ws = xw.sheets[name]
+            if name == "按脑区×脑片":
+                ws.auto_filter.ref = ws.dimensions
             for j, col in enumerate(df.columns, 1):
+                if col in ("组别", "动物", "ROI", "图片"):
+                    for i, label in enumerate(df[col], 2):
+                        if isinstance(label, str) and label.startswith(("=", "#")):
+                            ws.cell(i, j).data_type = "s"
                 if col == "面积 (mm²)":
                     for cell in ws.iter_cols(min_col=j, max_col=j, min_row=2, max_row=ws.max_row):
                         for value in cell:

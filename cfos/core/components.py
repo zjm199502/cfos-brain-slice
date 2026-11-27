@@ -1,4 +1,4 @@
-"""Optional TensorFlow runtime for DeepSlice and Keras-to-ONNX conversion.
+"""Optional TensorFlow runtime for legacy Keras-to-ONNX conversion.
 
 The component archive and installation directory retain their historical names.
 """
@@ -79,11 +79,10 @@ def tensorflow_available() -> bool:
     return activate() and ok()
 
 
-def require_tensorflow(purpose: str = "脑图谱自动定位（DeepSlice）"):
+def require_tensorflow(purpose: str = "旧版 Keras 模型转换"):
     if not tensorflow_available():
         raise ComponentMissing(
-            f"{purpose}需要 TensorFlow 兼容组件。使用随软件提供的 DeepSlice ONNX 模型时，"
-            "请确认模型文件已安装，并清除 CFOS_NET=tf 后重新启动。")
+            f"{purpose}需要 TensorFlow 兼容组件。")
 
 
 # ------------------------------------------------------------------ 下载
@@ -92,7 +91,15 @@ def manifest_urls() -> list[str]:
     env = os.environ.get("CFOS_COMPONENTS_URL")
     if env:
         return [env.rstrip("/") + "/" + MANIFEST]
-    return [u.rsplit("/", 1)[0] + "/" + MANIFEST for u in updater.manifest_urls()]
+    urls = []
+    for url in updater.manifest_urls():
+        folder = url.rsplit("/", 1)[0]
+        for path in (updater.CHANNEL, updater.SERIES_CHANNEL):
+            if folder.endswith("/" + path):
+                folder = folder[:-len(path)] + "updates"
+                break
+        urls.append(f"{folder}/{MANIFEST}")
+    return urls
 
 
 def fetch_manifest() -> tuple[dict, str]:

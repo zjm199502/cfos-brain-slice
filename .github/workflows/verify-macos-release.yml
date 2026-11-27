@@ -23,6 +23,7 @@ jobs:
     outputs:
       version: ${{ steps.fetch.outputs.version }}
       sha256: ${{ steps.fetch.outputs.sha256 }}
+      format: ${{ steps.fetch.outputs.format }}
     steps:
       - name: Fetch the official release asset
         id: fetch
@@ -38,21 +39,28 @@ jobs:
           gh api "repos/$repo/releases/$RELEASE_ID" > "$RUNNER_TEMP/release.json" || fail "Cannot read release $RELEASE_ID. Check the ID and access to the draft."
           tag=$(jq -er .tag_name "$RUNNER_TEMP/release.json")
           [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail 'Release tag must use vX.Y.Z.'
-          name="FosFolio-${tag#v}-macOS-arm64.zip"
+          if [[ "$tag" == v0.* ]]; then
+            name="FosFolio-${tag#v}-macOS-arm64.zip"
+            format=zip
+          else
+            name="FosFolio-${tag#v}-macOS-arm64-Offline-Compact.tar.xz"
+            format=tar.xz
+          fi
+          echo "format=$format" >> "$GITHUB_OUTPUT"
           metadata=$(jq -ec --arg name "$name" '.assets[] | select(.name == $name and .state == "uploaded")' "$RUNNER_TEMP/release.json") || fail "Uploaded asset $name is missing from release $RELEASE_ID."
           asset_id=$(jq -er .id <<< "$metadata")
           digest=$(jq -er '.digest | select(type == "string") | ltrimstr("sha256:")' <<< "$metadata") || fail "No SHA-256 digest found for asset $asset_id."
           [[ "$digest" =~ ^[0-9a-f]{64}$ ]] || fail "Invalid SHA-256 digest for asset $asset_id."
           cd "$RUNNER_TEMP"
           echo "Downloading $name, asset $asset_id"
-          gh api -H 'Accept: application/octet-stream' "repos/$repo/releases/assets/$asset_id" > bundle.zip || fail "Failed to download asset $asset_id."
-          printf '%s  bundle.zip\n' "$digest" | sha256sum -c -
+          gh api -H 'Accept: application/octet-stream' "repos/$repo/releases/assets/$asset_id" > bundle.archive || fail "Failed to download asset $asset_id."
+          printf '%s  bundle.archive\n' "$digest" | sha256sum -c -
           printf 'version=%s\nsha256=%s\n' "${tag#v}" "$digest" >> "$GITHUB_OUTPUT"
-      - name: Transfer the verified ZIP
+      - name: Transfer the verified archive
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: macos-release-zip
-          path: ${{ runner.temp }}/bundle.zip
+          name: macos-release-archive
+          path: ${{ runner.temp }}/bundle.archive
           compression-level: 0
           retention-days: 1
           if-no-files-found: error
@@ -71,21 +79,29 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           persist-credentials: false
-          sparse-checkout: packaging/mac
+          sparse-checkout: |
+            packaging/mac
+            tests
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          name: macos-release-zip
+          name: macos-release-archive
           path: ${{ runner.temp }}
       - name: Check digest and unpack on macOS
         env:
           digest: ${{ needs.fetch.outputs.sha256 }}
+          format: ${{ needs.fetch.outputs.format }}
         run: |
           set -euo pipefail
           cd "$RUNNER_TEMP"
-          printf '%s  bundle.zip\n' "$digest" | shasum -a 256 --check
-          ditto -x -k bundle.zip "$RUNNER_TEMP/fosfolio"
+          printf '%s  bundle.archive\n' "$digest" | shasum -a 256 --check
+          mkdir -p "$RUNNER_TEMP/fosfolio"
+          if [[ "$format" == tar.xz ]]; then
+            /usr/bin/tar -xf bundle.archive -C "$RUNNER_TEMP/fosfolio"
+          else
+            ditto -x -k bundle.archive "$RUNNER_TEMP/fosfolio"
+          fi
           printf 'BUNDLE=%s\n' "$RUNNER_TEMP/fosfolio/FosFolio脑片图册.app" >> "$GITHUB_ENV"
-      - name: Validate native launcher, GUI, demo and DeepSlice inference
+      - name: Validate native launcher, GUI, demo and atlas registration
         run: |
           set -euo pipefail
           test "$(uname -m)" = arm64
@@ -94,8 +110,25 @@ jobs:
           test "$(plutil -extract CFBundleShortVersionString raw -o - "$BUNDLE/Contents/Info.plist")" = "$EXPECTED_VERSION"
           "$BUNDLE/Contents/MacOS/cfos" --version | tee "$RUNNER_TEMP/launcher.txt"
           grep -F "$EXPECTED_VERSION" "$RUNNER_TEMP/launcher.txt"
+          "$py" -c 'from qtpy.QtCore import QSettings; s=QSettings("cfos","cfos脑片分析"); s.setValue("cellposeOfflineSetupOffered", True); s.sync()'
           "$py" packaging/mac/verify_bundle.py "$BUNDLE" app
-      - name: Install Cellpose, run CPU inference and test MPS when available
+      - name: Test the fixes with the packaged application
+        if: needs.fetch.outputs.format == 'tar.xz'
         run: |
           set -euo pipefail
-          "$BUNDLE/Contents/Resources/python/bin/python3" packaging/mac/verify_bundle.py "$BUNDLE" cellpose
+          cd "$RUNNER_TEMP"
+          app="$BUNDLE/Contents/Resources/app"
+          export PYTHONPATH="$app"
+          py="$BUNDLE/Contents/Resources/python/bin/python3"
+          test -x "$app/cfos/core/giraff_runtime/bin/reg_aladin"
+          for test in test_coloc_cache_coordinates.py test_cell_ring_navigation.py test_rotated_pan.py; do
+            "$py" -m unittest discover -s "$GITHUB_WORKSPACE/tests" -p "$test" -v
+          done
+      - name: Install Cellpose, run CPU inference and test MPS when available
+        env:
+          format: ${{ needs.fetch.outputs.format }}
+        run: |
+          set -euo pipefail
+          phase=cellpose
+          if [[ "$format" == tar.xz ]]; then phase=cellpose-offline; fi
+          "$BUNDLE/Contents/Resources/python/bin/python3" packaging/mac/verify_bundle.py "$BUNDLE" "$phase"

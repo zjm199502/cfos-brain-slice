@@ -11,15 +11,22 @@ def section_key(section):
     return f"{section.name}@{','.join(map(str, section.bbox0))}"
 
 
-def effective_settings(settings, image, section):
-    overrides = image.review_settings.get(section_key(section), {})
+def effective_settings(settings, image, section, project=None):
+    if project is not None:
+        windows = {}
+        for channel, params in settings.channels.items():
+            window = project.model_window(channel, image, section)
+            if params.detect and window is not None:
+                windows[channel] = window
+        settings = replace(settings, display_windows=windows)
+    overrides = image.review_settings.get(section_key(section), {}) if section is not None else {}
     if not overrides:
         return settings
     channels = dict(settings.channels)
     for c, p in channels.items():
         values = overrides.get(str(c))
         if values:
-            channels[c] = replace(p, min_contrast=values["min_contrast"], deconv=values["deconv"])
+            channels[c] = replace(p, min_contrast=values["min_contrast"], deconv=values.get("deconv", p.deconv))
     return replace(settings, channels=channels)
 
 

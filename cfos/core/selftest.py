@@ -17,7 +17,7 @@ import numpy as np
 # 软件运行需要的组件（导入名, 显示名）
 MODULES = [("numpy", "numpy"), ("scipy", "scipy"), ("pandas", "pandas"), ("skimage", "scikit-image"),
            ("tifffile", "tifffile"), ("PIL", "Pillow"), ("openpyxl", "openpyxl（Excel）"),
-           ("matplotlib", "matplotlib"), ("onnxruntime", "ONNX Runtime（图谱配准）"),
+           ("matplotlib", "matplotlib"), ("onnxruntime", "ONNX Runtime"),
            ("itk", "ITK / elastix"),
            ("zarr", "zarr"), ("networkx", "networkx（功能网络）"),
            ("psutil", "psutil"), ("napari", "napari（看图界面）"), ("qtpy", "Qt 界面")]
@@ -65,19 +65,13 @@ def run(report=None) -> tuple[bool, str, list]:
 
     def resources():
         r = resources_dir()
-        from . import deepslice_onnx as DO
-        need = ["atlas/allen_ccfv3_25um.npz", "atlas/structures.csv", "demo/示例脑片.ome.tif"]
-        miss = [p for p in need if not (r / p).exists()]
-        # DeepSlice：v0.8.1 起用 ONNX 文件；没有时（旧安装）用原来的权重文件 + TensorFlow
-        if not DO.available(r / "deepslice"):
-            if not (r / "deepslice/Allen_Mixed_Best.h5").exists():
-                miss.append(f"deepslice/{DO.PRIMARY}")
-            elif not (r / "deepslice/xception_top.npz").exists() and \
-                    not (r / "deepslice/xception_weights_tf_dim_ordering_tf_kernels.h5").exists():
-                miss.append("deepslice/xception_top.npz")
-        if miss:
-            raise RuntimeError("缺少资源文件：" + "、".join(miss))
-        return "已找到图谱、DeepSlice 和示例图片"
+        from .resources import allen_atlas_dir
+        from .stam import DATA
+        from .giraff import NIFTYREG
+        for path in (allen_atlas_dir()/"allen_ccfv3_25um.npz", allen_atlas_dir()/"structures.csv", DATA/"structures.csv", DATA/"stam.npz", NIFTYREG, r/"demo"/"示例脑片.ome.tif"):
+            if not path.is_file():
+                raise FileNotFoundError(str(path))
+        return "已找到 Allen CCFv3、STAM、NiftyReg 和示例图片"
 
     def read():
         from .slide_io import open_slide
@@ -114,16 +108,16 @@ def run(report=None) -> tuple[bool, str, list]:
         from .coloc import nucleus_channel
         sl, s = ctx["slide"], ctx["section"]
         nuc = nucleus_channel([c.name for c in sl.channels])
+        from . import autoreg
+        from .atlas_choice import CCF
         with tempfile.TemporaryDirectory() as td:
-            reg = R.auto_register(sl, [s], nuc, td)[s.name]
-        img, mask, ds = R.section_thumbnail(sl, s, nuc)
-        w = R.nonlinear_fit(reg, R.orient(mask, reg.orientation), R.orient(img, reg.orientation))
-        H, W = mask.shape
-        lab = R.sample_plane(R.adjusted_plane(reg), W, H, warp=w)["annotation"]
-        d = R.dice(lab > 0, R.orient(mask, reg.orientation))
-        if d < 0.8:
-            raise RuntimeError(f"配准结果异常（轮廓重合度 {d:.2f}）")
-        return f"DeepSlice + 非线性贴合（{reg.nl_method}），轮廓重合度 {d:.2f}"
+            reg = autoreg.fit_section(sl, s, nuc, td, True, CCF)
+            warp = np.load(R.warp_path(td, "demo", s.name, reg)) if reg.nonlinear else None
+            h, w = reg.shape_hw
+            labels, _ = R.label_maps(reg, w, h, warp)
+        if not reg.done or not labels.any():
+            raise RuntimeError("giRAff 配准结果没有有效脑区。")
+        return f"{reg.status}，Bregma {R.adjusted_plane(reg).ap_mm():+.2f} mm"
 
     def export():
         import pandas as pd

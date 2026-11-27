@@ -8,11 +8,12 @@
 """
 from __future__ import annotations
 
+from .atlas_choice import CCF, STAM, current, structure_id
 from functools import lru_cache
 
 import pandas as pd
 
-from .resources import resources_dir
+from .resources import allen_atlas_dir
 
 # ---------------------------------------------------------------- 清单
 MAJOR = {   # 缩写 → 中文名
@@ -93,6 +94,7 @@ ZH = {
 
 # ---------------------------------------------------------------- 选法
 ALL, MAJOR_ONLY, SUMMARY_ONLY, MAJOR_SUMMARY, DEPTH = "all", "major", "summary", "major+summary", "depth"
+CUSTOM = "custom"
 MODES = [   # (代号, 下拉框里的名字, 一句话说明)
     (ALL, "全部脑区（从大区到最细亚区都列出）",
      "不筛选。同一个细胞会同时出现在它所在的亚区、脑区和大脑区里（例如一个 CA1 的细胞也计入“海马结构”），"
@@ -108,11 +110,13 @@ MODES = [   # (代号, 下拉框里的名字, 一句话说明)
     (MAJOR_SUMMARY, "大脑区 + 常用脑区（上面两项合在一起）",
      "既有 12 个大脑区的合计，也有约 300 个常用脑区。大脑区的数字已经包含它下面的常用脑区，不要把两类相加。"),
     (DEPTH, "按图谱层级（高级）",
-     "按 Allen 图谱树的第几级截取。注意同一级在不同部位粗细不同（第 5 级既有“新皮层”，也有“基底外侧杏仁核”），"
+     "按所选图谱树的第几级截取。注意同一级在不同部位粗细不同（第 5 级既有“新皮层”，也有“基底外侧杏仁核”），"
      "熟悉图谱的人才建议用。"),
 ]
 MODE_LABEL = {m: lb for m, lb, _ in MODES}
 MODE_HELP = {m: h for m, _, h in MODES}
+MODE_LABEL[CUSTOM] = "自选脑区"
+MODE_HELP[CUSTOM] = "只列出勾选的脑区。父区的统计已包含下属区域，同时勾选父区和子区时，两行不能相加。"
 
 CATEGORY_HELP = ("脑区类别：大脑区 = 12 个大区之一；常用脑区 = 标准清单里的脑区（互不重叠）；"
                  "细分亚区 / 皮层分层 = 常用脑区再往下分；上级汇总 = 若干脑区的合计（如“运动皮层 MO”=MOp+MOs）。")
@@ -125,9 +129,11 @@ def resolve_mode(mode: str, depth: int) -> str:
     return DEPTH if depth and depth > 0 else ALL
 
 
-def describe(mode: str, depth: int = 0, skip_layers: bool = False) -> str:
+def describe(mode: str, depth: int = 0, skip_layers: bool = False, *, region_ids=()) -> str:
     """写进“分析参数”表的一句话。"""
     mode = resolve_mode(mode, depth)
+    if mode == CUSTOM:
+        return f"自选脑区（{len(set(region_ids))} 个）。{MODE_HELP[CUSTOM]}"
     if mode == DEPTH:
         s = f"按图谱层级：≤ 第 {depth} 级" if depth else "全部脑区"
     else:
@@ -142,10 +148,16 @@ def is_layer(name) -> bool:
     return bool(re.search(r"[Ll]ayer", str(name)))
 
 
-@lru_cache(maxsize=1)
 def info() -> pd.DataFrame:
-    """每个脑区一行（按图谱顺序）：acronym, name, zh, depth, parent_acronym, major, 所属大脑区, 脑区类别。"""
-    st = pd.read_csv(resources_dir() / "atlas" / "structures.csv")   # 只读表格，不加载图谱体数据
+    return _info(current())
+
+
+@lru_cache(maxsize=2)
+def _info(atlas):
+    """每个脑区一行，含 Allen ID、缩写、名称及层级，按图谱顺序排列。"""
+    from .stam import DATA
+    folder = DATA if atlas == STAM else allen_atlas_dir()
+    st = pd.read_csv(folder / "structures.csv", keep_default_na=False)   # 只读表格，不加载图谱体数据
     id2acr = {int(i): a for i, a in zip(st["id"], st["acronym"])}
     big = {**MAJOR, **EXTRA_MAJOR}
     rows = []
@@ -163,15 +175,38 @@ def info() -> pd.DataFrame:
             cat = "皮层分层" if is_layer(r.name) else "细分亚区"
         else:
             cat = "上级汇总"
-        rows.append({"acronym": r.acronym, "name": r.name, "zh": ZH.get(r.acronym, ""), "depth": len(path) - 1,
+        rows.append({"id": int(r.id), "acronym": r.acronym, "name": r.name, "zh": ZH.get(r.acronym, ""), "depth": len(path) - 1,
                      "parent": above[-1] if above else "", "major": major,
                      "所属大脑区": f"{big[major]} {major}" if major else "—", "脑区类别": cat})
     return pd.DataFrame(rows)
 
 
-def selected(mode: str, depth: int = 0, skip_layers: bool = False) -> set:
+def custom_regions(region_ids) -> pd.DataFrame:
+    """按 Allen ID 解析自选脑区，并检查图谱中是否缺少已选结构。"""
+    wanted = set(region_ids)
+    if not wanted:
+        raise ValueError("请至少勾选一个脑区，或选择其他脑区范围。")
+    atlas = info()
+    rows = atlas.loc[atlas["id"].isin(wanted)]
+    unknown = wanted.difference(rows["id"])
+    if unknown:
+        raise ValueError("当前图谱中找不到已选的结构 ID：" + "、".join(sorted(map(str, unknown))) + "。请重新选择脑区。")
+    return rows
+
+
+def selection_details(mode, region_ids):
+    """在分析参数中逐行记录计划比较的脑区，包括切片未覆盖的结构。"""
+    if mode != CUSTOM:
+        return []
+    return [(f"自选脑区（{structure_id()} {r.id}）", " · ".join(x for x in (r.acronym, r.zh, r.name) if x))
+            for r in custom_regions(region_ids).itertuples(index=False)]
+
+
+def selected(mode: str, depth: int = 0, skip_layers: bool = False, *, region_ids=()) -> set:
     """这种选法下会列出的脑区缩写。"""
     mode = resolve_mode(mode, depth)
+    if mode == CUSTOM:
+        return set(custom_regions(region_ids)["acronym"]) if region_ids else set()
     t = info()
     if mode == MAJOR_ONLY:
         keep = t["acronym"].isin(MAJOR)
@@ -188,9 +223,14 @@ def selected(mode: str, depth: int = 0, skip_layers: bool = False) -> set:
     return set(t.loc[keep, "acronym"])
 
 
-def filter_table(t: pd.DataFrame, mode: str, depth: int = 0, skip_layers: bool = False) -> pd.DataFrame:
+def filter_table(t: pd.DataFrame, mode: str, depth: int = 0, skip_layers: bool = False, *, region_ids=()) -> pd.DataFrame:
     """按脑区范围筛选一张带“脑区缩写”列的表。"""
     mode = resolve_mode(mode, depth)
+    if mode == CUSTOM:
+        rows = custom_regions(region_ids)
+        if structure_id() in t:
+            return t[t[structure_id()].isin(rows["id"])]
+        return t[t["脑区缩写"].isin(rows["acronym"])]
     if mode == ALL and not skip_layers:
         return t
     return t[t["脑区缩写"].isin(selected(mode, depth, skip_layers))]
@@ -198,7 +238,7 @@ def filter_table(t: pd.DataFrame, mode: str, depth: int = 0, skip_layers: bool =
 
 def annotate(t: pd.DataFrame) -> pd.DataFrame:
     """在“层级”列后面加三列：脑区中文名、所属大脑区、脑区类别（导出的 Excel 用，方便筛选）。"""
-    if t is None or t.empty or "脑区缩写" not in t.columns or "脑区类别" in t.columns:
+    if t is None or (t.empty and structure_id() not in t.columns) or "脑区缩写" not in t.columns or "脑区类别" in t.columns:
         return t
     m = info().drop_duplicates("acronym").set_index("acronym")
     t = t.copy()

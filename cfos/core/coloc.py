@@ -54,6 +54,9 @@ def colocalize(df: pd.DataFrame, pixel_um0: float, params: ColocParams,
         df["merged_id"] = []
         df["combo"] = []
         return df
+    # Cached sections can contain Python floats in object columns after an
+    # empty resolution group was concatenated with a populated group.
+    df = df.astype({"x": np.float64, "y": np.float64})
     uf = _UF(n)
     r0 = params.max_dist_um / pixel_um0
     search = max(r0, 20.0 / pixel_um0)
@@ -76,8 +79,7 @@ def colocalize(df: pd.DataFrame, pixel_um0: float, params: ColocParams,
             ia, ib = idx_by_ch[a], idx_by_ch[b]
             if len(ia) == 0 or len(ib) == 0:
                 continue
-            pa = df.loc[ia, ["x", "y"]].to_numpy()
-            pb = df.loc[ib, ["x", "y"]].to_numpy()
+            pa, pb = trees[a].data, trees[b].data
             cands = trees[b].query_ball_point(pa, search)
             pairs = []  # (距离, a 下标, b 下标)
             for k, js in enumerate(cands):
@@ -131,7 +133,9 @@ def colocalize(df: pd.DataFrame, pixel_um0: float, params: ColocParams,
 def merged_cells(df: pd.DataFrame, n_channels: int) -> pd.DataFrame:
     """每个合并后的细胞一行：位置、各通道是否阳性。"""
     if df.empty:
-        return pd.DataFrame(columns=["section", "merged_id", "x", "y"] + [f"pos_ch{c}" for c in range(n_channels)])
+        dtypes = {"section": "object", "merged_id": "int64", "x": "float64", "y": "float64"}
+        dtypes.update({f"pos_ch{c}": "bool" for c in range(n_channels)})
+        return pd.DataFrame({name: pd.Series(dtype=dtype) for name, dtype in dtypes.items()})
     g = df.groupby("merged_id")
     out = g.agg(section=("section", "first"), x=("x", "mean"), y=("y", "mean"))
     if "combo" in df.columns:
@@ -143,18 +147,6 @@ def merged_cells(df: pd.DataFrame, n_channels: int) -> pd.DataFrame:
     for col in ("hemisphere", "region_id"):
         if col in df.columns:
             out[col] = g[col].first()
-    # 每个通道：该细胞在这个通道里被识别出的那一个对象的平均亮度和组织背景（用于强度分级）
-    for c in range(n_channels):
-        sub = df[df["channel"] == c]
-        if f"mean_ch{c}" in sub.columns and len(sub):
-            first = sub.groupby("merged_id").first()
-            out[f"int_ch{c}"] = first[f"mean_ch{c}"].reindex(out.index)
-            if "background" in sub.columns:
-                bg = first["background"]
-                # 手动补加的细胞没有背景值：用同一脑片其他细胞的背景
-                sec_bg = sub.groupby("section")["background"].median()
-                fill = first["section"].map(sec_bg)
-                out[f"bg_ch{c}"] = bg.fillna(fill).reindex(out.index)
     return out.reset_index()
 
 
@@ -228,17 +220,11 @@ def summarize(cells: pd.DataFrame, channel_names: list[str], group_cols=("sectio
         row = dict(zip(group_cols, key))
         for c in range(n):
             row[f"{channel_names[c]}+"] = int(g[f"pos_ch{c}"].sum())
-        for c in range(n):
-            gc = f"grade_ch{c}"
-            if gc in g.columns:
-                gv = g[gc].to_numpy()
-                for lv, lab in ((1, "弱"), (2, "中"), (3, "强")):
-                    row[f"{channel_names[c]}+ {lab}"] = int((gv == lv).sum())
         for k in range(2, n + 1):
             for combo in combinations(range(n), k):
                 m = np.ones(len(g), bool)
                 for c in combo:
-                    m &= g[f"pos_ch{c}"].to_numpy()
+                    m &= g[f"pos_ch{c}"].to_numpy(dtype=bool)
                 row["+".join(channel_names[c] for c in combo) + " 共标"] = int(m.sum())
         if excluded is not None:
             ex = excluded

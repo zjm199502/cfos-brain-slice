@@ -16,6 +16,7 @@
 """
 from __future__ import annotations
 
+from .atlas_choice import project_atlas
 from dataclasses import dataclass, asdict, field
 
 import numpy as np
@@ -395,6 +396,7 @@ def plot_thresholds(res, params, path):
 
 
 # ---------------------------------------------------------------- 入口
+@project_atlas
 def run_network_analysis(project, out_dir, params: NetParams, region_sec=None, progress=None):
     """返回 (输出文件夹, 摘要文字, 图片路径列表)。"""
     from pathlib import Path
@@ -403,12 +405,7 @@ def run_network_analysis(project, out_dir, params: NetParams, region_sec=None, p
     if region_sec is None:
         if progress:
             progress(0, 1, "正在统计每张脑片的脑区结果…")
-        skip, depth, rset = project.export_skip_layers, project.export_max_depth, project.export_region_set
-        project.export_skip_layers, project.export_max_depth, project.export_region_set = False, 0, "all"
-        try:
-            region_sec = build_tables(project, intensity=False).get("按脑区×脑片")
-        finally:
-            project.export_skip_layers, project.export_max_depth, project.export_region_set = skip, depth, rset
+        region_sec = build_tables(project, intensity=False, all_regions=True).get("按脑区×脑片")
     if region_sec is None or region_sec.empty:
         raise ValueError("还没有按脑区的结果。请先完成细胞识别和“⑥ 脑图谱配准”。")
     from .stats import check_samples
@@ -419,7 +416,7 @@ def run_network_analysis(project, out_dir, params: NetParams, region_sec=None, p
     animal = per_animal(region_sec, project.samples)
     if animal.empty:
         raise ValueError("还没有填写分组。请在表格中为每张脑片填写“动物编号”和“组别”。")
-    params.metric = params.metric or metric_options(project.channel_names, grading=project.grading)[0]
+    params.metric = params.metric or metric_options(project.channel_names)[0]
     res = run_network(animal, params, progress)
     groups, regions = res["groups"], res["regions"]
     anc = _structures()

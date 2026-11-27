@@ -3,7 +3,9 @@ import os
 from pathlib import Path
 import platform
 import runpy
+import subprocess
 import sys
+import tempfile
 
 
 def report(message):
@@ -18,7 +20,6 @@ def verify_app(app):
     from qtpy.QtCore import QTimer
     from qtpy.QtWidgets import QApplication
     from cfos import app as desktop
-    from cfos.core import deepslice_onnx
     from cfos.core.gpu_devices import gpu_names
     from cfos.core.selftest import MODULES
     from cfos.core.sections import find_sections
@@ -34,10 +35,27 @@ def verify_app(app):
         assert find_sections(slide), "Demo contains no recognized sections"
     finally:
         slide.close()
-    image = np.arange(128 * 128, dtype=np.uint8).reshape(128, 128)
-    coords = deepslice_onnx.predict([image], resources / "deepslice")
-    assert coords.shape == (1, 9) and np.isfinite(coords).all()
-    report("Demo image opened; both DeepSlice ONNX models returned finite coordinates.")
+    if (app / "cfos/core/giraff.py").is_file():
+        from cfos.core import atlas_choice, giraff
+        for name in (atlas_choice.CCF, atlas_choice.STAM):
+            atlas = giraff.load_atlas(name)
+            assert atlas.reference.shape == atlas.annotation.shape and atlas.n_regions > 0
+        with tempfile.TemporaryDirectory() as trial:
+            root = Path(trial)
+            plane = atlas.reference[len(atlas.reference) // 2]
+            giraff._write_plane(root / "plane.nii", plane.astype(np.uint8), .032)
+            subprocess.run([giraff.NIFTYREG, "-ref", "plane.nii", "-flo", "plane.nii",
+                            "-rigOnly", "-omp", "1", "-aff", "rigid.txt", "-res", "result.nii"],
+                           cwd=root, check=True, timeout=60)
+            affine = np.loadtxt(root / "rigid.txt")
+            assert affine.shape == (4, 4) and np.isfinite(affine).all()
+        report("Opened demo and both native atlases; bundled NiftyReg produced a finite rigid transform.")
+    else:
+        from cfos.core import deepslice_onnx
+        image = np.arange(128 * 128, dtype=np.uint8).reshape(128, 128)
+        coords = deepslice_onnx.predict([image], resources / "deepslice")
+        assert coords.shape == (1, 9) and np.isfinite(coords).all()
+        report("Demo image opened; both DeepSlice ONNX models returned finite coordinates.")
     report(f"macOS reports display adapters: {gpu_names()}")
 
     after_start = desktop._after_start
@@ -59,10 +77,14 @@ def verify_app(app):
     assert seen == [True], "GUI did not show the FosFolio main window"
 
 
-def verify_cellpose():
+def verify_cellpose(offline=False):
     from cfos.core import cellpose4, cellpose_setup
 
-    print(cellpose_setup.install(report=lambda message: print(message, flush=True)))
+    if offline:
+        launcher = Path(os.environ["CFOS_BASE_APP"]).parents[1] / "MacOS/cfos"
+        subprocess.run([launcher, "--install-cellpose-offline"], check=True)
+    else:
+        print(cellpose_setup.install(report=lambda message: print(message, flush=True)))
     cellpose4.set_pref("cpu")
     cpu = cellpose4.probe_device()
     assert "CPU" in cpu, cpu
@@ -91,5 +113,19 @@ if __name__ == "__main__":
         verify_app(app)
     elif phase == "cellpose":
         verify_cellpose()
+    elif phase == "cellpose-offline":
+        # Run both the CLI installer and inference with network access denied.
+        with tempfile.TemporaryDirectory(prefix="fosfolio-offline-") as testing:
+            env = os.environ.copy()
+            for key in ("CFOS_CELLPOSE_PYTHON", "CFOS_CELLPOSE_WEIGHTS"):
+                env.pop(key, None)
+            env["CFOS_COMPONENTS_DIR"] = str(Path(testing) / "components")
+            env["CFOS_UPDATES_DIR"] = str(Path(testing) / "updates")
+            subprocess.run(
+                ["/usr/bin/sandbox-exec", "-p", "(version 1)(allow default)(deny network*)",
+                 sys.executable, __file__, bundle, "cellpose-offline-isolated"], check=True, env=env
+            )
+    elif phase == "cellpose-offline-isolated":
+        verify_cellpose(offline=True)
     else:
         raise ValueError(phase)

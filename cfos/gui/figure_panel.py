@@ -37,14 +37,14 @@ class FigureMixin:
 
         # ---- 截图框
         g = QGroupBox("截图框（ROI）"); gl = QVBoxLayout(g)
-        b = big_button("画新的截图框（在图上拖出矩形）"); b.clicked.connect(self.fig_draw_mode); gl.addWidget(b)
+        b = big_button("画新的截图框（在图上拖出矩形）"); b.clicked.connect(lambda: self._require_scope() and self.fig_draw_mode()); gl.addWidget(b)
         row = QHBoxLayout()
         self.fig_fixed = QCheckBox("固定大小（µm）"); self.fig_fixed.setToolTip(
             "勾选后，保存时每个截图框都会以框中心为准调整成这个大小，方便多张图之间比较。")
         self.fig_fw = QDoubleSpinBox(); self.fig_fw.setRange(10, 20000); self.fig_fw.setDecimals(0); self.fig_fw.setPrefix("宽 ")
         self.fig_fh = QDoubleSpinBox(); self.fig_fh.setRange(10, 20000); self.fig_fh.setDecimals(0); self.fig_fh.setPrefix("高 ")
         row.addWidget(self.fig_fixed); row.addWidget(self.fig_fw); row.addWidget(self.fig_fh); gl.addLayout(row)
-        b = big_button("保存截图框（画完 / 调整完后点）"); b.clicked.connect(self.fig_save_rois); gl.addWidget(b)
+        b = big_button("保存截图框（画完 / 调整完后点）"); b.clicked.connect(lambda: self._require_scope() and self.fig_save_rois()); gl.addWidget(b)
         self.fig_list = QListWidget(); self.fig_list.setMaximumHeight(130)
         self.fig_list.setToolTip("双击名称可以改名；双击左边的编号放大到这个框。")
         self.fig_list.itemChanged.connect(self._fig_rename)
@@ -52,9 +52,9 @@ class FigureMixin:
         gl.addWidget(self.fig_list)
         grid = QGridLayout()
         b = QPushButton("放大到选中的框"); b.clicked.connect(lambda: self._fig_zoom(self.fig_list.currentItem())); grid.addWidget(b, 0, 0)
-        b = QPushButton("删除选中的框"); b.clicked.connect(self.fig_delete_roi); grid.addWidget(b, 0, 1)
+        b = QPushButton("删除选中的框"); b.clicked.connect(lambda: self._require_scope() and self.fig_delete_roi()); grid.addWidget(b, 0, 1)
         b = QPushButton("改名"); b.clicked.connect(lambda: self.fig_list.currentItem() and self.fig_list.editItem(self.fig_list.currentItem())); grid.addWidget(b, 1, 0)
-        b = QPushButton("复制这些框到所有图片"); b.setToolTip("按相对于脑片的位置复制：其他图片上的每张脑片，在同样的相对位置各加一个同样大小的框。")
+        b = QPushButton("复制这些框到所选脑片"); b.setToolTip("所选范围内的其他脑片会在相同的相对位置各增加一个同样大小的框。")
         b.clicked.connect(self.fig_copy_rois); grid.addWidget(b, 1, 1)
         gl.addLayout(grid)
         L.addWidget(g)
@@ -64,7 +64,7 @@ class FigureMixin:
         self.fig_ch_box = QHBoxLayout(); gl.addLayout(self.fig_ch_box)
         self.fig_ch_cbs: list[QCheckBox] = []
         self.fig_separate = QCheckBox("合并图之外，每个通道再单独导出一张")
-        self.fig_cells = QCheckBox("叠加识别出的细胞轮廓")
+        self.fig_cells = QCheckBox("叠加识别出的细胞（虚线圆）")
         self.fig_regions = QCheckBox("叠加脑区边界（需要先做 ⑥ 配准）")
         self.fig_region_names = QCheckBox("标注脑区缩写")
         self.fig_excl = QCheckBox("显示排除区域")
@@ -87,9 +87,9 @@ class FigureMixin:
                     "可以在 Illustrator 里改颜色、粗细、删掉不要的脑区。通道、比例尺、分辨率、格式用本页其他设置"
                     "（整张脑片建议 1–2 µm/像素）。")
         hl.setWordWrap(True); f.addRow(hl)
-        b = big_button("导出当前图片的配准图（每张脑片一张）"); b.clicked.connect(lambda: self.fig_export_sections(False))
+        b = big_button("导出当前图片内所选脑片的配准图"); b.clicked.connect(lambda: self._require_scope() and self.fig_export_sections(False))
         f.addRow(b)
-        b = big_button("导出所有图片的配准图"); b.clicked.connect(lambda: self.fig_export_sections(True))
+        b = big_button("导出所选图片和脑片的配准图"); b.clicked.connect(lambda: self._require_scope() and self.fig_export_sections(True))
         f.addRow(b)
         L.addWidget(g)
 
@@ -121,9 +121,9 @@ class FigureMixin:
         self.fig_tif = QCheckBox("TIFF（无损，投稿用）"); self.fig_svg = QCheckBox("SVG（比例尺、脑区轮廓可在 Illustrator 中编辑）")
         for cb in (self.fig_png, self.fig_tif, self.fig_svg):
             gl.addWidget(cb)
-        b = big_button("预览选中的框"); b.clicked.connect(self.fig_preview); gl.addWidget(b)
-        b = big_button("导出当前图片的所有截图框"); b.clicked.connect(lambda: self.fig_export(False)); gl.addWidget(b)
-        b = big_button("导出所有图片的所有截图框"); b.clicked.connect(lambda: self.fig_export(True)); gl.addWidget(b)
+        b = big_button("预览选中的框"); b.clicked.connect(lambda: self._require_scope() and self.fig_preview()); gl.addWidget(b)
+        b = big_button("导出当前图片内所选范围的截图框"); b.clicked.connect(lambda: self._require_scope() and self.fig_export(False)); gl.addWidget(b)
+        b = big_button("导出所选范围的截图框"); b.clicked.connect(lambda: self._require_scope() and self.fig_export(True)); gl.addWidget(b)
         b = QPushButton("打开“截图”文件夹"); b.clicked.connect(
             lambda: self.project and self._open_folder(self._fig_out_dir(True))); gl.addWidget(b)
         L.addWidget(g)
@@ -205,6 +205,7 @@ class FigureMixin:
         st.channels = [] if len(chans) == len(self.fig_ch_cbs) else chans
         st.fixed_size = self.fig_fixed.isChecked(); st.fixed_w_um = self.fig_fw.value(); st.fixed_h_um = self.fig_fh.value()
         st.separate = self.fig_separate.isChecked(); st.overlay_cells = self.fig_cells.isChecked()
+        st.cell_ring_width_pt = self.cell_rings.width_pt
         st.overlay_regions = self.fig_regions.isChecked(); st.overlay_region_names = self.fig_region_names.isChecked()
         st.overlay_exclusions = self.fig_excl.isChecked(); st.inset = self.fig_inset.isChecked()
         st.region_color = self.rg_color.currentText(); st.region_width_px = self.rg_width.value()
@@ -229,12 +230,18 @@ class FigureMixin:
         self._save_later()
 
     # ---------------------------------------------------------------- 截图框图层
+    def _figure_roi_in_scope(self, r):
+        if (self._processing_scope or {}).get(self.image.key) is None:
+            return True
+        sec = fig.section_for(self.image, r["x"] + r["w"] / 2, r["y"] + r["h"] / 2)
+        return sec is not None and self._section_in_scope(self.image, sec)
+
     def _draw_figure_rois(self, force=False):
         if LAYER in self.viewer.layers:
             self.viewer.layers.remove(LAYER)
         if self.image is None or self.slide is None:
             return
-        rois = self.image.figure_rois
+        rois = [r for r in self.image.figure_rois if self._figure_roi_in_scope(r)]
         if not rois and not force:
             return
         rects = [np.array([[r["y"], r["x"]], [r["y"], r["x"] + r["w"]], [r["y"] + r["h"], r["x"] + r["w"]],
@@ -255,6 +262,7 @@ class FigureMixin:
         return layer
 
     def fig_draw_mode(self):
+        self.canvas_tools.reset()
         if self.slide is None:
             return
         layer = self.viewer.layers[LAYER] if LAYER in self.viewer.layers else self._draw_figure_rois(force=True)
@@ -269,10 +277,11 @@ class FigureMixin:
         if self.image is None or LAYER not in self.viewer.layers:
             return
         layer = self.viewer.layers[LAYER]
-        old = list(self.image.figure_rois)
+        names = list(layer.features["name"]) if "name" in layer.features else []
         px = self.slide.pixel_size_um
         H0, W0 = self.slide.level_shapes[0][:2]
-        new, used = [], set()
+        new = [r for r in self.image.figure_rois if not self._figure_roi_in_scope(r)]
+        used = {r["name"] for r in new}
         for i, poly in enumerate(layer.data):
             ys, xs = poly[:, -2], poly[:, -1]
             x, y, w, h = float(xs.min()), float(ys.min()), float(xs.max() - xs.min()), float(ys.max() - ys.min())
@@ -283,8 +292,10 @@ class FigureMixin:
             w, h = min(w, W0 - x), min(h, H0 - y)
             if w < 5 or h < 5:
                 continue
-            prev = old[i] if i < len(old) else None
-            name = prev["name"] if prev else ""
+            if not self._figure_roi_in_scope({"x": x, "y": y, "w": w, "h": h}):
+                self.info("截图框的中心必须落在所选脑片上。")
+                return
+            name = names[i] if i < len(names) and names[i] not in used else ""
             new.append({"name": name, "x": x, "y": y, "w": w, "h": h})
             if name:
                 used.add(name)
@@ -304,15 +315,18 @@ class FigureMixin:
         self.fig_list.blockSignals(True)
         self.fig_list.clear()
         px = self.slide.pixel_size_um if self.slide else 0.25
-        for r in (self.image.figure_rois if self.image else []):
+        for i, r in enumerate(self.image.figure_rois if self.image else []):
+            if not self._figure_roi_in_scope(r):
+                continue
             it = QListWidgetItem(r["name"])
+            it.setData(Qt.UserRole, i)
             it.setFlags(it.flags() | Qt.ItemIsEditable)
             it.setToolTip(f"{r['w'] * px:.0f} × {r['h'] * px:.0f} µm")
             self.fig_list.addItem(it)
         self.fig_list.blockSignals(False)
 
     def _fig_rename(self, it):
-        i = self.fig_list.row(it)
+        i = it.data(Qt.UserRole)
         if self.image is None or not (0 <= i < len(self.image.figure_rois)):
             return
         name = it.text().strip() or self.image.figure_rois[i]["name"]
@@ -323,7 +337,7 @@ class FigureMixin:
     def _fig_zoom(self, it):
         if it is None or self.image is None:
             return
-        i = self.fig_list.row(it)
+        i = it.data(Qt.UserRole)
         if not (0 <= i < len(self.image.figure_rois)):
             return
         r = self.image.figure_rois[i]
@@ -332,26 +346,29 @@ class FigureMixin:
         self.viewer.camera.zoom = 0.8 * min(sz[0] / r["h"], sz[1] / r["w"])
 
     def fig_delete_roi(self):
-        i = self.fig_list.currentRow()
+        item = self.fig_list.currentItem()
+        i = item.data(Qt.UserRole) if item else -1
         if self.image is None or not (0 <= i < len(self.image.figure_rois)):
             return
         del self.image.figure_rois[i]
         self.project.save(); self._draw_figure_rois(force=True); self._refresh_fig_list()
 
     def fig_copy_rois(self):
+        if not self._require_scope():
+            return
         if self.image is None or not self.image.figure_rois:
             self.info("当前图片还没有截图框。"); return
         n = 0
         src = self.image
-        for r in src.figure_rois:
+        for r in list(src.figure_rois):
             s = fig.section_for(src, r["x"] + r["w"] / 2, r["y"] + r["h"] / 2)
-            if s is None:
+            if s is None or not self._section_in_scope(src, s):
                 continue
             sx, sy, sw, sh = s.bbox0
             fx, fy = (r["x"] + r["w"] / 2 - sx) / sw, (r["y"] + r["h"] / 2 - sy) / sh
-            for im in self.project.images:
+            for im in self._target_images(True):
                 for t in im.sections:
-                    if im is src and t is s:
+                    if not self._section_in_scope(im, t) or (im is src and t is s):
                         continue
                     tx, ty, tw, th = t.bbox0
                     cx, cy = tx + fx * tw, ty + fy * th
@@ -367,9 +384,8 @@ class FigureMixin:
     def fig_preview(self):
         if self.image is None or self.slide is None:
             return
-        i = self.fig_list.currentRow()
-        if i < 0 and self.image.figure_rois:
-            i = 0
+        item = self.fig_list.currentItem() or self.fig_list.item(0)
+        i = item.data(Qt.UserRole) if item else -1
         if not (0 <= i < len(self.image.figure_rois)):
             self.info("请先画一个截图框并保存。"); return
         st = self._fig_settings()
@@ -401,13 +417,13 @@ class FigureMixin:
     def fig_export(self, all_images: bool):
         if self.project is None or self.image is None:
             return
-        images = list(self.project.images) if all_images else [self.image]
+        project = self._view_project()
+        images = [im for im in project.images if all_images or im.key == self.image.key]
         n = sum(len(im.figure_rois) for im in images)
         if n == 0:
             self.info("还没有截图框。先点“画新的截图框”在图上画，再点“保存截图框”。"); return
         st = self._fig_settings()
         self.project.figure = st.to_dict(); self.project.save()
-        project = self.project
         out_dir = self._fig_out_dir(True)
 
         def done(res):
@@ -424,13 +440,16 @@ class FigureMixin:
                                                      cancel=task.is_cancelled, out_dir=out_dir),
                       done, label="正在导出截图…")
 
-    def fig_export_sections(self, all_images: bool):
+    def fig_export_sections(self, all_images: bool, *, registration_view=False):
         if self.project is None or self.image is None:
             return
-        images = list(self.project.images) if all_images else [self.image]
+        project = self._view_project()
+        images = [im for im in project.images if all_images or im.key == self.image.key]
         st = self._fig_settings()
         self.project.figure = st.to_dict(); self.project.save()
-        project = self.project
+        if registration_view:
+            st.overlay_cells = False
+            st.region_color = "白"
         out_dir = self._fig_out_dir(True) / "配准图"
 
         def done(res):

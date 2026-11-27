@@ -4,6 +4,8 @@
     [Parameter(Mandatory)][string]$OutputDirectory,
     [Parameter(Mandatory)][string]$VCRedistDirectory,
     [string]$DeepSliceDirectory,
+    [string]$OfflineCellposeDirectory,
+    [switch]$CompactOffline,
     [string]$Compiler = "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe"
 )
 $ErrorActionPreference = 'Stop'
@@ -16,6 +18,7 @@ $versionText = Get-Content -LiteralPath "$repo\cfos\__init__.py" -Raw -Encoding 
 $version = [regex]::Match($versionText, '(?m)^__version__\s*=\s*"([\d.]+)"').Groups[1].Value
 if (!$version) { throw 'Cannot read the FosFolio version.' }
 if (!(Test-Path -LiteralPath $Compiler)) { throw 'Specify the Inno Setup 6 compiler with -Compiler.' }
+if ($CompactOffline -and !$OfflineCellposeDirectory) { throw 'CompactOffline requires OfflineCellposeDirectory.' }
 
 # Use a new stage so removed modules or untracked files from an older build cannot leak into a release.
 $stage = Join-Path $output ("win-stage-" + [Guid]::NewGuid().ToString('N').Substring(0, 8))
@@ -71,6 +74,37 @@ New-Item -Type Directory "$appDir\resources\deepslice" | Out-Null
 foreach ($weight in $weights) {
     foreach ($ext in @('onnx','sig')) { Copy-Item -LiteralPath "$models\$weight.$ext" -Destination "$appDir\resources\deepslice" }
 }
-& $Compiler /Q "/DAppVersion=$version" "/DStage=$stage" "/O$output" "$PSScriptRoot\windows.iss"
+$flags = @('/Q', "/DAppVersion=$version", "/DStage=$stage", "/O$output")
+$artifactName = "FosFolio-$version-Windows-x64-Setup"
+if ($OfflineCellposeDirectory) {
+    $bundle = (Resolve-Path -LiteralPath $OfflineCellposeDirectory).Path
+    foreach ($item in @('manifest.json','cpsam_v2','wheels')) {
+        if (!(Test-Path -LiteralPath (Join-Path $bundle $item))) { throw "Missing offline component: $item" }
+    }
+    $manifest = Get-Content -LiteralPath "$bundle\manifest.json" -Raw -Encoding UTF8 | ConvertFrom-Json
+    if ($manifest.format -ne 1 -or $manifest.platform -ne 'win-amd64') { throw 'Expected a Windows x64 Cellpose bundle.' }
+    $flags += "/DCellposeBundle=$bundle"
+    $artifactName = "FosFolio-$version-Windows-x64-Offline-Setup"
+    if ($CompactOffline) {
+        $transport = (New-Item -Type Directory (Join-Path $output ("win-compact-" + [Guid]::NewGuid().ToString('N').Substring(0, 8)))).FullName
+        $wheelParts = Join-Path $transport 'wheel-parts'
+        $modelPayload = Join-Path $transport 'cpsam_v2.fsp'
+        & "$stage\python\python.exe" -I "$PSScriptRoot\windows_compact_wheel.py" pack $bundle $wheelParts
+        if ($LASTEXITCODE) { throw 'Preparing the compact torch wheel failed.' }
+        & "$stage\python\python.exe" -I "$PSScriptRoot\offline_model_transport.py" pack "$bundle\cpsam_v2" $modelPayload
+        if ($LASTEXITCODE) { throw 'Preparing the compact Cellpose model failed.' }
+        $wheelName = ($manifest.wheels | Where-Object { $_.file -like 'torch-*' }).file
+        $restoredBytes = (Get-Item -LiteralPath "$bundle\wheels\$wheelName").Length + (Get-Item -LiteralPath "$bundle\cpsam_v2").Length
+        $flags += @("/DCompactWheelParts=$wheelParts", "/DCompactModel=$modelPayload",
+                    "/DCompactWheelName=$wheelName", "/DCompactRestoredBytes=$restoredBytes")
+        $artifactName = "FosFolio-$version-Windows-x64-Offline-Compact-Setup"
+    }
+}
+& $Compiler @flags "$PSScriptRoot\windows.iss"
 if ($LASTEXITCODE) { throw "Inno Setup exited with $LASTEXITCODE." }
-Get-Item -LiteralPath "$output\FosFolio-$version-Windows-x64-Setup.exe"
+Get-Item -LiteralPath "$output\$artifactName.exe"
+if ($OfflineCellposeDirectory) {
+    Get-ChildItem -LiteralPath $output -File -Filter "$artifactName-*.bin"
+    & $python -I "$PSScriptRoot\windows_offline_media.py" "$output\$artifactName.exe" $stage $bundle
+    if ($LASTEXITCODE) { throw 'Offline installation media verification failed.' }
+}

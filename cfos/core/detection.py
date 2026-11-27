@@ -2,7 +2,8 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass, asdict, field
+from time import monotonic
+from dataclasses import dataclass, asdict, field, replace
 
 import numpy as np
 import pandas as pd
@@ -12,7 +13,9 @@ from skimage import measure
 
 from .slide_io import Slide
 from .sections import Section
-from . import cellpose4
+from . import cellpose4, segmentation
+
+TILE_SIZES = (2048, 1024, 512)
 
 
 @dataclass
@@ -20,7 +23,6 @@ class ChannelParams:
     """每个通道的识别参数（界面上可调）。"""
     detect: bool = True
     min_area_um2: float = 20.0        # 细胞最小面积
-    max_area_um2: float = 600.0       # 细胞最大面积
     min_intensity: float = 0.0        # 平均荧光强度下限（原始灰度值），0 表示不限制
     bg_fold: float = 0.0              # 自动阈值：平均强度至少是组织背景的多少倍才算阳性，0 表示不用
     min_contrast: float = 0.0         # 局部对比度下限：细胞至少比紧邻周围（3 µm 宽的环）亮多少倍，0 表示不限制。
@@ -37,15 +39,24 @@ class ChannelParams:
     skip_dark_tiles: bool = True
     cellprob_threshold: float = 0.0   # Cellpose cell probability threshold (logit)
 
+    model_override: bool = False
+    resolution_percent: int | None = None  # None inherits the saved project grid.
+
     def __post_init__(self):
-        # Old projects and templates may still contain a StarDist model directory.
-        self.model = cellpose4.MODEL_KEY
+        model = segmentation.normalize_model_id(self.model)
+        if model != self.model or model not in segmentation.NAMES:
+            # An unavailable engine has no active override or reusable Cellpose threshold.
+            self.model = cellpose4.MODEL_KEY
+            self.model_override = False
+            self.cellprob_threshold = 0.0
 
     @classmethod
-    def from_dict(cls, stored):
+    def from_dict(cls, stored, channel_name=""):
         values = {k: v for k, v in stored.items() if k in cls.__dataclass_fields__}
         if stored.get("model") != cellpose4.MODEL_KEY:
             values.pop("cellprob_threshold", None)
+        if not values.get("model_override"):
+            values["model"] = segmentation.default_model(channel_name)
         return cls(**values)
 
     def to_dict(self):
@@ -55,12 +66,83 @@ class ChannelParams:
 @dataclass
 class DetectionSettings:
     pixel_um: float = 0.5             # 识别时使用的分辨率
-    tile: int = 2048
+    tile: int = TILE_SIZES[0]
     overlap: int = 96
     channels: dict = field(default_factory=dict)  # 通道序号 -> ChannelParams
     # 识别前去除通道串色（v0.8.2）：unmix.prepare() 在识别前设置，不单独保存（设置在 Project.unmix 里）
     unmix: object = field(default=None, repr=False, compare=False)
     unmix_sig: object = field(default=None, repr=False, compare=False)
+    resolution_percent: int | None = 100
+    display_windows: dict = field(default_factory=dict)  # resolved per section, never the project defaults
+    tile_in_source_pixels: bool = True   # False preserves the legacy pixel_um grid until a size is chosen.
+
+
+def channel_percent(settings, channel):
+    value = settings.channels[channel].resolution_percent
+    return settings.resolution_percent if value is None else value
+
+
+def detection_grid(slide, settings, channel=None):
+    """Select one pyramid source and the spacing of the inference grid."""
+    percent = settings.resolution_percent if channel is None else channel_percent(settings, channel)
+    if percent is None:  # preserve the original grid of an existing project
+        level = slide.level_for_pixel_size(settings.pixel_um)
+        return level, slide.downsample(level)
+    if not 1 <= percent <= 100:
+        raise ValueError("识别分辨率必须在 1% 到 100% 之间。")
+    step = 100.0 / percent
+    level = slide.level_for_pixel_size(step * slide.pixel_size_um)
+    return level, step
+
+
+def tile_dimensions(settings, step, preview=False):
+    """Return the core edge and one-sided halo in pixels of the group's inference grid."""
+    if settings.resolution_percent is None and not settings.tile_in_source_pixels:
+        return settings.tile, settings.overlap
+    return max(1, round(settings.tile/step)), int(np.ceil(settings.overlap/step))
+
+
+def read_detection_tile(slide, level, bbox, width, height, step):
+    """Area-average on a section-anchored grid. Bound source reads even on flat TIFFs."""
+    x, y, w, h = bbox
+    source_step = slide.downsample(level)
+    if step == source_step == 1:
+        return slide.read(level, bbox)[:, :height, :width]
+    # Integrate source pixels over each destination pixel's actual footprint.
+    # At a clipped right/bottom edge only the last pixel has a shorter footprint.
+    def average_axis(values, edges, axis):
+        a = np.moveaxis(values, axis, -1)
+        edges = np.clip(edges, 0, a.shape[-1])
+        idx = np.floor(edges).astype(int)
+        integral = np.zeros((*a.shape[:-1], a.shape[-1]+1), np.float64)
+        np.cumsum(a, axis=-1, dtype=np.float64, out=integral[...,1:])
+        samples = integral[...,idx] + (edges-idx)*a[...,np.minimum(idx,a.shape[-1]-1)]
+        avg = np.diff(samples,axis=-1)/np.maximum(np.diff(edges),1e-12)
+        return np.moveaxis(avg, -1, axis)
+
+    chunk = max(1,min(1024,int(1024*source_step/step)))
+    result = None
+    for j in range(0,height,chunk):
+        for i in range(0,width,chunk):
+            n,m = min(chunk,width-i),min(chunk,height-j)
+            left, top = x+i*step,y+j*step
+            right,bottom = min(x+w,left+n*step),min(y+h,top+m*step)
+            block = slide.read(level,(left,top,right-left,bottom-top))
+            if result is None:
+                result = np.zeros((block.shape[0],height,width),block.dtype)
+            if not block.size:
+                continue
+            ox,oy = int(left/source_step),int(top/source_step)
+            ex = np.minimum(left+np.arange(n+1)*step,right)/source_step-ox
+            ey = np.minimum(top+np.arange(m+1)*step,bottom)/source_step-oy
+            if block.shape[1:]==(m,n) and np.array_equal(ex,np.arange(n+1)) and np.array_equal(ey,np.arange(m+1)):
+                data = block
+            else:
+                data = average_axis(average_axis(block,ex,2),ey,1)
+                if np.issubdtype(block.dtype,np.integer):
+                    data = np.rint(data)
+            result[:,j:j+m,i:i+n] = data
+    return result
 
 
 def section_norms(slide, section, channels, model=None, cancel=None):
@@ -167,14 +249,20 @@ def section_mask(section: Section, shape, ds: float) -> np.ndarray:
     return m
 
 
-def prepare_input(raw: np.ndarray, p: "ChannelParams", lo: float, hi: float, pix: float) -> np.ndarray:
+def prepare_input(raw: np.ndarray, p: "ChannelParams", lo: float, hi: float, pix: float, display_window=None) -> np.ndarray:
     """识别前的预处理（减背景 / 去卷积 → 归一化 → 伽马），识别和训练用同一个函数，保证一致。"""
     raw = raw.astype(np.float32)
-    if p.deconv or p.bg_radius_um > 0:
+    # A manual display window replaces automatic background subtraction and normalization.
+    # Optional deconvolution is applied in the original intensity units for both paths.
+    radius = p.bg_radius_um if display_window is None else 0.0
+    if p.deconv or radius > 0:
         from .deconv import enhance
-        raw = enhance(raw, pix, p.deconv, p.deconv_blur_um, p.deconv_iter, p.bg_radius_um)
-        if p.bg_radius_um > 0:
+        raw = enhance(raw, pix, p.deconv, p.deconv_blur_um, p.deconv_iter, radius)
+        if radius > 0:
             lo = 0.0
+    if display_window is not None:
+        black, white, gamma = display_window
+        return np.power(np.clip((raw - black) / (white - black), 0., 1.), gamma)
     x = np.clip((raw - lo) / max(hi - lo, 1e-6), 0, 1.5)
     if p.gamma != 1.0:
         x = np.clip(x, 0, 1) ** p.gamma
@@ -244,31 +332,61 @@ def _reset_pool():
     _POOL = None
 
 
+def _native_position(indices, step, extent):
+    """Map coordinates at pixel centres or fractional contour vertices to level zero.
+
+    A downsampled pixel covers [i * step, (i + 1) * step) of the native pixel
+    cells. Native array indices denote centres, so the first cell starts at -0.5.
+    The final output bin may span fewer source pixels.
+    """
+    edge_pos = indices + 0.5
+    cell = np.floor(edge_pos)
+    left = np.minimum(cell * step, extent)
+    right = np.minimum((cell + 1) * step, extent)
+    return left + (edge_pos - cell) * (right - left) - 0.5
+
+
 def _measure_tile(lab, img, c, tile, geo, crit):
-    """测量一块图像上一个通道识别出的细胞。tile=(tx, ty, T, rx0, ry0)；geo=(x0, y0, ds, pix, contour0)；
-    crit=(prefilter, min_area, max_area, thr, min_contrast, bg)。返回每个细胞一行的列表。"""
+    """测量一块图像上一个通道识别出的细胞。tile=(tx, ty, T, rx0, ry0)；geo=(x0, y0, w, h, ds, pix, contour0)；
+    crit=(prefilter, min_area, thr, min_contrast, bg)。返回每个细胞一行的列表。"""
     tx, ty, T, rx0, ry0 = tile
-    x0, y0, ds, pix, contour0 = geo
-    prefilter, min_area, max_area, thr, min_contrast, bg = crit
+    x0, y0, width, height, ds, pix, contour0 = geo
+    prefilter, min_area, thr, min_contrast, bg = crit
     poly = MplPath(np.asarray(contour0)) if contour0 is not None and len(contour0) > 2 else None
     n_ch = img.shape[0]
     ring_px = max(2, int(round(RING_UM / pix)))
     rows = []
     for rp in measure.regionprops(lab):
-        cyl, cxl = rp.centroid
-        gx, gy = rx0 + cxl, ry0 + cyl  # 识别层、脑片内坐标
-        # 只保留中心在本分块“核心区”内的细胞，避免重叠区重复计数
-        if not (tx <= gx < tx + T and ty <= gy < ty + T):
-            continue
-        area = rp.area * pix * pix
-        if area < 2.0 or (prefilter and (area < min_area or area > max_area)):
-            continue
-        X0, Y0 = x0 + gx * ds, y0 + gy * ds
-        if poly is not None and not poly.contains_point((X0, Y0)):
-            continue
         sl = rp.slice
         m = rp.image
-        means = [float(img[k][sl][m].mean()) for k in range(n_ch)]
+        edge_weights = None
+        if (rx0 + sl[1].stop) * ds > width + 1e-7 or (ry0 + sl[0].stop) * ds > height + 1e-7:
+            # Weight the last partial row / column by the native area it represents.
+            iy, ix = rp.coords.T
+            iy, ix = ry0 + iy, rx0 + ix
+            wx = np.minimum(ds, width - ix * ds)
+            wy = np.minimum(ds, height - iy * ds)
+            edge_weights = wx * wy
+            gx = np.average(ix * ds + (wx - 1) / 2, weights=edge_weights)
+            gy = np.average(iy * ds + (wy - 1) / 2, weights=edge_weights)
+            area = edge_weights.sum() * (pix / ds) ** 2
+        else:
+            cyl, cxl = rp.centroid
+            gx = (rx0 + cxl) * ds + (ds - 1) / 2
+            gy = (ry0 + cyl) * ds + (ds - 1) / 2
+            area = rp.area * pix * pix
+        # Ownership is defined in native coordinates, independent of tile overlap.
+        if not (tx * ds <= gx < (tx + T) * ds and ty * ds <= gy < (ty + T) * ds):
+            continue
+        if area < 2.0 or (prefilter and area < min_area):
+            continue
+        X0, Y0 = x0 + gx, y0 + gy
+        if poly is not None and not poly.contains_point((X0, Y0)):
+            continue
+        if edge_weights is None:
+            means = [float(img[k][sl][m].mean()) for k in range(n_ch)]
+        else:
+            means = [float(np.average(img[k][sl][m], weights=edge_weights)) for k in range(n_ch)]
         if prefilter and means[c] < thr:
             continue
         contrast = local_contrast(img[c], lab, rp, ring_px)
@@ -276,8 +394,8 @@ def _measure_tile(lab, img, c, tile, geo, crit):
             continue
         cont = measure.find_contours(np.pad(m, 1), 0.5)
         cont = measure.approximate_polygon(max(cont, key=len) - 1, 0.7) if cont else np.zeros((0, 2))
-        ys_ = (cont[:, 0] + sl[0].start + ry0) * ds + y0
-        xs_ = (cont[:, 1] + sl[1].start + rx0) * ds + x0
+        ys_ = _native_position(cont[:, 0] + sl[0].start + ry0, ds, height) + y0
+        xs_ = _native_position(cont[:, 1] + sl[1].start + rx0, ds, width) + x0
         row = {"channel": c, "x": X0, "y": Y0, "area_um2": area, "background": bg, "contrast": contrast,
                "contour": np.round(np.stack([xs_, ys_], 1), 1).astype(np.float32)}
         for k in range(n_ch):
@@ -286,46 +404,130 @@ def _measure_tile(lab, img, c, tile, geo, crit):
     return rows
 
 
+def section_tiles(section: Section, ds: float, tile: int, field_box=None):
+    """Core tiles intersecting tissue, including partially covered edge tiles."""
+    x, y, w, h = section.bbox0
+    width, height = int(np.ceil(w/ds)), int(np.ceil(h/ds))
+    left, top, right, bottom = 0, 0, width, height
+    if field_box is not None:
+        fx, fy, fw, fh = field_box
+        left = max(0, int(np.floor((fx-x)/(ds*tile)))*tile)
+        top = max(0, int(np.floor((fy-y)/(ds*tile)))*tile)
+        right = min(width, int(np.ceil((fx+fw-x)/ds)))
+        bottom = min(height, int(np.ceil((fy+fh-y)/ds)))
+    poly = None
+    if len(section.contour0) >= 3:
+        points = np.asarray(section.contour0)
+        if not np.array_equal(points[0], points[-1]):
+            points = np.vstack((points, points[0]))
+        poly = MplPath(points)
+    result = []
+    for ty in range(top,bottom,tile):
+        for tx in range(left,right,tile):
+            bounds = Bbox.from_extents(x+tx*ds, y+ty*ds, x+min(w,(tx+tile)*ds), y+min(h,(ty+tile)*ds))
+            if poly is None or poly.intersects_bbox(bounds, filled=True):
+                result.append((tx, ty))
+    return result
+
+
 def detect_section(slide: Slide, section: Section, settings: DetectionSettings,
-                   progress=None, cancel=None, prefilter: bool = True, norms=None, field_box=None) -> pd.DataFrame:
+                   progress=None, cancel=None, prefilter: bool = True, norms=None, field_box=None, detail=None, channel_names=(), image_name="", preview=False, selected_boxes=None) -> pd.DataFrame:
     """识别一张脑片上所有通道的细胞。返回表格：每行一个细胞，坐标为第 0 层像素。
 
     prefilter=False 时只做最基本的筛选（面积 ≥ 2 µm²），面积 / 强度 / 对比度阈值留给 apply_filters，
     这样以后改这些阈值不需要重新识别。"""
-    lv = slide.level_for_pixel_size(settings.pixel_um)
-    ds = slide.downsample(lv)
+    groups = {}
+    active = {c: p for c, p in settings.channels.items() if 0 <= c < len(slide.channels) and p.detect}
+    if not active:
+        raise ValueError("请在「细胞识别」中勾选至少一个需要识别的通道。")
+    for c, params in active.items():
+        groups.setdefault(channel_percent(settings, c), {})[c] = params
+
+    plans, totals, grids = [], {}, []
+    names = {c: (channel_names[c] if c < len(channel_names) else str(c+1)) + " · " +
+             segmentation.NAMES[p.model].split("（")[0] for c, p in active.items()}
+    _, _, w, h = section.bbox0
+    for percent, channels in groups.items():
+        local = replace(settings, resolution_percent=percent, channels=channels)
+        lv, ds = detection_grid(slide, local)
+        tile, overlap = tile_dimensions(local, ds, preview)
+        tiles = section_tiles(section, ds, tile, field_box)
+        if selected_boxes is not None:
+            sx, sy = section.bbox0[:2]
+            tiles = [(tx, ty) for tx, ty in tiles if any(
+                sx + tx*ds < right and sx + (tx+tile)*ds > left and
+                sy + ty*ds < bottom and sy + (ty+tile)*ds > top
+                for left, top, right, bottom in selected_boxes)]
+        plans.append((local, lv, ds, tile, overlap, tiles))
+        totals.update(dict.fromkeys(channels, len(tiles)))
+        label = "、".join(channel_names[c] if c < len(channel_names) else str(c+1) for c in channels)
+        unit = "原图" if percent is not None or local.tile_in_source_pixels else "识别层"
+        grids.append(f"{label} 识别比例 {100/ds:g}% · 金字塔第 {lv} 层 · {ds*slide.pixel_size_um:g} µm/像素"
+                     f" · 识别区域 {int(np.ceil(w/ds))} × {int(np.ceil(h/ds))} px"
+                     f" · 核心边长 {local.tile} {unit} px（识别层 {tile} px）"
+                     f" · 单侧重叠 {overlap} px，含重叠的模型输入边长最多 {tile + 2*overlap} px · {len(tiles)} 块")
+    if detail:
+        detail(dict(kind="section", title=f"{image_name} · {section.name}", channels=names,
+                    channel_totals=totals, total=max(totals.values()), grid="；".join(grids)))
+    total = sum(totals.values())
+    if norms is None and total:
+        if detail:
+            detail(dict(kind="note", text=f"{section.name} 读取归一化范围"))
+        norms = section_norms(slide, section, active, settings.unmix, cancel)
+    frames = []
+    done = 0
+    def report(count, unused):
+        progress(done + count, total)
+    for local, lv, ds, tile, overlap, tiles in plans:
+        frame = _detect_at_scale(slide, section, local, lv, ds, tile, overlap, tiles, names,
+                                 report if progress else None, cancel, prefilter, norms, field_box, detail)
+        frames.append(frame)
+        done += len(tiles) * len(local.channels)
+    df = frames[0] if len(frames) == 1 else pd.concat(frames, ignore_index=True)
+    df["cell_id"] = np.arange(len(df))
+    df.attrs["dark_tiles"] = [entry for f in frames for entry in f.attrs["dark_tiles"]]
+    for key in ("channel_models", "channel_devices"):
+        df.attrs[key] = {c: value for f in frames for c, value in f.attrs[key].items()}
+    df.attrs["inference_settings"] = raw_signature(settings)
+    df.attrs["z_mode"] = getattr(slide, "z_mode", "max")
+    if detail:
+        detail(dict(kind="end", text=f"{section.name} 完成，返回 {len(df)} 个对象"))
+    return df
+
+
+def _detect_at_scale(slide, section, settings, lv, ds, T, ov, tiles, names,
+                     progress, cancel, prefilter, norms, field_box, detail):
     pix = slide.pixel_size_um * ds
     x0, y0, w, h = section.bbox0
     W, H = int(np.ceil(w / ds)), int(np.ceil(h / ds))
     n_ch = len(slide.channels)
     contour0 = np.array(section.contour0) if len(section.contour0) > 2 else None
-    poly = MplPath(contour0) if contour0 is not None else None
-    geo = (x0, y0, ds, pix, contour0)
+    geo = (x0, y0, w, h, ds, pix, contour0)
 
     det_chs = [c for c in range(n_ch) if c in settings.channels and settings.channels[c].detect]
-    if not det_chs:
-        raise ValueError("请在「细胞识别」中勾选至少一个需要识别的通道。")
     um = getattr(settings, "unmix", None)
     um = um if um is not None and np.asarray(um.matrix).shape == (n_ch, n_ch) else None
-    if norms is None:
-        norms = section_norms(slide, section, {c: settings.channels[c] for c in det_chs}, um, cancel)
     dark_tiles = []
     devices = {c: set() for c in det_chs}
 
-    T, ov = settings.tile, settings.overlap
-    x_start, y_start, x_stop, y_stop = 0, 0, W, H
     if field_box is not None:
-        # Keep the section's tile origin and full overlap, including at the field boundary.
         fx, fy, fw, fh = field_box
-        x_start = max(0, int(np.floor((fx - x0) / (ds*T))) * T)
-        y_start = max(0, int(np.floor((fy - y0) / (ds*T))) * T)
-        x_stop = min(W, int(np.ceil((fx + fw - x0) / ds)))
-        y_stop = min(H, int(np.ceil((fy + fh - y0) / ds)))
-    tiles = [(tx, ty) for ty in range(y_start, y_stop, T) for tx in range(x_start, x_stop, T)]
+    def emit(kind, **values):
+        if detail:
+            detail(dict(kind=kind, **values))
+    if detail:
+        for c in det_chs:
+            window = settings.display_windows.get(c)
+            if window is None:
+                source = "识别归一化 · 识别 Gamma " + str(settings.channels[c].gamma)
+            else:
+                lo, hi, gamma = window
+                source = f"第③步亮度 · 最暗 {lo:g} · 最亮 {hi:g} · Gamma {gamma:g}"
+            emit("note", text=f"{section.name} · {names[c]} · 模型输入：{source}")
     total = len(tiles) * max(1, len(det_chs))
     state = {"done": 0}
     results = []          # 按分块、通道的顺序保存（列表或尚未完成的后台任务），保证结果顺序与单进程相同
-    pool = _pool()
+    pool = _pool() if tiles else None
     max_pending = 2 * max(1, _POOL_N)
 
     def tick(k=1):
@@ -373,47 +575,45 @@ def detect_section(slide: Slide, section: Section, settings: DetectionSettings,
         tick()
 
     try:
-        for tx, ty in tiles:
+        for tile_index, (tx, ty) in enumerate(tiles, 1):
             if cancel is not None and cancel():
                 raise InterruptedError("已取消")
             # 带重叠的读取区域（识别层坐标）
             rx0, ry0 = max(0, tx - ov), max(0, ty - ov)
             rx1, ry1 = min(W, tx + T + ov), min(H, ty + T + ov)
-            bb = (x0 + rx0 * ds, y0 + ry0 * ds, (rx1 - rx0) * ds, (ry1 - ry0) * ds)
-            # 跳过不含组织的分块
-            if poly is not None:
-                cx = x0 + (tx + min(T, W - tx) / 2) * ds
-                cy = y0 + (ty + min(T, H - ty) / 2) * ds
-                corners = np.array([[x0 + tx * ds, y0 + ty * ds], [x0 + (tx + T) * ds, y0 + ty * ds],
-                                    [x0 + tx * ds, y0 + (ty + T) * ds], [x0 + (tx + T) * ds, y0 + (ty + T) * ds],
-                                    [cx, cy]])
-                inside_any = poly.contains_points(corners).any() or \
-                    poly.intersects_bbox(Bbox([[x0 + tx * ds, y0 + ty * ds], [x0 + (tx + T) * ds, y0 + (ty + T) * ds]]))
-                if not inside_any:
-                    tick(len(det_chs))
-                    continue
-            img = slide.read(lv, bb)
+            bb = (x0 + rx0 * ds, y0 + ry0 * ds, min((rx1-rx0)*ds, w-rx0*ds), min((ry1-ry0)*ds, h-ry0*ds))
+            img = read_detection_tile(slide, lv, bb, rx1-rx0, ry1-ry0, ds)
             if um is not None and img.size:
                 from .unmix import apply as _unmix
                 img = _unmix(img, um)       # 识别前去除通道串色；之后的识别和亮度测量都用校正后的图
             if img.size == 0:
+                for c in det_chs:
+                    emit("skip", channel=c, text=f"图块 {tile_index} 没有可读像素")
                 tick(len(det_chs))
                 continue
             for c in det_chs:
                 p = settings.channels[c]
                 lo, hi, bg = norms[c]
                 thr = max(p.min_intensity, p.bg_fold * bg)
-                x = prepare_input(img[c], p, lo, hi, pix)
+                x = prepare_input(img[c], p, lo, hi, pix, settings.display_windows.get(c))
                 if p.skip_dark_tiles and float(x.max()) < 0.2:
+                    emit("skip", channel=c, text=f"图块 {tile_index} 跳过暗区")
                     dark_tiles.append((c, x0 + tx * ds, y0 + ty * ds,
                                        x0 + min(tx + T, W) * ds, y0 + min(ty + T, H) * ds))
                     tick()
                     continue
-                crit = (prefilter, p.min_area_um2, p.max_area_um2, thr, p.min_contrast, bg)
-                labels = cellpose4.predict_labels(x, cellprob_threshold=p.cellprob_threshold, cancel=cancel)
-                devices[c].add(cellpose4.backend_text())
+                crit = (prefilter, p.min_area_um2, thr, p.min_contrast, bg)
+                started = monotonic()
+                emit("start", channel=c, pixels=x.size, started=started, text=f"图块 {tile_index}/{len(tiles)}，模型输入 {x.shape[1]} × {x.shape[0]} px")
+                def report_batch(done, total):
+                    emit("batch", channel=c, done=done, total=total)
+                labels, device = segmentation.predict(x, p, cancel, progress=report_batch if detail else None)
+                duration = monotonic()-started
+                emit("done", channel=c, duration=duration, text=f"图块 {tile_index} 完成 · {duration:.1f} 秒 · {device}")
+                devices[c].add(device)
                 submit((labels, img, c, (tx, ty, T, rx0, ry0), geo, crit))
                 collect(block=True)
+        emit("note", text=f"{section.name} 正在汇总细胞测量")
         for i in pending():
             if cancel is not None and cancel():
                 raise InterruptedError("已取消")
@@ -425,21 +625,21 @@ def detect_section(slide: Slide, section: Section, settings: DetectionSettings,
     rows = [row for r in results for row in r]
     df = pd.DataFrame(rows)
     if df.empty:
-        df = pd.DataFrame(columns=["channel", "x", "y", "area_um2", "contour"] +
-                          [f"mean_ch{k}" for k in range(n_ch)])
+        dtypes = {"channel": "int64", "x": "float64", "y": "float64",
+                  "area_um2": "float64", "contour": "object"}
+        dtypes.update({f"mean_ch{k}": "float64" for k in range(n_ch)})
+        df = pd.DataFrame({name: pd.Series(dtype=dtype) for name, dtype in dtypes.items()})
     df.insert(0, "section", section.name)
     df["cell_id"] = np.arange(len(df))
     if field_box is not None:
         df = df[(df.x >= fx) & (df.x < fx + fw) & (df.y >= fy) & (df.y < fy + fh)].copy()
     df.attrs["dark_tiles"] = dark_tiles
-    df.attrs["channel_models"] = {c: cellpose4.MODEL_KEY for c in det_chs}
+    df.attrs["channel_models"] = {c: settings.channels[c].model for c in det_chs}
     df.attrs["channel_devices"] = {c: sorted(labels) for c, labels in devices.items()}
-    df.attrs["inference_settings"] = raw_signature(settings)
-    df.attrs["z_mode"] = getattr(slide, "z_mode", "max")
     return df
 
 
-RAW_KEYS = ("cellprob_threshold", "norm_low", "norm_high", "gamma", "deconv", "deconv_blur_um",
+RAW_KEYS = ("model", "cellprob_threshold", "norm_low", "norm_high", "gamma", "deconv", "deconv_blur_um",
             "deconv_iter", "bg_radius_um", "skip_dark_tiles")
 
 
@@ -449,6 +649,19 @@ def raw_signature(settings: DetectionSettings) -> str:
     d = {"model": cellpose4.MODEL_KEY, "px": settings.pixel_um, "tile": settings.tile, "ov": settings.overlap,
          "ch": {str(c): {k: getattr(p, k) for k in RAW_KEYS}
                 for c, p in settings.channels.items() if p.detect}}
+    if settings.display_windows:
+        d["display_windows"] = {str(c): v for c, v in settings.display_windows.items()}
+        if any(p.detect and p.deconv and c in settings.display_windows for c, p in settings.channels.items()):
+            d["deconvolve_before_window"] = True
+    if settings.resolution_percent is not None:
+        d["resolution_percent"] = settings.resolution_percent
+    if settings.tile_in_source_pixels and any(p.detect and channel_percent(settings, c) is None for c, p in settings.channels.items()):
+        d["tile_in_source_pixels"] = True
+    if any(p.detect and channel_percent(settings, c) != 100 for c, p in settings.channels.items()):
+        d["native_pixel_centres"] = 1
+    for c, p in settings.channels.items():
+        if p.detect and channel_percent(settings, c) != settings.resolution_percent:
+            d["ch"][str(c)]["resolution_percent"] = p.resolution_percent
     if getattr(settings, "unmix_sig", None):     # 只有开启了串色校正才加进签名，旧项目的签名不变
         d["unmix"] = settings.unmix_sig
     return json.dumps(d, sort_keys=True)
@@ -465,7 +678,7 @@ def apply_filters(df: pd.DataFrame, settings: DetectionSettings) -> pd.DataFrame
         it = df[f"mean_ch{c}"].values
         thr = np.maximum(p.min_intensity, p.bg_fold * df["background"].to_numpy()) if "background" in df.columns \
             else p.min_intensity
-        bad = sel & ((a < p.min_area_um2) | (a > p.max_area_um2) | (it < thr))
+        bad = sel & ((a < p.min_area_um2) | (it < thr))
         if p.min_contrast > 0 and "contrast" in df.columns:
             ct = df["contrast"].to_numpy(dtype=float)
             bad |= sel & (ct < p.min_contrast)  # NaN（周围全是细胞）不会被去掉

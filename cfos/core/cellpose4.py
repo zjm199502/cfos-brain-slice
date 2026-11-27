@@ -102,8 +102,8 @@ class _Worker:
             except OSError:
                 pass
 
-    def infer(self, folder, cutoff, cancel):
-        message = {"folder": str(folder), "threshold": float(cutoff)}
+    def infer(self, folder, cutoff, cancel, progress):
+        message = {"folder": str(folder), "threshold": float(cutoff), "progress": progress is not None}
         self.proc.stdin.write((json.dumps(message)+"\n").encode("ascii"))
         self.proc.stdin.flush()
         while True:
@@ -113,16 +113,19 @@ class _Worker:
                 raise InterruptedError("已取消 Cellpose 识别")
             try:
                 line = self.responses.get(timeout=0.1)
-                break
             except queue.Empty:
                 continue
-        if line is None:
-            detail = " ".join(self.errors)[-400:]
-            raise RuntimeError(f"Cellpose 工作进程已退出。{detail}")
-        response = json.loads(line)
-        if "error" in response:
-            raise RuntimeError(response["error"] + " " + _INSTALL)
-        return response["device"]
+            if line is None:
+                detail = " ".join(self.errors)[-400:]
+                raise RuntimeError(f"Cellpose 工作进程已退出。{detail}")
+            response = json.loads(line)
+            if "batch" in response:
+                if progress is not None:
+                    progress(*response["batch"])
+                continue
+            if "error" in response:
+                raise RuntimeError(response["error"] + " " + _INSTALL)
+            return response["device"]
 
 
 def close():
@@ -151,7 +154,7 @@ def status_text():
     return backend_text()
 
 
-def predict_labels(image, cellprob_threshold=0.0, cancel=None):
+def predict_labels(image, cellprob_threshold=0.0, cancel=None, progress=None):
     """Return 2D instance IDs for one pre-normalized fluorescence channel."""
     global _worker, _status
     x = np.asarray(image, dtype=np.float32)
@@ -173,7 +176,7 @@ def predict_labels(image, cellprob_threshold=0.0, cancel=None):
             with tempfile.TemporaryDirectory(prefix="fos-cellpose-") as tmp:
                 folder = Path(tmp)
                 np.save(folder/"image.npy", x, allow_pickle=False)
-                device = worker.infer(folder, cellprob_threshold, cancel)
+                device = worker.infer(folder, cellprob_threshold, cancel, progress)
                 labels = np.load(folder/"labels.npy", allow_pickle=False)
                 if labels.shape != x.shape or labels.dtype != np.int32:
                     raise ValueError("Cellpose 返回的标签尺寸或类型无效。")

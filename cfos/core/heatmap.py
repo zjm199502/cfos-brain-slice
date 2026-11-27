@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+from .atlas_choice import has_registration, STAM, current
 import numpy as np
 import pandas as pd
 
@@ -13,6 +14,8 @@ from .atlas import load_atlas, region_boundaries
 
 def ap_to_index(ap_mm: float) -> int:
     """相对 Bregma 的前后位置（mm，前为正）→ 图谱 AP 下标（与 atlas.Plane.ap_mm 的换算一致）。"""
+    if current() == STAM:
+        return int(round((5.230 - ap_mm) / .040))
     return int(round(527 - 332 - ap_mm / 0.025))
 
 
@@ -46,7 +49,7 @@ def default_ap_levels(project, n=6) -> list[float]:
     aps = []
     for im in project.images:
         for s in im.sections:
-            if s.enabled and s.registration.get("plane"):
+            if s.enabled and has_registration(s.registration):
                 try:
                     aps.append(round(R.adjusted_plane(R.Registration.from_dict(s.registration)).ap_mm() * 4) / 4)
                 except Exception:  # noqa: BLE001
