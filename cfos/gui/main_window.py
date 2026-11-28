@@ -234,6 +234,21 @@ class MainWindow(ClearResultsMixin, ProcessingScopeMixin, UpdateMixin, TeachingM
 
     def _toggle_tools(self, checked):
         self.tools_scroll.setVisible(self._layout_mode == "wide" or checked)
+        self._place_detection_params()
+
+    def _place_detection_params(self):
+        """第④步时把各通道识别参数放进“图层”框；图层框不可见（窄窗口）时留在右栏。"""
+        if not hasattr(self, "det_params"):
+            return
+        on_detection = self.stack.currentIndex() == 3
+        in_sidebar = on_detection and self.tools_scroll.isVisibleTo(self)
+        if in_sidebar:
+            self.tools_scroll.show_params(self.det_params)
+        else:
+            self.tools_scroll.show_params(None)
+            if self.det_params.parentWidget() is not self.stack.widget(3).widget():
+                self.det_params_slot.addWidget(self.det_params)
+            self.det_params.show()
 
     def _toggle_pane(self, show_image):
         single = self._layout_mode == "single"
@@ -269,6 +284,7 @@ class MainWindow(ClearResultsMixin, ProcessingScopeMixin, UpdateMixin, TeachingM
             self._ensure_unmix_for_display()
         if i == 3:
             self._sync_detection_panel()
+        self._place_detection_params()
         if i == 4:
             self._refresh_coloc_table()
         if i == 5:
@@ -318,6 +334,8 @@ class MainWindow(ClearResultsMixin, ProcessingScopeMixin, UpdateMixin, TeachingM
         self.task.finished.connect(lambda: self.coloc_controls.setEnabled(True))
         self.channel_controls.setEnabled(False)
         self.task.finished.connect(lambda: self.channel_controls.setEnabled(True))
+        self.det_params.setEnabled(False)
+        self.task.finished.connect(lambda: self.det_params.setEnabled(True))
         # A task may still be measuring the saved section geometry or display settings.
         for step in (1, 2):
             panel = self.stack.widget(step)
@@ -1786,9 +1804,17 @@ class MainWindow(ClearResultsMixin, ProcessingScopeMixin, UpdateMixin, TeachingM
                            "降低通道识别分辨率会缩小细胞的像素直径。")
         tile_hint.setWordWrap(True)
         settings_layout.addWidget(tile_hint)
-        self.det_rows = QVBoxLayout()
-        settings_layout.addLayout(self.det_rows)
         L.addWidget(self.channel_controls)
+        # 各通道识别参数：宽屏时放进左边“图层”框下方（_place_detection_params），
+        # 图层框收起时退回到这里。
+        self.det_params = QWidget()
+        self.det_rows = QVBoxLayout(self.det_params)
+        self.det_rows.setContentsMargins(0, 0, 0, 0)
+        self.det_forms = {}
+        self._det_collapsed = set()
+        self.det_params_slot = QVBoxLayout()
+        self.det_params_slot.addWidget(self.det_params)
+        L.addLayout(self.det_params_slot)
         pick = QPushButton("框选识别预览区域")
         pick.clicked.connect(self._draw_preview_box)
         clear = QPushButton("使用当前视野")
@@ -1994,6 +2020,7 @@ class MainWindow(ClearResultsMixin, ProcessingScopeMixin, UpdateMixin, TeachingM
             wd = it.widget()
             if wd is not None:
                 wd.hide(); wd.setParent(None); wd.deleteLater()
+        self.det_forms = {}
         if not self.project:
             return
         self._load_coloc_controls()
@@ -2012,7 +2039,7 @@ class MainWindow(ClearResultsMixin, ProcessingScopeMixin, UpdateMixin, TeachingM
             if c in self.project.unused_channels:
                 continue            # “② 脑片拆分”里设为不使用的通道
             p = self.project.detection.channels[c]
-            box = QGroupBox(nm); f = QFormLayout(box)
+            box, f = self._detection_channel_section(c, nm)
             on = QCheckBox("识别这个通道的细胞"); on.setChecked(p.detect)
             amin = QDoubleSpinBox(); amin.setRange(1, 5000); amin.setValue(p.min_area_um2); amin.setSuffix(" µm²")
             imin = QDoubleSpinBox(); imin.setRange(0, 65535); imin.setValue(p.min_intensity)
@@ -2080,6 +2107,38 @@ class MainWindow(ClearResultsMixin, ProcessingScopeMixin, UpdateMixin, TeachingM
             on.toggled.connect(apply)
             on.toggled.connect(self._update_tile_grid)
             self.det_rows.addWidget(box)
+
+    def _detection_channel_section(self, c, name):
+        """可折叠的单通道参数框：点标题展开/收起，折叠状态在本次运行中保留。"""
+        from qtpy.QtWidgets import QFrame, QToolButton
+        section = QWidget()
+        v = QVBoxLayout(section)
+        v.setContentsMargins(0, 2, 0, 2); v.setSpacing(0)
+        head = QToolButton()
+        head.setText(name)
+        head.setAccessibleName(f"{name} 识别参数")
+        head.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        head.setCheckable(True)
+        head.setChecked(c not in self._det_collapsed)
+        head.setArrowType(Qt.DownArrow if head.isChecked() else Qt.RightArrow)
+        head.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        head.setStyleSheet("QToolButton { font-weight: bold; text-align: left; border: none; padding: 3px; }")
+        body = QFrame()
+        body.setFrameShape(QFrame.StyledPanel)
+        form = QFormLayout(body)
+        form.setRowWrapPolicy(QFormLayout.WrapLongRows)
+        form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+        body.setVisible(head.isChecked())
+
+        def toggled(opened, c=c):
+            head.setArrowType(Qt.DownArrow if opened else Qt.RightArrow)
+            body.setVisible(opened)
+            (self._det_collapsed.discard if opened else self._det_collapsed.add)(c)
+
+        head.toggled.connect(toggled)
+        v.addWidget(head); v.addWidget(body)
+        self.det_forms[c] = form
+        return section, form
 
     def _clear_preview_box(self):
         if "识别选框" in self.viewer.layers:

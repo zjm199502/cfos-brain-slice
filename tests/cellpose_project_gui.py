@@ -48,7 +48,7 @@ def main():
         win.steps.setCurrentRow(3)
         win.show()
         app.processEvents()
-        form = win.det_rows.itemAt(0).widget().layout()
+        form = win.det_forms[0]
         params = win.project.detection.channels[0]
         assert params.model == cellpose4.MODEL_KEY
         for row in range(form.rowCount()):

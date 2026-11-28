@@ -2,7 +2,8 @@
 from qtpy.QtCore import QEvent, QSize, Qt, QTimer
 from qtpy.QtGui import QPalette, QTextLayout, QTextOption
 from qtpy.QtWidgets import (
-    QApplication, QLabel, QListView, QScrollArea, QSizePolicy, QStyle, QStyleOptionViewItem, QVBoxLayout, QWidget,
+    QApplication, QLabel, QListView, QScrollArea, QSizePolicy, QSplitter, QStyle, QStyleOptionViewItem, QVBoxLayout,
+    QWidget,
 )
 from napari._qt.containers._layer_delegate import LayerDelegate
 
@@ -129,16 +130,44 @@ class LayerNameDelegate(LayerDelegate):
 
 
 class LayerSidebar(QWidget):
+    """图层列表；在“④ 细胞识别”页下方再放各通道的识别参数（可拖动分隔条调整两者高度）。"""
+    PARAMS_WIDTH = 318
+
     def __init__(self, view):
         super().__init__()
         self.view = view
         self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
+        layers = QWidget()
+        top = QVBoxLayout(layers)
+        top.setContentsMargins(0, 0, 0, 0)
         title = QLabel("图层（点眼睛图标可显示/隐藏）")
         title.setWordWrap(True)
-        layout.addWidget(title)
-        layout.addWidget(view, 1)
+        top.addWidget(title)
+        top.addWidget(view, 1)
+        # 识别参数区：内容由主窗口放进 params_layout，只在第④步显示
+        self.params = QWidget()
+        bottom = QVBoxLayout(self.params)
+        bottom.setContentsMargins(0, 4, 0, 0)
+        params_title = QLabel("细胞识别参数（各通道，点标题可折叠）")
+        params_title.setWordWrap(True)
+        bottom.addWidget(params_title)
+        holder = QWidget()
+        self.params_layout = QVBoxLayout(holder)
+        self.params_layout.setContentsMargins(0, 0, 4, 0)
+        self.params_layout.addStretch(1)
+        self.params_scroll = PanelScroll(holder)
+        self.params_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        bottom.addWidget(self.params_scroll, 1)
+        self.params.hide()
+        self.splitter = QSplitter(Qt.Vertical)
+        self.splitter.setChildrenCollapsible(False)
+        self.splitter.addWidget(layers)
+        self.splitter.addWidget(self.params)
+        self.splitter.setStretchFactor(0, 2)
+        self.splitter.setStretchFactor(1, 3)
+        layout.addWidget(self.splitter, 1)
         view.setContextMenuPolicy(Qt.NoContextMenu)
         view.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         view.setResizeMode(QListView.Adjust)
@@ -148,8 +177,24 @@ class LayerSidebar(QWidget):
         view.setItemDelegate(self.delegate)
         self.delegate.loading_frame_changed.connect(view.viewport().update)
 
+    def show_params(self, widget):
+        """把 widget 放进参数区并显示；widget 为 None 时收起参数区。"""
+        if widget is not None:
+            if widget.parentWidget() is not self.params_scroll.widget():
+                self.params_layout.insertWidget(0, widget)
+            widget.show()
+        shown = widget is not None
+        if shown != self.params.isVisible():
+            self.params.setVisible(shown)
+            if shown:
+                total = max(1, self.splitter.height())
+                self.splitter.setSizes([max(160, total * 2 // 5), max(1, total - max(160, total * 2 // 5))])
+            self.updateGeometry()
+
     def sizeHint(self):
         fm = self.view.fontMetrics()
         scrollbar = self.style().pixelMetric(QStyle.PM_ScrollBarExtent)
-        return QSize(max(242, 112 + fm.horizontalAdvance("细胞-Far red") + scrollbar),
-                     super().sizeHint().height())
+        width = max(242, 112 + fm.horizontalAdvance("细胞-Far red") + scrollbar)
+        if self.params.isVisibleTo(self):
+            width = max(width, self.PARAMS_WIDTH)
+        return QSize(width, super().sizeHint().height())
