@@ -35,6 +35,7 @@ class Registration:
     shift_x: float = 0.0                   # 平面内平移（图像宽度的比例）
     shift_y: float = 0.0
     control_points: list = field(default_factory=list)  # [[src_s, src_t, dst_s, dst_t], ...] 归一化坐标
+    landmarks: list = field(default_factory=list)  # [[s, t, X, Y, Z], ...]：脑片归一化坐标处应显示的图谱体素坐标（深部贴合的约束）
     nonlinear: bool = False                # 是否使用 elastix 非线性贴合
     nl_method: str = ""                    # 非线性贴合实际用的方法（"轮廓 + DAPI 纹理" / "只用轮廓"；v0.7 前为空）
     warnings: list = field(default_factory=list)  # 自动配准后需要人工重点检查的原因（v0.8.5）；手动调整后清空
@@ -254,24 +255,48 @@ def _outline_warp(reg, image, mask, pixel_um):
 DEEP_ATLASES = (CCF,)   # 深部纹理贴合目前只在 CCFv3 上验证过
 
 
+def _load_warp(reg, results_dir, h, w):
+    """The saved nonlinear field, or None when there is none or it no longer fits."""
+    if not reg.nonlinear or not reg.warp_file:
+        return None
+    try:
+        warp = np.load(warp_path(results_dir, "", "", reg), allow_pickle=False)
+    except (OSError, ValueError):
+        return None
+    return warp if warp.shape == (2, h, w) else None
+
+
 def refit_outline(reg, image, mask, results_dir, pixel_um, search_plane=False):
     """外轮廓贴合，随后（CCFv3）用 DAPI 纹理贴合深部结构。
     search_plane=True 时先微调切面（前后位置、背腹/左右倾斜）；只在自动配准时使用，不覆盖手动调整过的切面。"""
+    h, w = image.shape
+    landmarks = list(reg.landmarks)
+    if reg.fit_atlas in DEEP_ATLASES and reg.control_points:
+        # 手动修正（拖动、规范点寻边）先换算成图谱坐标下的标志点，再在新的贴合里作为约束。
+        old = _load_warp(reg, results_dir, h, w)
+        landmarks += edit_landmarks(reg, w, h, old)
     warp, reg.metrics = _outline_warp(reg, image, mask, pixel_um)
     if reg.fit_atlas in DEEP_ATLASES:
         from . import deep_refine
         oi, om = orient(image, reg.orientation), orient(mask, reg.orientation)
-        if search_plane and not reg.control_points:
+        if search_plane and not reg.control_points and not landmarks:
             changed, plane_report = deep_refine.search_plane(reg, oi, om, warp, pixel_um)
             if changed:
                 for key, value in changed.items():
                     setattr(reg, key, value)
                 warp, reg.metrics = _outline_warp(reg, image, mask, pixel_um)
             reg.metrics = {**reg.metrics, "plane_search": plane_report}
-        deep, deep_report = deep_refine.refine(reg, oi, om, warp, pixel_um)
+        pairs = []
+        if landmarks:
+            px, py = plane_pixels(reg, w, h, np.asarray(landmarks, float)[:, 2:5])
+            pairs = [((L[0] * w - .5, L[1] * h - .5), (ax - .5, ay - .5)) for L, ax, ay in zip(landmarks, px, py)]
+        probe = Registration(**{**reg.__dict__, "control_points": []})
+        deep, deep_report = deep_refine.refine(probe, oi, om, warp, pixel_um, landmarks=pairs)
         reg.metrics = {**reg.metrics, "deep": deep_report}
         if deep is not None:
             warp = deep
+            if landmarks:
+                reg.landmarks, reg.control_points = landmarks, []
     reg.nonlinear = warp is not None
     reg.warp_file = save_warp(results_dir, warp, reg.fit_atlas) if reg.nonlinear else ""
     deep_ok = reg.metrics.get("deep", {}).get("accepted", False)
@@ -435,15 +460,15 @@ def similarity(ref: np.ndarray, img: np.ndarray, mask: np.ndarray) -> float:
     return float((p[nz] * np.log(p[nz] / q[nz])).sum())
 
 
-def registered_samples(reg, W, H, warp, x, y, which=("annotation", "hemispheres")):
-    """Sample the original atlas at arbitrary oriented section corner coordinates."""
-    from .atlas import SHAPE_ASR
+def atlas_points(reg, W, H, warp, x, y, edits=True):
+    """Atlas voxel coordinates (3, ...) shown at oriented section corner coordinates x, y."""
     from .edge_drag import is_fine, transport
     x, y = np.broadcast_arrays(np.asarray(x, dtype=float), np.asarray(y, dtype=float))
-    for point in reversed(reg.control_points):
+    points = reg.control_points if edits else []
+    for point in reversed(points):
         if is_fine(point):
             x, y = transport(x, y, point, W, H, inverse=True)
-    legacy = [p for p in reg.control_points if not is_fine(p)]
+    legacy = [p for p in points if not is_fine(p)]
     manual = tps_warp_cached(legacy, W, H)
     for field in (manual, warp if reg.nonlinear else None):
         if field is not None:
@@ -452,7 +477,40 @@ def registered_samples(reg, W, H, warp, x, y, which=("annotation", "hemispheres"
             y = y + ndi.map_coordinates(field[1], coords, order=1, mode="nearest")
     plane = adjusted_plane(reg)
     s, t = x / W, y / H
-    xyz = np.stack([plane.o[k] + s * plane.u[k] + t * plane.v[k] for k in range(3)])
+    return np.stack([plane.o[k] + s * plane.u[k] + t * plane.v[k] for k in range(3)])
+
+
+def plane_pixels(reg, W, H, xyz):
+    """Inverse of the affine plane: atlas voxel coordinates -> plane corner coordinates (x, y)."""
+    plane = adjusted_plane(reg)
+    A = np.stack([plane.u, plane.v], 1)
+    st, *_ = np.linalg.lstsq(A, (np.reshape(xyz, (-1, 3)) - plane.o).T, rcond=None)
+    return st[0] * W, st[1] * H
+
+
+def edit_landmarks(reg, W, H, warp, spacing=8, limit=400):
+    """Turn manual edits into landmarks [[section_s, section_t, X, Y, Z], ...] where they move the atlas.
+
+    Points are sampled on a grid; only those the edits displace by more than one pixel are kept."""
+    if not reg.control_points:
+        return []
+    ys, xs = np.mgrid[spacing / 2:H:spacing, spacing / 2:W:spacing]
+    x, y = xs.ravel(), ys.ravel()
+    edited = atlas_points(reg, W, H, warp, x, y)
+    base = atlas_points(reg, W, H, warp, x, y, edits=False)
+    bx, by = plane_pixels(reg, W, H, base.T)
+    ex, ey = plane_pixels(reg, W, H, edited.T)
+    moved = np.hypot(ex - bx, ey - by) > 1.
+    idx = np.nonzero(moved)[0]
+    if len(idx) > limit:
+        idx = idx[np.linspace(0, len(idx) - 1, limit).round().astype(int)]
+    return [[float(x[i] / W), float(y[i] / H), *map(float, edited[:, i])] for i in idx]
+
+
+def registered_samples(reg, W, H, warp, x, y, which=("annotation", "hemispheres")):
+    """Sample the original atlas at arbitrary oriented section corner coordinates."""
+    from .atlas import SHAPE_ASR
+    xyz = atlas_points(reg, W, H, warp, x, y)
     atlas = load_atlas(reg.fit_atlas)
     if reg.fit_atlas == STAM:
         coords = np.stack((-xyz[1], -xyz[2], xyz[0])) * .025

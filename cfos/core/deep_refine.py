@@ -58,37 +58,77 @@ def paint_labels(labels, density, mask, min_pixels=8):
     return synth
 
 
-def _bspline(fixed, moving, fixed2, moving2, grid_px, w_outline=.3, iters=400):
-    """Two-metric B-spline (texture NCC + outline MI); returns fixed->moving (dx, dy) in pixels."""
+def _write_points(path, points):
+    with open(path, "w", encoding="ascii") as f:
+        f.write(f"point\n{len(points)}\n")
+        for x, y in points:
+            f.write(f"{float(x):.4f} {float(y):.4f}\n")
+
+
+def _bspline(fixed, moving, fixed2, moving2, grid_px, w_outline=.3, iters=400, points=None, w_points=.5):
+    """B-spline on texture NCC + outline MI (+ landmarks); returns fixed->moving (dx, dy) in pixels.
+
+    points: [((fixed_x, fixed_y), (moving_x, moving_y)), ...] in pixel-index coordinates."""
+    import tempfile
     itk = R._itk()
     as_img = lambda a: itk.image_view_from_array(np.ascontiguousarray(a, dtype=np.float32))
     m = itk.ElastixRegistrationMethod[itk.Image[itk.F, 2], itk.Image[itk.F, 2]].New()
     m.SetFixedImage(as_img(fixed)); m.SetMovingImage(as_img(moving))
-    m.AddFixedImage(as_img(fixed2)); m.AddMovingImage(as_img(moving2))
-    # The bending-energy penalty ignores images, but multi-metric elastix needs one pair per metric.
-    m.AddFixedImage(as_img(fixed2)); m.AddMovingImage(as_img(moving2))
+    metrics = ["AdvancedNormalizedCorrelation", "AdvancedMattesMutualInformation", "TransformBendingEnergyPenalty"]
+    weights = [1. - w_outline, w_outline, .05]
+    if points:
+        metrics.append("CorrespondingPointsEuclideanDistanceMetric")
+        weights.append(w_points)
+    # Multi-metric elastix needs one image pair, interpolator, sampler and pyramid per metric,
+    # even for the bending penalty and the landmark term, which ignore the images.
+    for _ in metrics[1:]:
+        m.AddFixedImage(as_img(fixed2)); m.AddMovingImage(as_img(moving2))
     po = itk.ParameterObject.New()
     bs = po.GetDefaultParameterMap("bspline", 3, float(grid_px))
     bs["Registration"] = ["MultiMetricMultiResolutionRegistration"]
-    bs["Metric"] = ["AdvancedNormalizedCorrelation", "AdvancedMattesMutualInformation",
-                    "TransformBendingEnergyPenalty"]
-    bs["Metric0Weight"] = [str(1. - w_outline)]
-    bs["Metric1Weight"] = [str(w_outline)]
-    bs["Metric2Weight"] = ["0.05"]
+    bs["Metric"] = metrics
+    for i, w in enumerate(weights):
+        bs[f"Metric{i}Weight"] = [str(w)]
     bs["FinalGridSpacingInPhysicalUnits"] = [str(float(grid_px))]
     bs["GridSpacingSchedule"] = ["4", "2", "1"]
     bs["MaximumNumberOfIterations"] = [str(iters)]
     bs["NumberOfSpatialSamples"] = ["6000"]
-    for k, v in (("FixedImagePyramid", "FixedSmoothingImagePyramid"),
-                 ("MovingImagePyramid", "MovingSmoothingImagePyramid")):
-        bs[k] = [v] * 3
-    # Elastix wants one interpolator and sampler per metric, the bending penalty included.
-    bs["Interpolator"] = ["BSplineInterpolator"] * 3
-    bs["ImageSampler"] = ["RandomCoordinate"] * 3
+    n = len(metrics)
+    bs["FixedImagePyramid"] = ["FixedSmoothingImagePyramid"] * n
+    bs["MovingImagePyramid"] = ["MovingSmoothingImagePyramid"] * n
+    bs["Interpolator"] = ["BSplineInterpolator"] * n
+    bs["ImageSampler"] = ["RandomCoordinate"] * n
     po.AddParameterMap(bs)
     m.SetParameterObject(po); m.SetLogToConsole(False)
-    m.UpdateLargestPossibleRegion()
+    with tempfile.TemporaryDirectory(prefix="fos-landmarks-") as tmp:
+        if points:
+            _write_points(f"{tmp}/fixed.txt", [p[0] for p in points])
+            _write_points(f"{tmp}/moving.txt", [p[1] for p in points])
+            m.SetFixedPointSetFileName(f"{tmp}/fixed.txt")
+            m.SetMovingPointSetFileName(f"{tmp}/moving.txt")
+        m.UpdateLargestPossibleRegion()
     return R._deformation_field(itk, moving, m.GetTransformParameterObject())
+
+
+def invert_at(field, target, iters=30):
+    """Point q with q + field(q) = target (field is fixed->atlas, pixel-index coordinates)."""
+    target = np.asarray(target, float)
+    if field is None:
+        return target
+    q = target.copy()
+    for _ in range(iters):
+        d = np.array([ndi.map_coordinates(field[k], [[q[1]], [q[0]]], order=1, mode="nearest")[0] for k in range(2)])
+        q = target - d
+    return q
+
+
+def displaced(field, point):
+    """Atlas-plane position that a section pixel samples: x + field(x)."""
+    x = np.asarray(point, float)
+    if field is None:
+        return x
+    return x + np.array([ndi.map_coordinates(field[k], [[x[1]], [x[0]]], order=1, mode="nearest")[0]
+                         for k in range(2)])
 
 
 def compose(residual, prior):
@@ -107,12 +147,20 @@ def _ncc(a, b, m):
     return float((a * b).sum() / (np.sqrt((a * a).sum() * (b * b).sum()) + 1e-12))
 
 
-def refine(reg, image_oriented, mask_oriented, prior_warp, pixel_um):
-    """Return (warp, report).  warp is the full fixed->atlas field replacing prior_warp, or None to keep it."""
+def landmark_error(field, landmarks):
+    """Distances (pixels) between where each landmark samples the atlas and where it should."""
+    return [float(np.hypot(*(displaced(field, f) - np.asarray(a, float)))) for f, a in landmarks]
+
+
+def refine(reg, image_oriented, mask_oriented, prior_warp, pixel_um, landmarks=()):
+    """Return (warp, report).  warp is the full fixed->atlas field replacing prior_warp, or None to keep it.
+
+    landmarks: [((section_x, section_y), (atlas_x, atlas_y)), ...] in pixel-index coordinates of the
+    oriented section and of the affine atlas plane: the atlas content at atlas_xy belongs at section_xy.
+    Control points are the caller's business; reg.control_points is ignored here."""
     mask = np.asarray(mask_oriented, bool)
     H, W = mask.shape
-    if reg.control_points:
-        return None, {"accepted": False, "reason": "已有手动修正点，不做深部纹理贴合。"}
+    landmarks = [(np.asarray(f, float), np.asarray(a, float)) for f, a in landmarks]
     if mask.sum() < 1000:
         return None, {"accepted": False, "reason": "组织太小，不做深部纹理贴合。"}
     density = nuclear_density(image_oriented, mask, pixel_um)
@@ -125,14 +173,19 @@ def refine(reg, image_oriented, mask_oriented, prior_warp, pixel_um):
     synth0 = paint_labels(lab0, density, mask)
     interior = ndi.binary_erosion(mask, iterations=max(1, round(150. / pixel_um)))
     before = {"texture_ncc": _ncc(density, synth0, interior), "dice": R.dice(lab0 > 0, mask)}
+    if landmarks:
+        before["landmark_um"] = [e * pixel_um for e in landmark_error(prior_warp, landmarks)]
     fixed_outline = ndi.gaussian_filter(mask.astype(np.float32), 2)
     field, lab, synth = prior_warp, lab0, synth0
     for _ in range(ROUNDS):
         moving_outline = ndi.gaussian_filter((lab > 0).astype(np.float32), 2)
         candidate = None
+        # Landmarks in the current moving frame: the point that the current field sends to the atlas target.
+        points = [(f, invert_at(field, a)) for f, a in landmarks]
         for spacing in GRID_UM:
             try:
-                residual = _bspline(density, synth, fixed_outline, moving_outline, max(8., spacing / pixel_um))
+                residual = _bspline(density, synth, fixed_outline, moving_outline, max(8., spacing / pixel_um),
+                                    points=points)
             except (RuntimeError, ImportError) as exc:
                 return None, {"accepted": False, "reason": "深部纹理贴合失败，保留原结果。", "error": str(exc),
                               "before": before}
@@ -152,6 +205,14 @@ def refine(reg, image_oriented, mask_oriented, prior_warp, pixel_um):
         return None, {"accepted": False, "reason": "深部纹理贴合出现折叠，保留原结果。", "before": before}
     after = {"texture_ncc": _ncc(density, synth, interior), "dice": R.dice(lab > 0, mask),
              "min_jacobian": R.min_jacobian(field)}
+    if landmarks:
+        after["landmark_um"] = [e * pixel_um for e in landmark_error(field, landmarks)]
+        # Landmarks are the user's explicit decision; only reject if they are not honoured or the outline breaks.
+        ok = max(after["landmark_um"]) <= max(3 * pixel_um, 40.) and after["dice"] >= before["dice"] - .01
+        if not ok:
+            return None, {"accepted": False, "reason": "标志点没有贴合到位，保留原结果。", "before": before,
+                          "candidate": after}
+        return field, {"accepted": True, "reason": "深部纹理贴合（含标志点）", "before": before, "after": after}
     if after["texture_ncc"] <= before["texture_ncc"] + .01 or after["dice"] < before["dice"] - .005:
         return None, {"accepted": False, "reason": "深部纹理检查未通过，保留原结果。", "before": before,
                       "candidate": after}

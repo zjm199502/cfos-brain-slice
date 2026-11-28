@@ -358,6 +358,7 @@ class RegistrationMixin:
             reg.warp_file = ""
             reg.nonlinear = False  # 方向变了，原来的非线性结果不再适用
             reg.control_points = []
+            reg.landmarks = []
             self.reg_use_nl.blockSignals(True); self.reg_use_nl.setChecked(False); self.reg_use_nl.blockSignals(False)
             self._reg_draw_points(s, reg)
         reg.status = "已手动调整"
@@ -774,6 +775,7 @@ class RegistrationMixin:
         if s is None:
             return
         reg.control_points = []
+        reg.landmarks = []
         s.registration = reg.to_dict(); self.project.save()
         self._reg_draw_points(s, reg); self._reg_redraw()
 
@@ -785,6 +787,7 @@ class RegistrationMixin:
             setattr(reg, key, 0.0)
         reg.scale_x = reg.scale_y = 1.0
         reg.control_points = []
+        reg.landmarks = []
         s.registration = reg.to_dict(); self.project.save()
         self._reg_section_changed(self.reg_sec_combo.currentIndex())
 
