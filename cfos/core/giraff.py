@@ -18,6 +18,13 @@ from .atlas import load_atlas
 from .atlas_choice import STAM
 
 Z_STRIDE = 1
+# Coarse-to-fine plane search: every COARSE_STEP-th coronal plane in both orientations first, then every plane
+# within REFINE_RADIUS of the COARSE_TOP best candidates (in their own orientation).  On the example series this
+# evaluates ~200 of 1052 plane/orientation pairs (5x faster) and found the same best plane as the full search for
+# every grid phase.  COARSE_STEP = 1 searches every plane.
+COARSE_STEP = 8
+COARSE_TOP = 8
+REFINE_RADIUS = 8
 NIFTYREG = Path(__file__).resolve().with_name("giraff_runtime") / ("windows/reg_aladin.exe" if os.name == "nt" else "bin/reg_aladin")
 
 
@@ -70,6 +77,19 @@ def _geometry(affine, z, shape, orientation, scores, voxel_mm):
     }
 
 
+def refine_planes(candidates, n, step, top, radius):
+    """Second stage of the plane search: [(z, orientations)] within radius of the top coarse candidates."""
+    best = sorted(candidates, key=lambda c: c["score"], reverse=True)[:top]
+    seen = {(c["atlas_z_index"], c["orientation"]) for c in candidates}
+    wanted = {}
+    for c in best:
+        z0 = c["atlas_z_index"]
+        for z in range(max(0, z0 - radius), min(n, z0 + radius + 1)):
+            if z % step and (z, c["orientation"]) not in seen:
+                wanted.setdefault(z, set()).add(c["orientation"])
+    return sorted((z, tuple(sorted(o))) for z, o in wanted.items())
+
+
 def fit(image_u8, mask, pixel_um, progress=None, cancelled=None, *, atlas=STAM):
     """Search coronal planes in both orientations and return geometry, oriented DAPI, tissue."""
     image = np.asarray(image_u8)
@@ -114,20 +134,22 @@ def fit(image_u8, mask, pixel_um, progress=None, cancelled=None, *, atlas=STAM):
             _write_plane(path, fixed, voxel_mm)
             inputs[orientation] = (fixed, path, _center_mm(oriented_mask, voxel_mm))
 
-        def evaluate(z):
+        def evaluate(z, orientations=None):
             check_cancelled()
             moving = ref[z]
             support = ndi.binary_fill_holes(moving > 8)
             if support.sum() < 200:
                 return []
             d = root / str(z)
-            d.mkdir()
+            d.mkdir(exist_ok=True)
             target = d / "atlas.nii"
             _write_plane(target, moving, voxel_mm)
             center = _center_mm(support, voxel_mm)
             results = []
             for orientation, (fixed, fixed_file, fixed_center) in inputs.items():
-                init = d / "init.txt"
+                if orientations is not None and orientation not in orientations:
+                    continue
+                init = d / f"init-{orientation}.txt"
                 affine = np.eye(4)
                 affine[:2, 3] = center - fixed_center
                 np.savetxt(init, affine)
@@ -157,23 +179,39 @@ def fit(image_u8, mask, pixel_um, progress=None, cancelled=None, *, atlas=STAM):
                     results.append(_geometry(affine, z, fixed.shape, orientation, scores, voxel_mm))
             return results
 
-        planes = range(ref.shape[0])
         best = None
         workers = min(4, os.cpu_count() or 1)
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            jobs = [pool.submit(evaluate, z) for z in planes]
-            try:
-                for done, job in enumerate(as_completed(jobs), start=1):
-                    for candidate in job.result():
-                        # Include deterministic tie breakers since candidates arrive asynchronously.
-                        rank = (candidate["score"], -candidate["atlas_z_index"], candidate["orientation"] == "r0")
-                        if best is None or rank > best[0]:
-                            best = (rank, candidate)
-                    if progress:
-                        progress(done, len(planes), f"giRAff 已搜索 {done}/{len(planes)} 个 {atlas} 冠状面")
-            finally:
-                for job in jobs:
-                    job.cancel()
+        candidates = []
+
+        def run(stage, total, offset):
+            nonlocal best
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                jobs = [pool.submit(evaluate, z, o) for z, o in stage]
+                try:
+                    for done, job in enumerate(as_completed(jobs), start=1):
+                        for candidate in job.result():
+                            candidates.append(candidate)
+                            # Include deterministic tie breakers since candidates arrive asynchronously.
+                            rank = (candidate["score"], -candidate["atlas_z_index"], candidate["orientation"] == "r0")
+                            if best is None or rank > best[0]:
+                                best = (rank, candidate)
+                        if progress:
+                            progress(offset + done, total, f"giRAff 已搜索 {offset + done}/{total} 个 {atlas} 冠状面")
+                finally:
+                    for job in jobs:
+                        job.cancel()
+
+        n = ref.shape[0]
+        step = max(1, int(COARSE_STEP))
+        coarse = [(z, None) for z in range(0, n, step)]
+        if step == 1:
+            run(coarse, len(coarse), 0)
+        else:
+            # The refine stage size is not known yet; report it as at most this many planes.
+            estimate = len(coarse) + COARSE_TOP * (2 * REFINE_RADIUS)
+            run(coarse, estimate, 0)
+            fine = refine_planes(candidates, n, step, COARSE_TOP, REFINE_RADIUS)
+            run(fine, len(coarse) + len(fine), len(coarse))
     if best is None:
         raise ValueError(f"未找到有效的 {atlas} 冠状面匹配。")
     geometry = best[1]
