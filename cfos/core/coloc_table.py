@@ -27,6 +27,8 @@ def image_summary(project, im, channel_names, require_nucleus):
     df = project.load_cells(im)
     if df is None or df.empty or "merged_id" not in df.columns:
         return None
+    if "combo" in df.columns:
+        df = df[df["combo"].notna()]      # 共标结果已清除的脑片显示为待计算，不列入汇总
     enabled = {s.name for s in im.sections if s.enabled}
     cells = merged_cells(drop_excluded(df[df["section"].isin(enabled)], im), len(channel_names))
     cells.insert(0, "图片", im.key)
