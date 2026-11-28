@@ -36,6 +36,8 @@ class Registration:
     shift_y: float = 0.0
     control_points: list = field(default_factory=list)  # [[src_s, src_t, dst_s, dst_t], ...] 归一化坐标
     landmarks: list = field(default_factory=list)  # [[s, t, X, Y, Z], ...]：脑片归一化坐标处应显示的图谱体素坐标（深部贴合的约束）
+    base_warp_file: str = ""               # 不含标志点的自动非线性结果；删光标志点时直接回到它
+    landmark_fit: str = ""                 # "" 无标志点；"preview" 当前形变 = 自动结果 + 标志点插值；"fitted" 已按标志点精细贴合
     nonlinear: bool = False                # 是否使用 elastix 非线性贴合
     nl_method: str = ""                    # 非线性贴合实际用的方法（"轮廓 + DAPI 纹理" / "只用轮廓"；v0.7 前为空）
     warnings: list = field(default_factory=list)  # 自动配准后需要人工重点检查的原因（v0.8.5）；手动调整后清空
@@ -255,28 +257,15 @@ def _outline_warp(reg, image, mask, pixel_um):
 DEEP_ATLASES = (CCF,)   # 深部纹理贴合目前只在 CCFv3 上验证过
 
 
-def _load_warp(reg, results_dir, h, w):
-    """The saved nonlinear field, or None when there is none or it no longer fits."""
-    if not reg.nonlinear or not reg.warp_file:
-        return None
-    try:
-        warp = np.load(warp_path(results_dir, "", "", reg), allow_pickle=False)
-    except (OSError, ValueError):
-        return None
-    return warp if warp.shape == (2, h, w) else None
-
-
 def refit_outline(reg, image, mask, results_dir, pixel_um, search_plane=False, ap_bounds=None):
-    """外轮廓贴合，随后（CCFv3）用 DAPI 纹理贴合深部结构。
+    """外轮廓贴合，随后（CCFv3）用 DAPI 纹理贴合深部结构；有标志点时再以标志点为硬约束精细贴合。
     search_plane=True 时先微调切面（前后位置、背腹/左右倾斜）；只在自动配准时使用，不覆盖手动调整过的切面。
-    ap_bounds=(lo, hi)：前后微调允许的范围（体素，相对当前 ap_auto），由同一动物的切片顺序给出（series.position_series）。"""
+    ap_bounds=(lo, hi)：前后微调允许的范围（体素，相对当前 ap_auto），由同一动物的切片顺序给出（series.position_series）。
+    不含标志点的结果另存为 base_warp_file，删除标志点时不用重新贴合。返回标志点贴合的报告（没有标志点时为 None）。"""
     h, w = image.shape
-    landmarks = list(reg.landmarks)
-    if reg.fit_atlas in DEEP_ATLASES and reg.control_points:
-        # 手动修正（拖动、规范点寻边）先换算成图谱坐标下的标志点，再在新的贴合里作为约束。
-        old = _load_warp(reg, results_dir, h, w)
-        landmarks += edit_landmarks(reg, w, h, old)
+    landmarks = list(reg.landmarks) if reg.fit_atlas in DEEP_ATLASES and not reg.control_points else []
     warp, reg.metrics = _outline_warp(reg, image, mask, pixel_um)
+    landmark_report = fitted = None
     if reg.fit_atlas in DEEP_ATLASES:
         from . import deep_refine
         oi, om = orient(image, reg.orientation), orient(mask, reg.orientation)
@@ -287,22 +276,159 @@ def refit_outline(reg, image, mask, results_dir, pixel_um, search_plane=False, a
                     setattr(reg, key, value)
                 warp, reg.metrics = _outline_warp(reg, image, mask, pixel_um)
             reg.metrics = {**reg.metrics, "plane_search": plane_report}
-        pairs = []
-        if landmarks:
-            px, py = plane_pixels(reg, w, h, np.asarray(landmarks, float)[:, 2:5])
-            pairs = [((L[0] * w - .5, L[1] * h - .5), (ax - .5, ay - .5)) for L, ax, ay in zip(landmarks, px, py)]
         probe = Registration(**{**reg.__dict__, "control_points": []})
-        deep, deep_report = deep_refine.refine(probe, oi, om, warp, pixel_um, landmarks=pairs)
+        deep, deep_report = deep_refine.refine(probe, oi, om, warp, pixel_um)
         reg.metrics = {**reg.metrics, "deep": deep_report}
         if deep is not None:
             warp = deep
-            if landmarks:
-                reg.landmarks, reg.control_points = landmarks, []
-    reg.nonlinear = warp is not None
-    reg.warp_file = save_warp(results_dir, warp, reg.fit_atlas) if reg.nonlinear else ""
+        if landmarks:
+            sec, atl = landmark_pixels(reg, w, h)
+            pairs = [((x - .5, y - .5), (ax - .5, ay - .5)) for (x, y), (ax, ay) in zip(sec, atl)]
+            fitted, landmark_report = deep_refine.refine(probe, oi, om, warp, pixel_um, landmarks=pairs)
+            reg.metrics = {**reg.metrics, "landmarks": landmark_report}
+    reg.base_warp_file = save_warp(results_dir, warp, reg.fit_atlas) if warp is not None else ""
+    if landmarks and fitted is not None:
+        reg.warp_file, reg.landmark_fit, reg.nonlinear = save_warp(results_dir, fitted, reg.fit_atlas), "fitted", True
+    elif landmarks:
+        # 精细贴合没通过：保留标志点，形变用“自动结果 + 标志点插值”，和添加标志点时看到的一致。
+        field = landmark_field(reg, warp, w, h, pixel_um)
+        reg.warp_file, reg.landmark_fit, reg.nonlinear = save_warp(results_dir, field, reg.fit_atlas), "preview", True
+    else:
+        reg.warp_file, reg.landmark_fit, reg.nonlinear = reg.base_warp_file, "", warp is not None
     deep_ok = reg.metrics.get("deep", {}).get("accepted", False)
     reg.nl_method = ("轮廓 + DAPI 纹理（含深部结构）" if deep_ok else "轮廓 + DAPI 纹理") if reg.nonlinear else ""
+    if reg.landmark_fit:
+        reg.nl_method += " + 标志点" if reg.landmark_fit == "fitted" else " + 标志点插值"
     reg.warnings = [] if reg.nonlinear else [reg.metrics["reason"]]
+    return landmark_report
+
+
+# ------------------------------------------------------------------ 标志点
+LANDMARK_RADIUS_UM = 800.0   # 标志点插值的影响半径：离所有标志点超过这个距离的组织完全不动
+
+
+class LandmarkError(ValueError):
+    pass
+
+
+def landmark_pixels(reg, W, H, landmarks=None):
+    """标志点 → (脑片角点坐标 (n, 2), 当前仿射切面上对应图谱位置的角点坐标 (n, 2))，都在已校正方向的缩略图里。"""
+    L = np.asarray(reg.landmarks if landmarks is None else landmarks, float).reshape(-1, 5)
+    if not len(L):
+        return np.empty((0, 2)), np.empty((0, 2))
+    ax, ay = plane_pixels(reg, W, H, L[:, 2:5])
+    return np.column_stack((L[:, 0] * W, L[:, 1] * H)), np.column_stack((ax, ay))
+
+
+def _sample_field(field, x, y):
+    if field is None:
+        return np.zeros(len(x)), np.zeros(len(x))
+    coords = [np.asarray(y) - .5, np.asarray(x) - .5]
+    return (ndi.map_coordinates(field[0], coords, order=1, mode="nearest"),
+            ndi.map_coordinates(field[1], coords, order=1, mode="nearest"))
+
+
+def _wendland(r):
+    r = np.minimum(r, 1.0)
+    return (1 - r) ** 4 * (4 * r + 1)
+
+
+def landmark_field(reg, base, W, H, pixel_um, landmarks=None, radius_um=LANDMARK_RADIUS_UM):
+    """base（(2, H, W) 或 None）加上只在标志点附近起作用的平滑位移，使每个标志点处正好显示它的图谱位置。
+    紧支撑 Wendland 径向基函数逐点精确插值；离所有标志点超过 radius_um 的地方保持 base 不变。"""
+    sec, atl = landmark_pixels(reg, W, H, landmarks)
+    out = np.zeros((2, H, W), np.float32) if base is None else np.array(base, np.float32, copy=True)
+    if not len(sec):
+        return out
+    bx, by = _sample_field(base, sec[:, 0], sec[:, 1])
+    need = atl - sec - np.column_stack((bx, by))
+    rho = max(radius_um / pixel_um, 4.0)
+    A = _wendland(np.linalg.norm(sec[:, None] - sec[None], axis=2) / rho) + 1e-9 * np.eye(len(sec))
+    coef = np.linalg.solve(A, need)
+    lo = np.maximum(np.floor(sec.min(0) - rho).astype(int), 0)
+    hi = np.minimum(np.ceil(sec.max(0) + rho).astype(int), [W, H])
+    if np.any(hi <= lo):
+        return out
+    gx, gy = np.meshgrid(np.arange(lo[0], hi[0]) + .5, np.arange(lo[1], hi[1]) + .5)
+    win = (slice(lo[1], hi[1]), slice(lo[0], hi[0]))
+    for (cx, cy), (kx, ky) in zip(sec, coef):
+        wgt = _wendland(np.hypot(gx - cx, gy - cy) / rho)
+        out[0][win] += kx * wgt
+        out[1][win] += ky * wgt
+    return out
+
+
+def landmark_offsets_um(reg, field, W, H, pixel_um, landmarks=None):
+    """每个标志点在 field 下离目标还差多少（µm）。field 用 base_warp 时即“自动结果把它放偏了多少”。"""
+    sec, atl = landmark_pixels(reg, W, H, landmarks)
+    fx, fy = _sample_field(field, sec[:, 0], sec[:, 1])
+    return (np.hypot(sec[:, 0] + fx - atl[:, 0], sec[:, 1] + fy - atl[:, 1]) * pixel_um).tolist()
+
+
+def base_warp(reg, results_dir, W, H):
+    """不含标志点的自动非线性结果；旧项目没有单独保存时，用当前形变代替。"""
+    name = reg.base_warp_file or (reg.warp_file if reg.nonlinear else "")
+    if not name:
+        return None
+    try:
+        warp = np.load(warp_path(results_dir, "", "", Registration(fit_atlas=reg.fit_atlas, warp_file=name)),
+                       allow_pickle=False)
+    except (OSError, ValueError):
+        return None
+    return warp if warp.shape == (2, H, W) else None
+
+
+def landmark_regions(reg, landmarks=None):
+    """每个标志点在图谱里属于哪个脑区，如 "DG（左）"，用于标志点列表。"""
+    L = np.asarray(reg.landmarks if landmarks is None else landmarks, float).reshape(-1, 5)
+    if not len(L) or reg.fit_atlas != CCF:
+        return [""] * len(L)
+    from .atlas import SHAPE_ASR
+    atlas = load_atlas(reg.fit_atlas)
+    xyz = L[:, 2:5].T
+    coords = [size - 1 - xyz[k] for size, k in zip(SHAPE_ASR, (1, 2, 0))]
+    labels = ndi.map_coordinates(atlas.annotation, coords, order=0, mode="constant").astype(int)
+    hemis = ndi.map_coordinates(atlas.hemispheres, coords, order=0, mode="constant").astype(int)
+    if reg.mirror:
+        hemis = np.where(hemis == 1, 2, np.where(hemis == 2, 1, hemis))
+    out = []
+    for label, hemi in zip(labels, hemis):
+        name = atlas.structures.iloc[label - 1]["acronym"] if label > 0 else "组织外"
+        side = HEMI_NAMES.get(int(hemi), "")
+        out.append(f"{name}（{side}）" if side else str(name))
+    return out
+
+
+def landmark_atlas_xyz(reg, W, H, warp, x, y):
+    """脑片角点坐标 (x, y) 处当前显示的图谱体素坐标。"""
+    return [float(v) for v in atlas_points(reg, W, H, warp, np.array([x], float), np.array([y], float))[:, 0]]
+
+
+def set_landmarks(reg, landmarks, results_dir, W, H, pixel_um):
+    """改动标志点（添加、移动、删除，或切面变化后）并立即更新形变 = 自动结果 + 标志点插值。
+    会折叠时抛出 LandmarkError，reg 保持不变。删光标志点时直接回到自动结果。"""
+    landmarks = [list(map(float, L)) for L in landmarks]
+    if landmarks and reg.control_points:
+        raise LandmarkError("这张脑片还有旧版手动修正，请先点“移除旧版修正”。")
+    if landmarks and reg.fit_atlas not in DEEP_ATLASES:
+        raise LandmarkError("标志点目前只支持 Allen CCFv3 图谱。")
+    base = base_warp(reg, results_dir, W, H)
+    method = (reg.nl_method or "").split(" + 标志点")[0]
+    if not landmarks:
+        reg.landmarks, reg.landmark_fit = [], ""
+        reg.warp_file = reg.base_warp_file or (reg.warp_file if reg.nonlinear else "")
+        reg.nonlinear = base is not None
+        reg.nl_method = method if reg.nonlinear else ""
+        return None
+    field = landmark_field(reg, base, W, H, pixel_um, landmarks)
+    if min_jacobian(field) < .05:
+        raise LandmarkError("这个标志点和附近的标志点方向矛盾，会让组织折叠，没有加上。")
+    if not reg.base_warp_file and not reg.landmark_fit and reg.nonlinear and reg.warp_file:
+        reg.base_warp_file = reg.warp_file
+    reg.landmarks, reg.landmark_fit = landmarks, "preview"
+    reg.warp_file, reg.nonlinear = save_warp(results_dir, field, reg.fit_atlas), True
+    reg.nl_method = (method or "轮廓 + DAPI 纹理") + " + 标志点插值"
+    return field
 
 
 NL_GRIDS = (40.0, 60.0)   # B 样条控制点间距（缩略图像素），依次尝试：先 40，出现折叠再放宽到 60。
@@ -487,25 +613,6 @@ def plane_pixels(reg, W, H, xyz):
     A = np.stack([plane.u, plane.v], 1)
     st, *_ = np.linalg.lstsq(A, (np.reshape(xyz, (-1, 3)) - plane.o).T, rcond=None)
     return st[0] * W, st[1] * H
-
-
-def edit_landmarks(reg, W, H, warp, spacing=8, limit=400):
-    """Turn manual edits into landmarks [[section_s, section_t, X, Y, Z], ...] where they move the atlas.
-
-    Points are sampled on a grid; only those the edits displace by more than one pixel are kept."""
-    if not reg.control_points:
-        return []
-    ys, xs = np.mgrid[spacing / 2:H:spacing, spacing / 2:W:spacing]
-    x, y = xs.ravel(), ys.ravel()
-    edited = atlas_points(reg, W, H, warp, x, y)
-    base = atlas_points(reg, W, H, warp, x, y, edits=False)
-    bx, by = plane_pixels(reg, W, H, base.T)
-    ex, ey = plane_pixels(reg, W, H, edited.T)
-    moved = np.hypot(ex - bx, ey - by) > 1.
-    idx = np.nonzero(moved)[0]
-    if len(idx) > limit:
-        idx = idx[np.linspace(0, len(idx) - 1, limit).round().astype(int)]
-    return [[float(x[i] / W), float(y[i] / H), *map(float, edited[:, i])] for i in idx]
 
 
 def registered_samples(reg, W, H, warp, x, y, which=("annotation", "hemispheres")):

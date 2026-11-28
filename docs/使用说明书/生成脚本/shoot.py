@@ -153,7 +153,7 @@ if fresh or not s.registration.get("done", False):
 w.reg_sec_combo.setCurrentIndex(0); pump(2); hide_cells()
 w.viewer.reset_view(); pump(1)
 shot("06_配准结果"); panel("06b_配准面板")
-# 拖动修正
+# 标志点
 s, reg = w._reg_current()
 sec, ds, lab0, _ = w._reg_lab; H, W = lab0.shape
 bnd = w._reg_bnd
@@ -162,9 +162,8 @@ k = len(ys) // 2
 iy, ix = ys[k] + int(H * 0.70), xs[k] + int(W * 0.40)
 x0, y0 = s.bbox0[0] + (ix + 0.5) * ds, s.bbox0[1] + (iy + 0.5) * ds
 w.viewer.camera.center = (y0, x0); w.viewer.camera.zoom = 0.12; pump(0.5)
-shot("06c_拖动前")
-w.reg_drag_btn.setChecked(True); pump(0.5)
-w.reg_radius.setValue(8)
+shot("06c_标志点前")
+w.reg_lm_btn.setChecked(True); pump(0.5)
 dx, dy = 150 / px, 90 / px
 
 
@@ -173,7 +172,7 @@ class Ev:
 
 
 ev = Ev("mouse_press", (y0, x0))
-gen = w._reg_drag(w.viewer, ev); next(gen)
+gen = w._reg_lm_mouse(w.viewer, ev); next(gen)
 for f in (0.3, 0.6, 1.0):
     ev.type, ev.position = "mouse_move", (y0 + dy * f, x0 + dx * f)
     try:
@@ -181,16 +180,16 @@ for f in (0.3, 0.6, 1.0):
     except StopIteration:
         pass
     pump(0.1)
-shot("06d_拖动中")
+shot("06d_标志点拖动中")
 ev.type, ev.position = "mouse_release", (y0 + dy, x0 + dx)
 try:
     gen.send(None)
 except StopIteration:
     pass
 pump(2)
-shot("06e_拖动后")
-w._reg_undo_point(); pump(1)
-w.reg_drag_btn.setChecked(False); pump(0.5)
+shot("06e_标志点后")
+w._reg_lm_undo_last(); pump(1)
+w.reg_lm_btn.setChecked(False); pump(0.5)
 
 # ---- ⑦ 分组
 w.steps.setCurrentRow(6); pump(1)

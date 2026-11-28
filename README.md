@@ -171,7 +171,8 @@
 - `resources/deepslice/`：DeepSlice 小鼠模型权重和 Xception 预训练权重
 - `tests/gui_smoke.py`：无人值守地走一遍界面流程并截图
 - `tests/figure_smoke.py`：⑨ 截图制图 的界面测试（通过 `tests/run.py` 运行）
-- `tests/boundary_smoke.py`：⑥ 拖动边界手动矫正 的界面测试
+- `tests/test_landmarks.py`：⑥ 标志点（即时插值、删除、清空回到自动结果）的单元测试
+- `tests/landmark_gui_smoke.py`：⑥ 标志点 的界面测试
 
 ## 联系方式：zjm199502@163.com 
 

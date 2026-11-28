@@ -5,16 +5,16 @@ from ..core.atlas_choice import has_registration
 import numpy as np
 from .layout import fit_window
 from qtpy.QtCore import Qt, QTimer
+from qtpy.QtGui import QKeySequence
 from qtpy.QtWidgets import (
-    QCheckBox, QComboBox, QFormLayout, QGroupBox, QHBoxLayout, QLabel, QPushButton, QSlider,
-    QVBoxLayout, QWidget, QSpinBox,
+    QCheckBox, QComboBox, QFormLayout, QGroupBox, QHBoxLayout, QLabel, QListWidget, QPushButton, QShortcut,
+    QSlider, QVBoxLayout, QWidget,
 )
 
 from ..core import registration as R
 from ..core.atlas import load_atlas, region_boundaries
 from ..core.atlas_contours import registration_paths
-from ..core.edge_drag import deform_paths, is_fine, snap_path
-from ..core.guided_edge import DOT_UM, contour_edits, fluorescence_edge
+from ..core.edge_drag import deform_paths, is_fine
 from ..core.coloc import nucleus_channel
 from ..core.regions import _thumb_geometry
 from .atlas_outline import set_outline_paths
@@ -67,13 +67,6 @@ class RegistrationMixin:
         self.reg_ok_btn.clicked.connect(self._reg_mark_checked); L.addWidget(self.reg_ok_btn)
 
         box = QGroupBox("整体调整"); f = QFormLayout(box)
-        self.atlas_move = QPushButton("拖动整张图谱")
-        self.atlas_move.setCheckable(True)
-        self.atlas_move.clicked.connect(lambda on: self.canvas_tools.begin("atlas") if on else self.canvas_tools.reset())
-        f.addRow(self.atlas_move)
-        tip = QLabel("右键拖出选框可调整局部轮廓。拖框内移动，拖上方圆柄旋转，拖角点等比缩放。松开鼠标保存，Esc 返回拖图。")
-        tip.setWordWrap(True)
-        f.addRow(tip)
         self.reg_orient = QComboBox(); self.reg_orient.addItems(["正放（背侧朝上）", "倒放（旋转 180°）"])
         self.reg_orient.currentIndexChanged.connect(self._reg_param_changed)
         f.addRow("切片方向", self.reg_orient)
@@ -91,46 +84,44 @@ class RegistrationMixin:
         self.reg_use_nl = QCheckBox("使用非线性贴合")
         self.reg_use_nl.toggled.connect(self._reg_param_changed)
         f.addRow(self.reg_use_nl)
+
+        r3 = QHBoxLayout()
+        b = QPushButton("重新非线性贴合"); b.setToolTip("按现在的切面重新贴合组织轮廓和 DAPI 纹理（有标志点时一并精细贴合）。")
+        b.clicked.connect(lambda: self._reg_refit()); r3.addWidget(b)
+        b = QPushButton("恢复自动结果"); b.setToolTip("切面滑块归零，清除标志点。")
+        b.clicked.connect(self._reg_reset); r3.addWidget(b)
+        f.addRow(r3)
         L.addWidget(box)
 
-        box2 = QGroupBox("局部修正（手动矫正脑区边界）"); v2 = QVBoxLayout(box2)
-        self.reg_landmark_btn = QPushButton("连续点规范点（沿边缘单击）")
-        self.reg_landmark_btn.setCheckable(True)
-        self.reg_landmark_btn.setMinimumHeight(34)
-        self.reg_landmark_btn.setToolTip("沿同一段组织边缘按顺序单击，点的直径为 10 µm。布点后选择寻边通道并应用。")
-        self.reg_landmark_btn.toggled.connect(lambda on: self._reg_set_drag_mode(on, landmark=True))
-        v2.addWidget(self.reg_landmark_btn)
-        self._trace_clicks = []
-        trace_row = QHBoxLayout()
-        trace_row.addWidget(QLabel("寻边通道"))
-        self.reg_trace_channel = QComboBox()
-        trace_row.addWidget(self.reg_trace_channel, 1)
-        self.reg_trace_apply = QPushButton("沿点列寻边")
-        self.reg_trace_apply.setEnabled(False)
-        self.reg_trace_apply.clicked.connect(self._reg_apply_trace)
-        trace_row.addWidget(self.reg_trace_apply)
-        v2.addLayout(trace_row)
-        self.reg_drag_btn = QPushButton("拖动边界修正（按住边界线拖到正确位置）"); self.reg_drag_btn.setCheckable(True)
-        self.reg_drag_btn.setMinimumHeight(34); self.reg_drag_btn.toggled.connect(self._reg_set_drag_mode)
-        v2.addWidget(self.reg_drag_btn)
-        rr = QHBoxLayout(); rr.addWidget(QLabel("影响范围"))
-        self.reg_radius = QSpinBox()
-        self.reg_radius.setRange(10, 4000)
-        self.reg_radius.setSingleStep(10)
-        self.reg_radius.setValue(800)
-        self.reg_radius.setSuffix(" µm")
-        self.reg_radius.setToolTip("沿拖动轨迹的影响半径。放大后可输入 10 µm 微调细边。")
-        rr.addWidget(self.reg_radius, 1); v2.addLayout(rr)
+        box2 = QGroupBox("标志点（自动配准对不上时用）"); v2 = QVBoxLayout(box2)
+        tip2 = QLabel("点“添加标志点”，在白线上按住要对齐的结构（DG 尖端、CA3 末端、脑室角等），拖到它在组织上的真实位置松开。"
+                      "边界立即跟着变，统计也按新的边界算。")
+        tip2.setWordWrap(True); v2.addWidget(tip2)
+        self.reg_lm_btn = QPushButton("添加标志点"); self.reg_lm_btn.setCheckable(True); self.reg_lm_btn.setMinimumHeight(34)
+        self.reg_lm_btn.toggled.connect(self._reg_set_landmark_mode)
+        v2.addWidget(self.reg_lm_btn)
+        self.reg_lm_list = QListWidget(); self.reg_lm_list.setMaximumHeight(132); self.reg_lm_list.setVisible(False)
+        self.reg_lm_list.currentRowChanged.connect(self._reg_lm_selected)
+        QShortcut(QKeySequence.Delete, self.reg_lm_list, self._reg_lm_delete)
+        QShortcut(QKeySequence("Backspace"), self.reg_lm_list, self._reg_lm_delete)
+        v2.addWidget(self.reg_lm_list)
         r2 = QHBoxLayout()
-        b = QPushButton("撤销上一个修正"); b.clicked.connect(self._reg_undo_point); r2.addWidget(b)
-        b = QPushButton("添加修正点"); b.setToolTip("另一种方式：先在边界线上点一下加点，再切到“选择”模式把点拖走。")
-        b.clicked.connect(self._reg_add_points_mode); r2.addWidget(b)
-        b = QPushButton("清除修正点"); b.clicked.connect(self._reg_clear_points); r2.addWidget(b)
+        self.reg_lm_del = QPushButton("删除所选"); self.reg_lm_del.clicked.connect(self._reg_lm_delete); r2.addWidget(self.reg_lm_del)
+        self.reg_lm_undo = QPushButton("撤销"); self.reg_lm_undo.clicked.connect(self._reg_lm_undo_last); r2.addWidget(self.reg_lm_undo)
+        self.reg_lm_clear = QPushButton("全部清除"); self.reg_lm_clear.clicked.connect(self._reg_lm_clear); r2.addWidget(self.reg_lm_clear)
         v2.addLayout(r2)
-        r3 = QHBoxLayout()
-        b = QPushButton("重新非线性贴合"); b.clicked.connect(self._reg_refit_nonlinear); r3.addWidget(b)
-        b = QPushButton("恢复自动结果"); b.clicked.connect(self._reg_reset); r3.addWidget(b)
-        v2.addLayout(r3)
+        self.reg_lm_state = QLabel(""); self.reg_lm_state.setWordWrap(True); v2.addWidget(self.reg_lm_state)
+        self.reg_lm_fit = QPushButton("按标志点精细贴合（约 20 秒，可选）")
+        self.reg_lm_fit.setToolTip("用 DAPI 纹理让标志点之间的结构也贴合，标志点作为硬约束。不点也可以：插值结果已经生效。")
+        self.reg_lm_fit.clicked.connect(lambda: self._reg_refit("正在按标志点精细贴合…"))
+        v2.addWidget(self.reg_lm_fit)
+        self.reg_legacy = QWidget(); lay = QVBoxLayout(self.reg_legacy); lay.setContentsMargins(0, 0, 0, 0)
+        self.reg_legacy_label = QLabel(""); self.reg_legacy_label.setWordWrap(True)
+        self.reg_legacy_label.setStyleSheet("color: #c05a00;")
+        lay.addWidget(self.reg_legacy_label)
+        b = QPushButton("移除旧版修正"); b.clicked.connect(self._reg_remove_legacy); lay.addWidget(b)
+        self.reg_legacy.setVisible(False)
+        v2.addWidget(self.reg_legacy)
         L.addWidget(box2)
         bs = QPushButton("同一动物的连续切片：排序和联合校正…"); bs.clicked.connect(self.series_dialog)
         bs.setToolTip("同一个脑子的切片是用同一个角度切的。把所有切片的角度统一成中位数，可以去掉单张切片的角度误差；"
@@ -149,12 +140,15 @@ class RegistrationMixin:
         self._reg_timer = QTimer(self); self._reg_timer.setSingleShot(True)
         self._reg_timer.timeout.connect(self._reg_redraw)
         self._reg_cache = {}
-        self._ctrl_src = []
         self._reg_lab = None
-        self._reg_drag_on = False
-        self._drag = None
+        self._lm_on = False
+        self._lm_pending = None
+        self._lm_undo = []
+        self._lm_timer = QTimer(self); self._lm_timer.setSingleShot(True)
+        self._lm_timer.timeout.connect(self._reg_lm_replane)
         self.viewer.mouse_move_callbacks.append(self._reg_mouse_move)
-        self.viewer.mouse_drag_callbacks.append(self._reg_drag)
+        self.viewer.mouse_move_callbacks.append(self._reg_lm_hover)
+        self.viewer.mouse_drag_callbacks.append(self._reg_lm_mouse)
         return w
 
     # ------------------------------------------------------------ 自动配准
@@ -257,7 +251,8 @@ class RegistrationMixin:
             self.reg_sec_combo.setCurrentIndex(index)
             self._reg_section_changed(index)
         else:
-            self._reg_set_drag_mode(False)
+            self._reg_set_landmark_mode(False)
+            self._reg_lm_panel(None, R.Registration())
             self.reg_status.clear()
             self.reg_ok_btn.setVisible(False)
 
@@ -288,20 +283,12 @@ class RegistrationMixin:
         if hasattr(self, "canvas_tools"):
             self.canvas_tools.reset()
         s, reg = self._reg_current()
-        self._reg_cancel_drag()
-        self._reg_clear_trace()
-        if (s is None or not reg.done) and self._reg_drag_on:
-            self._reg_set_drag_mode(False)
+        self._lm_timer.stop()
+        if self._lm_on:
+            self._reg_set_landmark_mode(s is not None and not self._reg_lm_blocker(reg))
         if s is None:
+            self._reg_draw_landmarks(None, R.Registration())
             return
-        chan = self.reg_trace_channel
-        names = [self.ch_name(i) for i in range(len(self.slide.channels))]
-        if getattr(self, "_trace_slide", None) is not self.slide or [chan.itemText(j) for j in range(chan.count())] != names:
-            chan.clear()
-            chan.addItems(names)
-            default = next((j for j, n in enumerate(names) if "neun" in n.lower()), nucleus_channel(names))
-            chan.setCurrentIndex(default if default is not None else 0)
-            self._trace_slide = self.slide
         for j in range(self.focus_combo.count()):
             if self.focus_combo.itemData(j) == (self.image.key, s.name):
                 self.focus_combo.setCurrentIndex(j)
@@ -325,8 +312,8 @@ class RegistrationMixin:
             self._reg_slider_label(key)
         for wdg in widgets:
             wdg.blockSignals(False)
-        self._reg_draw_points(s, reg)
         self._reg_redraw()
+        self._reg_draw_landmarks(s, reg)
 
     def _reg_slider_label(self, key):
         sl, lab, step, unit = self.reg_sliders[key]
@@ -346,8 +333,8 @@ class RegistrationMixin:
         s, reg = self._reg_current()
         if s is None or not reg.done:
             return
-        self._reg_cancel_drag()
-        self._reg_clear_trace()
+        self._lm_pending = None
+        self._reg_lm_rubber(None)
         old_orient = reg.orientation
         reg.orientation = "r180" if self.reg_orient.currentIndex() == 1 else "r0"
         reg.mirror = self.reg_mirror.isChecked()
@@ -358,9 +345,10 @@ class RegistrationMixin:
             reg.warp_file = ""
             reg.nonlinear = False  # 方向变了，原来的非线性结果不再适用
             reg.control_points = []
-            reg.landmarks = []
+            reg.landmarks, reg.base_warp_file, reg.landmark_fit = [], "", ""
+            self._lm_undo = [(sec, L) for sec, L in self._lm_undo if sec is not s]
             self.reg_use_nl.blockSignals(True); self.reg_use_nl.setChecked(False); self.reg_use_nl.blockSignals(False)
-            self._reg_draw_points(s, reg)
+            self._reg_draw_landmarks(s, reg)
         reg.status = "已手动调整"
         self._reg_reviewed(reg)
         s.registration = reg.to_dict()
@@ -368,11 +356,11 @@ class RegistrationMixin:
         # Coalesce slider events while still redrawing during a long drag.
         if not self._reg_timer.isActive():
             self._reg_timer.start(60)
+        if reg.landmarks:
+            self._lm_timer.start(450)   # 滑块停下后，标志点按新切面重新插值
 
     # ------------------------------------------------------------ 显示
     def _reg_redraw(self):
-        if hasattr(self, "canvas_tools") and self.canvas_tools.mode == "atlas" and not self.canvas_tools.committing:
-            self.canvas_tools.reset()
         self._reg_timer.stop()
         s, reg = self._reg_current()
         if s is None or not reg.done:
@@ -420,7 +408,7 @@ class RegistrationMixin:
             ly = self.viewer.add_image(rgba, rgb=True, name="脑区轮廓", scale=sc, translate=tr,
                                        interpolation2d="linear", opacity=0.9)
         set_outline_paths(self.qt_viewer, ly, paths)
-        for nm in ("修正箭头", "修正点"):
+        for nm in ("标志点箭头", "标志点", "标志点（拖动中）"):
             if nm in self.viewer.layers:
                 self.viewer.layers.move(self.viewer.layers.index(nm), len(self.viewer.layers) - 1)
         ap = plane.ap_mm()
@@ -454,7 +442,9 @@ class RegistrationMixin:
         else:
             self.reg_hover.setText("鼠标所在脑区：—")
 
-    # ------------------------------------------------------------ 修正点
+    # ------------------------------------------------------------ 标志点
+    # 一个标志点 = “白线上的这个结构”（图谱体素坐标）+ “它在组织上的真实位置”（脑片归一化坐标）。
+    # 每次改动都立即更新形变（自动结果 + 标志点插值），所见即所得，统计也按它算；精细贴合是可选的。
     def _to_norm(self, s, reg, x, y):
         ds, H, W, _ = self._reg_geometry(s)
         px, py = (x - s.bbox0[0]) / ds, (y - s.bbox0[1]) / ds
@@ -469,332 +459,338 @@ class RegistrationMixin:
             px, py = W - px, H - py
         return s.bbox0[0] + px * ds, s.bbox0[1] + py * ds
 
-    def _reg_draw_points(self, s, reg):
-        for nm in ("修正点", "修正箭头"):
+    def _reg_px(self, s, reg, x, y):
+        """画布坐标 → 已校正方向的缩略图角点坐标。"""
+        ds, H, W, _ = self._reg_geometry(s)
+        u, v = self._to_norm(s, reg, x, y)
+        return u * W, v * H
+
+    def _reg_data(self, s, reg, px, py):
+        ds, H, W, _ = self._reg_geometry(s)
+        return self._from_norm(s, reg, px / W, py / H)
+
+    def _reg_pixel_um(self, s):
+        return self.slide.pixel_size_um * self._reg_geometry(s)[0]
+
+    def _reg_lm_blocker(self, reg):
+        if not reg.done:
+            return "请先自动配准。"
+        if reg.fit_atlas not in R.DEEP_ATLASES:
+            return "标志点目前只支持 Allen CCFv3 图谱。"
+        if reg.control_points:
+            return "这张脑片还有旧版手动修正，请先点“移除旧版修正”。"
+        return ""
+
+    def _reg_set_landmark_mode(self, on: bool):
+        if on:
+            s, reg = self._reg_current()
+            why = "请先选择脑片。" if s is None else self._reg_lm_blocker(reg)
+            if why:
+                self.statusBar().showMessage(why, 8000)
+                on = False
+            else:
+                self.canvas_tools.reset()
+        self._lm_on = bool(on)
+        self._lm_pending = None
+        self._reg_lm_rubber(None)
+        blocked = self.reg_lm_btn.blockSignals(True)
+        self.reg_lm_btn.setChecked(self._lm_on)
+        self.reg_lm_btn.blockSignals(blocked)
+        # napari 的画面平移开关跟着当前图层走，所以图层和相机都要设
+        for nm in ("标志点", "标志点箭头"):
+            if nm in self.viewer.layers:
+                self.viewer.layers[nm].mouse_pan = not self._lm_on
+        self.viewer.camera.mouse_pan = not self._lm_on
+        if self._lm_on:
+            self.statusBar().showMessage("在白线上按住要对齐的结构，拖到它在组织上的真实位置松开；"
+                                         "也可以先点白线、再点组织。拖动已有的标志点可以挪位置。再点一次按钮或按 Esc 退出。", 20000)
+
+    def _reg_lm_rubber(self, line):
+        """拖动或等待第二下单击时的提示线（画布坐标 (x, y) 两点）。"""
+        if line is None:
+            if "标志点（拖动中）" in self.viewer.layers:
+                self.viewer.layers.remove("标志点（拖动中）")
+            return
+        (x0, y0), (x1, y1) = line
+        data = [np.array([[y0, x0], [y1, x1]], float)]
+        if "标志点（拖动中）" in self.viewer.layers:
+            self.viewer.layers["标志点（拖动中）"].data = data
+        else:
+            lw = max(2.0, 10 / self.slide.pixel_size_um)
+            layer = self.viewer.add_shapes(data, shape_type="line", name="标志点（拖动中）", edge_color="#2ee6d6",
+                                           edge_width=lw, opacity=.95)
+            layer.mouse_pan = False
+            self.viewer.layers.selection.active = self.viewer.layers[self.image_layers[0].name] \
+                if self.image_layers and self.image_layers[0] in self.viewer.layers else layer
+
+    def _reg_lm_targets(self, s, reg):
+        ds, H, W, _ = self._reg_geometry(s)
+        sec, _ = R.landmark_pixels(reg, W, H)
+        return [self._reg_data(s, reg, x, y) for x, y in sec]
+
+    def _reg_lm_hit(self, s, reg, x, y, tol):
+        best, bd = None, tol
+        for i, (tx, ty) in enumerate(self._reg_lm_targets(s, reg)):
+            d = float(np.hypot(tx - x, ty - y))
+            if d <= bd:
+                best, bd = i, d
+        return best
+
+    def _reg_lm_mouse(self, viewer, event):
+        if not self._lm_on or self.stack.currentIndex() != 5 or getattr(event, "button", 1) != 1:
+            return
+        s, reg = self._reg_current()
+        if s is None or self._reg_lm_blocker(reg):
+            return
+        if self._reg_timer.isActive():
+            self._reg_redraw()
+        ds, H, W, _ = self._reg_geometry(s)
+        y0, x0 = event.position[-2], event.position[-1]
+        px, py = self._reg_px(s, reg, x0, y0)
+        if not (0 <= px < W and 0 <= py < H):
+            return
+        tol = 10.0 / max(float(viewer.camera.zoom), 1e-9)   # 屏幕上 10 个像素
+        hit = self._reg_lm_hit(s, reg, x0, y0, tol)
+        start = self._lm_pending if self._lm_pending is not None and hit is None else (x0, y0)
+        moved = False
+        yield
+        while event.type == "mouse_move":
+            x1, y1 = event.position[-1], event.position[-2]
+            moved = moved or np.hypot(x1 - x0, y1 - y0) > tol / 2
+            if hit is not None:
+                tx, ty = self._reg_lm_targets(s, reg)[hit]
+                self._reg_lm_rubber(((tx, ty), (x1, y1)))
+            elif moved or self._lm_pending is not None:
+                self._reg_lm_rubber((start, (x1, y1)))
+            yield
+        x1, y1 = event.position[-1], event.position[-2]
+        self._reg_lm_rubber(None)
+        if hit is not None:
+            if moved:
+                self._reg_lm_move(s, reg, hit, x1, y1)
+            else:
+                self.reg_lm_list.setCurrentRow(hit)
+            return
+        if self._lm_pending is not None:
+            self._lm_pending = None
+            self._reg_lm_add(s, reg, start, (x1, y1) if moved else (x0, y0))
+        elif moved:
+            self._reg_lm_add(s, reg, (x0, y0), (x1, y1))
+        else:
+            self._lm_pending = (x0, y0)
+            self._reg_lm_rubber(((x0, y0), (x0, y0)))
+            self.statusBar().showMessage("再点它在组织上的真实位置（Esc 取消）。", 15000)
+
+    def _reg_lm_hover(self, viewer, event):
+        if self._lm_on and self._lm_pending is not None and self.stack.currentIndex() == 5:
+            self._reg_lm_rubber((self._lm_pending, (event.position[-1], event.position[-2])))
+
+    def _reg_lm_add(self, s, reg, src, dst):
+        ds, H, W, warp = self._reg_geometry(s)
+        sx, sy = self._reg_px(s, reg, *src)
+        tx, ty = self._reg_px(s, reg, *dst)
+        if not (0 <= tx < W and 0 <= ty < H):
+            self.statusBar().showMessage("真实位置要点在这张脑片里面。", 6000)
+            return
+        if np.hypot(tx - sx, ty - sy) * self._reg_pixel_um(s) < 4:
+            self.statusBar().showMessage("白线已经在这个位置上了，不需要标志点。", 6000)
+            return
+        xyz = R.landmark_atlas_xyz(reg, W, H, None if warp is None else np.stack(warp), sx, sy)
+        new = [*reg.landmarks, [tx / W, ty / H, *xyz]]
+        self._reg_lm_commit(s, reg, new, f"已添加第 {len(new)} 个标志点，边界已更新。", select=len(new) - 1)
+
+    def _reg_lm_move(self, s, reg, i, x, y):
+        ds, H, W, _ = self._reg_geometry(s)
+        tx, ty = self._reg_px(s, reg, x, y)
+        if not (0 <= tx < W and 0 <= ty < H):
+            return
+        new = [list(L) for L in reg.landmarks]
+        new[i][0:2] = [tx / W, ty / H]
+        self._reg_lm_commit(s, reg, new, f"已移动标志点 {i + 1}。", select=i)
+
+    def _reg_lm_commit(self, s, reg, landmarks, message, select=None, undo=True):
+        ds, H, W, _ = self._reg_geometry(s)
+        before = [list(L) for L in reg.landmarks]
+        try:
+            R.set_landmarks(reg, landmarks, self.project.results_dir, W, H, self._reg_pixel_um(s))
+        except R.LandmarkError as exc:
+            self.statusBar().showMessage(str(exc), 10000)
+            self._reg_draw_landmarks(s, reg)
+            return False
+        if undo:
+            self._lm_undo = [*self._lm_undo[-49:], (s, before)]
+        reg.status = "已手动调整"
+        self._reg_reviewed(reg)
+        s.registration = reg.to_dict()
+        self._save_later()
+        # 每次改动都会生成新的位移场文件；只留这张脑片当前用的那份缓存
+        self._reg_cache = {k: v for k, v in self._reg_cache.items()
+                           if k[1:3] != (self.image.key, s.name) or k[4] == reg.warp_file}
+        self._reg_redraw()
+        self._reg_draw_landmarks(s, reg, select)
+        self.statusBar().showMessage(message, 8000)
+        return True
+
+    def _reg_draw_landmarks(self, s, reg, select=None):
+        for nm in ("标志点", "标志点箭头"):
             if nm in self.viewer.layers:
                 self.viewer.layers.remove(nm)
-        pts, lines, self._ctrl_src = [], [], []
-        for cp in reg.control_points:
-            if len(cp) >= 8:  # a fitted contour is edited and undone as one unit
-                continue
-            ss, tt, ds_, dt = cp[:4]
-            x, y = self._from_norm(s, reg, ds_, dt)
-            sx, sy = self._from_norm(s, reg, ss, tt)
-            pts.append([y, x]); self._ctrl_src.append((ss, tt, *cp[4:]))
-            lines.append(np.array([[sy, sx], [y, x]], float))
-        lw = max(2.0, 12 / self.slide.pixel_size_um)
-        kw = dict(name="修正箭头", shape_type="line", edge_color="#ff3b30", edge_width=lw, opacity=0.9)
-        arrows = self.viewer.add_shapes(lines, **kw) if lines else self.viewer.add_shapes(ndim=2, **kw)
-        arrows.editable = False
-        size = DOT_UM / self.slide.pixel_size_um
-        layer = self.viewer.add_points(np.array(pts).reshape(-1, 2), name="修正点", size=size,
-                                       face_color="#ff3b30", border_color="white")
-        layer.events.data.connect(self._reg_points_changed)
-        if getattr(self, "_reg_drag_on", False):
-            layer.mode = "pan_zoom"; layer.mouse_pan = False   # 拖动模式下，鼠标拖动用来拖边界，不平移画面
-        self.viewer.layers.selection.active = layer
-
-    def _reg_clear_trace(self):
-        self._trace_clicks.clear()
-        if "规范点" in self.viewer.layers:
-            self.viewer.layers.remove("规范点")
-        self.reg_trace_apply.setEnabled(False)
-        self.reg_trace_apply.setText("沿点列寻边")
-
-    def _reg_plot_trace(self):
-        clicks = np.asarray(self._trace_clicks)
-        if not len(clicks):
-            self._reg_clear_trace()
+        self._reg_lm_panel(s, reg, select)
+        if s is None or not reg.done or not reg.landmarks:
             return
-        if "规范点" not in self.viewer.layers:
-            layer = self.viewer.add_points(clicks[:, ::-1], name="规范点", size=DOT_UM/self.slide.pixel_size_um,
-                                           face_color="#36e5d1", border_color="white", border_width=.08)
-            layer.editable = False
-            layer.mouse_pan = False
-        else:
-            self.viewer.layers["规范点"].data = clicks[:, ::-1]
-        self.reg_trace_apply.setEnabled(len(clicks) >= 2)
-        self.reg_trace_apply.setText(f"沿点列寻边（{len(clicks)} 点）")
-
-    def _reg_add_trace_click(self, x, y):
-        s, reg = self._reg_current()
-        if s is None or not reg.done or self._reg_lab is None or self._reg_lab[0] is not s:
-            return
-        bx, by, width, height = s.bbox0
-        if not (bx <= x < bx+width and by <= y < by+height):
-            return
-        if self._trace_clicks and np.linalg.norm(np.array([x, y])-self._trace_clicks[-1])*self.slide.pixel_size_um < DOT_UM/2:
-            return
-        self._trace_clicks.append((x, y))
-        self._reg_plot_trace()
-
-    def _reg_apply_trace(self):
-        s, reg = self._reg_current()
-        if s is None or not reg.done or len(self._trace_clicks) < 2:
-            return
-        if self._reg_timer.isActive():
-            self._reg_redraw()
-        if "脑区轮廓" not in self.viewer.layers or not self.viewer.layers["脑区轮廓"].visible:
-            self.statusBar().showMessage("请先显示脑区轮廓。", 6000)
-            return
-        ds, H, W, _ = self._reg_geometry(s)
+        ds, H, W, warp = self._reg_geometry(s)
+        sec, atl = R.landmark_pixels(reg, W, H)
+        base = R.base_warp(reg, self.project.results_dir, W, H)
+        from ..core.deep_refine import invert_at
+        points, lines = [], []
+        for (x, y), (ax, ay) in zip(sec, atl):
+            tx, ty = self._reg_data(s, reg, x, y)
+            # 箭头从“自动结果把这个结构画在哪里”指向“它真实在哪里”
+            qx, qy = invert_at(base, (ax - .5, ay - .5)) + .5
+            fx, fy = self._reg_data(s, reg, qx, qy)
+            points.append([ty, tx])
+            lines.append(np.array([[fy, fx], [ty, tx]], float))
+        lw = max(2.0, 10 / self.slide.pixel_size_um)
+        arrows = self.viewer.add_shapes(lines, shape_type="line", name="标志点箭头", edge_color="#ffb000",
+                                        edge_width=lw, opacity=.85)
+        size = max(6 * ds, 40 / self.slide.pixel_size_um)
+        colors = ["#ff4d1f" if i == select else "#ffb000" for i in range(len(points))]
+        layer = self.viewer.add_points(np.array(points), name="标志点", size=size, face_color=colors,
+                                       border_color="white", features={"n": [str(i + 1) for i in range(len(points))]},
+                                       text={"string": "{n}", "color": "white", "size": 10, "anchor": "upper_left"})
         try:
-            curve = fluorescence_edge(self.slide, self._trace_clicks, self.reg_trace_channel.currentIndex(), s.bbox0)
-            edits = contour_edits(self._reg_paths, (curve-s.bbox0[:2])/ds, W, H, ds*self.slide.pixel_size_um,
-                                  self.reg_radius.value(), reg.orientation == "r180", reg.control_points)
-        except ValueError as exc:
-            self.statusBar().showMessage(str(exc), 12000)
-            return
-        if not edits:
-            self.statusBar().showMessage("这段边界已贴近点列。", 6000)
-            return
-        reg.control_points = [*reg.control_points, *edits]
-        reg.status = "已按规范点寻边"
-        self._reg_reviewed(reg)
-        s.registration = reg.to_dict()
-        self._save_later()
-        self._reg_clear_trace()
-        self._reg_draw_points(s, reg)
-        self._reg_redraw()
-        self.statusBar().showMessage("这段轮廓已更新。可继续点下一段，也可撤销整段。", 8000)
+            layer.canvas_size_limits = (9, 24)   # 缩小看全片时也看得见，放大时不挡住组织
+        except (AttributeError, ValueError):
+            pass
+        for ly in (arrows, layer):
+            ly.mouse_pan = not self._lm_on
+        active = self.image_layers[0] if self.image_layers and self.image_layers[0] in self.viewer.layers else None
+        if active is not None:
+            self.viewer.layers.selection.active = active
 
-    def _reg_radius_norm(self, s):
-        """当前“影响范围”（µm）→ 以缩略图宽度为单位的半径。"""
-        ds, H, W, _ = self._reg_geometry(s)
-        return self.reg_radius.value() / (self.slide.pixel_size_um * ds) / W
-
-    # ---------------------------------------------------------- 拖动边界
-    def _reg_cancel_drag(self):
-        self._drag = None
-        if "拖动中" in self.viewer.layers:
-            self.viewer.layers.remove("拖动中")
-
-    def _reg_set_drag_mode(self, on: bool, landmark=False):
-        if on:
-            self.canvas_tools.reset()
-        self._reg_cancel_drag()
-        self._reg_clear_trace()
-        self._reg_drag_on = bool(on)
-        for button, active in ((self.reg_landmark_btn, on and landmark), (self.reg_drag_btn, on and not landmark)):
-            blocked = button.blockSignals(True)
-            button.setChecked(active)
-            button.blockSignals(blocked)
-        # napari 的画面平移开关跟着当前图层走，所以要设在图层上
-        if "修正点" in self.viewer.layers:
-            self.viewer.layers["修正点"].mouse_pan = not self._reg_drag_on
-        self.viewer.camera.mouse_pan = not self._reg_drag_on
-        if self._reg_drag_on:
-            s, reg = self._reg_current()
-            if s is None or not reg.done:
-                self.info("请先自动配准。"); self._reg_set_drag_mode(False); return
-            if "修正点" not in self.viewer.layers:
-                self._reg_draw_points(s, reg)
-            layer = self.viewer.layers["修正点"]; layer.mode = "pan_zoom"; layer.mouse_pan = False
-            self.viewer.layers.selection.active = layer
-            self.viewer.camera.mouse_pan = False
-            message = ("沿同一段组织边缘依次单击，再点“沿点列寻边”；撤销可移去最后一个点。"
-                       if landmark else "按住白色边界线，拖到正确位置后松开。")
-            self.statusBar().showMessage(message + "滚轮可缩放，再点一次按钮退出。", 20000)
-        else:
-            self.statusBar().showMessage("已退出边界修正。", 4000)
-
-    def _reg_drag(self, viewer, event):
-        if not self._reg_drag_on or self.stack.currentIndex() != 5 or getattr(event, "button", 1) != 1:
-            return
-        pos = event.position
-        if self.reg_landmark_btn.isChecked():
-            self._reg_add_trace_click(pos[-1], pos[-2])
-            return
-        if self._reg_begin_drag(pos[-1], pos[-2]) is None:
-            return
-        stroke = self._drag
-        yield
-        while self._drag is stroke and event.type == "mouse_move":
-            p = event.position
-            self._reg_update_drag(p[-1], p[-2])
-            yield
-        if self._drag is stroke:
-            p = event.position
-            self._reg_end_drag(p[-1], p[-2])
-
-    def _reg_begin_drag(self, x, y):
-        """Project onto the currently displayed outline in this section."""
-        s, reg = self._reg_current()
-        if s is None or not reg.done:
-            return None
-        if self._reg_timer.isActive():
-            self._reg_redraw()
-        if self._reg_lab is None or self._reg_lab[0] is not s or "脑区轮廓" not in self.viewer.layers:
-            return None
-        if not self.viewer.layers["脑区轮廓"].visible:
-            self.statusBar().showMessage("请先显示脑区轮廓。", 4000)
-            return None
-        _, ds, lab, _ = self._reg_lab
-        H, W = lab.shape
-        ix, iy = (x - s.bbox0[0]) / ds, (y - s.bbox0[1]) / ds
-        if not (0 <= iy < H and 0 <= ix < W):
-            return None
-        radius_um = self.reg_radius.value()
-        tol = min(150., radius_um) / (self.slide.pixel_size_um * ds)
-        hit = snap_path(self._reg_paths, ix, iy, tol)
-        if hit is None:
-            self.statusBar().showMessage("请放大后按住要移动的白色轮廓线。", 4000)
-            return None
-        sx, sy = s.bbox0[0] + hit[0]*ds, s.bbox0[1] + hit[1]*ds
-        self._drag = {"src": (sx, sy), "press": (x, y), "section": s}
-        lw = min(8., radius_um * .12) / self.slide.pixel_size_um
-        if "拖动中" in self.viewer.layers:
-            self.viewer.layers.remove("拖动中")
-        self.viewer.add_shapes(self._drag_shapes(sx, sy, sx, sy), shape_type=["line", "ellipse"], name="拖动中",
-                               edge_color="#2ee6d6", face_color="transparent", edge_width=lw)
-        self.viewer.layers.selection.active = self.viewer.layers["修正点"]
-        return sx, sy
-
-    def _reg_update_drag(self, x, y):
-        if self._drag is None or "拖动中" not in self.viewer.layers:
-            return
-        sx, sy = self._drag["src"]
-        px, py = self._drag["press"]
-        self.viewer.layers["拖动中"].data = self._drag_shapes(sx, sy, sx+x-px, sy+y-py)
-
-    def _drag_shapes(self, sx, sy, x, y):
-        """拖动时的提示：起点到当前位置的线 + 以当前位置为中心的“影响范围”圆。"""
-        r = self.reg_radius.value() / self.slide.pixel_size_um
-        return [np.array([[sy, sx], [y, x]], float), np.array([[y-r,x-r],[y-r,x+r],[y+r,x+r],[y+r,x-r]])]
-
-    def _reg_end_drag(self, x, y):
-        if self._drag is None:
-            return
-        stroke = self._drag
-        sx, sy = stroke["src"]
-        px, py = stroke["press"]
-        self._reg_cancel_drag()
-        s, reg = self._reg_current()
-        if s is not stroke["section"] or not reg.done:
-            return
-        x, y = sx + (x-px), sy + (y-py)
-        if np.hypot(x-sx, y-sy) * self.slide.pixel_size_um < min(2., self.reg_radius.value()/8):
-            return
-        ss, tt = self._to_norm(s, reg, sx, sy)
-        u, v = self._to_norm(s, reg, x, y)
-        point = [float(ss), float(tt), float(u), float(v), float(self._reg_radius_norm(s)), 2]
-        reg.control_points = [*reg.control_points, point]
-        reg.status = "已手动调整"
-        self._reg_reviewed(reg)
-        s.registration = reg.to_dict()
-        self._save_later()
-        self._reg_draw_points(s, reg)
-        self._reg_redraw()
-        self.viewer.layers.selection.active = self.viewer.layers["修正点"]
-        self.statusBar().showMessage(f"已添加第 {len(reg.control_points)} 个修正，边界已更新。统计、导出和截图都会按修正后的边界计算。", 8000)
-
-    def _reg_undo_point(self):
-        if self._trace_clicks:
-            self._trace_clicks.pop()
-            self._reg_plot_trace()
-            return
-        s, reg = self._reg_current()
-        if s is None or not reg.control_points:
-            return
-        last = reg.control_points[-1]
-        reg.control_points = ([p for p in reg.control_points if len(p) < 8 or p[7] != last[7]]
-                              if len(last) > 7 else reg.control_points[:-1])
-        reg.status = "已手动调整" if reg.control_points else "已配准"
-        s.registration = reg.to_dict(); self.project.save()
-        self._reg_draw_points(s, reg); self._reg_redraw()
-
-    def _reg_add_points_mode(self):
-        self.canvas_tools.reset()
-        s, reg = self._reg_current()
-        if s is None or not reg.done:
-            self.info("请先自动配准。")
-            return
-        if self._reg_drag_on:
-            self._reg_set_drag_mode(False)
-        if "修正点" not in self.viewer.layers:
-            self._reg_draw_points(s, reg)
-        layer = self.viewer.layers["修正点"]
-        self.viewer.layers.selection.active = layer
-        layer.mode = "add"
-        self.statusBar().showMessage("在需要修正的边界线上点一下添加修正点；然后切到“选择”模式（按 S 键），把点拖到正确位置。", 15000)
-
-    def _reg_points_changed(self, event):
-        s, reg = self._reg_current()
-        if s is None:
-            return
-        layer = self.viewer.layers["修正点"]
-        action = getattr(event, "action", None)
-        action = str(getattr(action, "value", action))
-        data = layer.data
-        rad = self._reg_radius_norm(s)
-        saved = list(reg.control_points)
-        if action == "added":
-            for i in range(len(self._ctrl_src), len(data)):
-                y, x = data[i][-2], data[i][-1]
-                self._ctrl_src.append(self._to_norm(s, reg, x, y) + (rad, 2))
-        elif action == "removed":
-            idx = sorted(getattr(event, "data_indices", ()) or ())
-            manual = [i for i, p in enumerate(saved) if len(p) < 8]
-            for i in reversed(idx):
-                if 0 <= i < len(self._ctrl_src):
-                    self._ctrl_src.pop(i)
-                    saved.pop(manual[i])
-        elif action not in ("changed",):
-            return
-        self._ctrl_src = self._ctrl_src[:len(data)]
-        while len(self._ctrl_src) < len(data):
-            y, x = data[len(self._ctrl_src)][-2:]
-            self._ctrl_src.append(self._to_norm(s, reg, x, y) + (rad, 2))
-        cps = []
-        for (ss, tt, *extra), p in zip(self._ctrl_src, data):
-            u, v = self._to_norm(s, reg, p[-1], p[-2])
-            cps.append([float(ss), float(tt), float(u), float(v)] + extra)
-        # 箭头跟着点走
-        if "修正箭头" in self.viewer.layers:
-            lines = []
-            for (ss, tt, *_), p in zip(self._ctrl_src, data):
-                sx, sy = self._from_norm(s, reg, ss, tt)
-                lines.append(np.array([[sy, sx], [p[-2], p[-1]]], float))
+    def _reg_lm_panel(self, s, reg, select=None):
+        """标志点列表、状态说明和按钮可用状态。"""
+        lst = self.reg_lm_list
+        lst.blockSignals(True)
+        lst.clear()
+        n = len(reg.landmarks) if s is not None and reg.done else 0
+        legacy = len(reg.control_points) if s is not None else 0
+        self.reg_legacy.setVisible(bool(legacy))
+        self.reg_legacy_label.setText(f"这张脑片有 {legacy} 处旧版手动修正，仍然生效。要用标志点，请先移除。")
+        if n:
+            ds, H, W, warp = self._reg_geometry(s)
+            pixel_um = self._reg_pixel_um(s)
+            base = R.base_warp(reg, self.project.results_dir, W, H)
+            offsets = R.landmark_offsets_um(reg, base, W, H, pixel_um)
+            residual = R.landmark_offsets_um(reg, None if warp is None else np.stack(warp), W, H, pixel_um)
             try:
-                self.viewer.layers["修正箭头"].data = lines
-            except Exception:  # noqa: BLE001
-                pass
-        # Preserve the order of fitted contours interleaved with editable manual points.
-        manual = iter(cps)
-        reg.control_points = [p if len(p) >= 8 else next(manual) for p in saved]
-        reg.control_points.extend(manual)
-        reg.status = "已手动调整"
-        self._reg_reviewed(reg)
-        s.registration = reg.to_dict()
-        self._save_later()
-        self._reg_timer.start(200)
+                names = R.landmark_regions(reg)
+            except (OSError, ValueError, FileNotFoundError):
+                names = [""] * n
+            for i in range(n):
+                text = f"{i + 1}.  {names[i] or '—'}　自动结果偏了 {offsets[i]:.0f} µm"
+                if reg.landmark_fit == "fitted":
+                    text += f"，现在差 {residual[i]:.0f} µm"
+                lst.addItem(text)
+            if select is not None and 0 <= select < n:
+                lst.setCurrentRow(select)
+            if reg.landmark_fit == "fitted":
+                state = f"{n} 个标志点，已按 DAPI 纹理精细贴合（标志点最大偏差 {max(residual):.0f} µm）。"
+            else:
+                state = (f"{n} 个标志点，边界已按标志点插值更新，统计按现在的边界计算。"
+                         "需要标志点之间的结构也贴合 DAPI 时，点“按标志点精细贴合”。")
+        else:
+            state = ("自动配准对不上的地方（组织变形、CA1/CA3 交界、切面定位失败）才需要标志点。"
+                     if not legacy else "")
+        lst.blockSignals(False)
+        lst.setVisible(bool(n))
+        self.reg_lm_state.setText(state)
+        for b in (self.reg_lm_del, self.reg_lm_clear):
+            b.setEnabled(bool(n))
+        self.reg_lm_undo.setEnabled(any(sec is s for sec, _ in self._lm_undo))
+        self.reg_lm_fit.setEnabled(bool(n) and reg.landmark_fit != "fitted")
 
-    def _reg_clear_points(self):
-        self._reg_clear_trace()
+    def _reg_lm_selected(self, row):
+        s, reg = self._reg_current()
+        if s is None or not (0 <= row < len(reg.landmarks)):
+            return
+        self._reg_draw_landmarks(s, reg, row)
+        x, y = self._reg_lm_targets(s, reg)[row]
+        cam = self.viewer.camera
+        cam.center = (*tuple(cam.center)[:-2], y, x)
+
+    def _reg_lm_delete(self):
+        s, reg = self._reg_current()
+        row = self.reg_lm_list.currentRow()
+        if s is None or not (0 <= row < len(reg.landmarks)):
+            self.statusBar().showMessage("先在列表里选中要删除的标志点。", 5000)
+            return
+        new = [L for i, L in enumerate(reg.landmarks) if i != row]
+        self._reg_lm_commit(s, reg, new, f"已删除标志点 {row + 1}，边界已更新。",
+                            select=min(row, len(new) - 1) if new else None)
+
+    def _reg_lm_clear(self):
+        s, reg = self._reg_current()
+        if s is None or not reg.landmarks:
+            return
+        self._reg_lm_commit(s, reg, [], "已清除全部标志点，边界回到自动结果（可撤销）。")
+
+    def _reg_lm_undo_last(self):
+        s, reg = self._reg_current()
+        for i in range(len(self._lm_undo) - 1, -1, -1):
+            sec, landmarks = self._lm_undo[i]
+            if sec is s:
+                del self._lm_undo[i]
+                self._reg_lm_commit(s, reg, landmarks, "已撤销上一步。", undo=False)
+                return
+        self.statusBar().showMessage("没有可撤销的标志点操作。", 5000)
+
+    def _reg_lm_replane(self):
+        """切面滑块停下后，标志点按新切面重新插值（标志点存的是图谱坐标，不会丢）。"""
+        s, reg = self._reg_current()
+        if s is None or not reg.done or not reg.landmarks or self._reg_lm_blocker(reg):
+            return
+        fitted = reg.landmark_fit == "fitted"
+        ok = self._reg_lm_commit(s, reg, reg.landmarks, "标志点已按新的切面更新。", undo=False)
+        if ok and fitted:
+            self.statusBar().showMessage("切面变了，标志点改用插值；需要时再点“按标志点精细贴合”。", 10000)
+
+    def _reg_remove_legacy(self):
         s, reg = self._reg_current()
         if s is None:
             return
         reg.control_points = []
-        reg.landmarks = []
+        reg.status = "已手动调整"
         s.registration = reg.to_dict(); self.project.save()
-        self._reg_draw_points(s, reg); self._reg_redraw()
+        self._reg_redraw(); self._reg_draw_landmarks(s, reg)
+        self.statusBar().showMessage("已移除旧版手动修正，现在可以添加标志点。", 8000)
 
     def _reg_reset(self):
+        """恢复自动结果：切面滑块归零，清除标志点和旧版修正。切面动过时重新贴合，让形变也回到自动结果。"""
         s, reg = self._reg_current()
         if s is None or not reg.done:
             return
-        for key in ("ap_shift", "tilt_dv", "tilt_ml", "rotation", "shift_x", "shift_y"):
+        keys = ("ap_shift", "tilt_dv", "tilt_ml", "rotation", "shift_x", "shift_y")
+        moved = any(getattr(reg, k) for k in keys) or (reg.scale_x, reg.scale_y) != (1.0, 1.0)
+        for key in keys:
             setattr(reg, key, 0.0)
         reg.scale_x = reg.scale_y = 1.0
         reg.control_points = []
-        reg.landmarks = []
+        ds, H, W, _ = self._reg_geometry(s)
+        R.set_landmarks(reg, [], self.project.results_dir, W, H, self._reg_pixel_um(s))
+        self._lm_undo = [(sec, L) for sec, L in self._lm_undo if sec is not s]
         s.registration = reg.to_dict(); self.project.save()
         self._reg_section_changed(self.reg_sec_combo.currentIndex())
+        if moved and reg.nonlinear:
+            self._reg_refit(label="正在恢复自动结果…")
+        else:
+            self.statusBar().showMessage("已恢复自动结果。", 6000)
 
-    def _reg_refit_nonlinear(self):
+    def _reg_refit(self, label="正在非线性贴合…"):
         s, reg = self._reg_current()
         if s is None or not reg.done:
             return
+        self._reg_set_landmark_mode(False)
         nuc = nucleus_channel(self.project.channel_names)
         project, image = self.project, self.image
 
@@ -805,16 +801,24 @@ class RegistrationMixin:
                 pixel_um = sl.pixel_size_um * ds
             finally:
                 sl.close()
-            R.refit_outline(reg, img, mask, project.results_dir, pixel_um)
-            return reg
+            report = R.refit_outline(reg, img, mask, project.results_dir, pixel_um)
+            return reg, report
 
-        def done(reg):
+        def done(result):
+            reg, report = result
             s.registration = reg.to_dict(); project.save()
             self._reg_cache.clear()
             if self.image is image and self._reg_current()[0] is s:
                 self._reg_section_changed(self.reg_sec_combo.currentIndex())
+            if report is None:
+                msg = "非线性贴合完成。"
+            elif reg.landmark_fit == "fitted":
+                msg = "已按标志点精细贴合。"
+            else:
+                msg = f"精细贴合没有通过（{report.get('reason', '')}），继续使用标志点插值，结果仍然有效。"
+            self.statusBar().showMessage(msg, 12000)
 
-        self.run_task(job, done, label="正在非线性贴合…")
+        self.run_task(job, done, label=label)
 
 
     # ------------------------------------------------------------ 连续切片

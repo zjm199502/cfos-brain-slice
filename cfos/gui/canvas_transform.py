@@ -1,4 +1,4 @@
-"""Screen-space mouse handles for navigation, atlas corrections and polygon groups."""
+"""Screen-space mouse handles for navigation and polygon groups."""
 import numpy as np
 from napari.layers import Points, Shapes
 from qtpy.QtCore import QEvent, QPointF, Qt
@@ -6,7 +6,7 @@ from qtpy.QtGui import QColor, QPainter, QPainterPath, QPen, QPolygonF, QTransfo
 from qtpy.QtWidgets import QAbstractItemView, QApplication, QLineEdit, QWidget
 from vispy.scene.cameras import PanZoomCamera
 
-from ..core.group_transform import make_edit, similarity
+from ..core.group_transform import similarity
 
 
 def rectangle(a,b):
@@ -105,8 +105,6 @@ class CanvasTransform(QWidget):
         self.hide()
         if hasattr(self.w,'view_move'):
             self.w.view_move.setChecked(False)
-        if hasattr(self.w,'atlas_move'):
-            self.w.atlas_move.setChecked(False)
 
     def _screen_frame(self):
         return rectangle((self.width()*.22,self.height()*.23),(self.width()*.78,self.height()*.77))
@@ -115,22 +113,9 @@ class CanvasTransform(QWidget):
         self.escape_tools()
         if self.w.slide is None:
             return
-        if mode=='atlas' and not self._atlas_ready():
-            self.w.statusBar().showMessage('请先选择已配准的脑片并显示脑区轮廓。',5000)
-            return
         self.mode=mode
-        self.whole=mode=='atlas'
         self.box=self.map(self._screen_frame(),True)
-        if mode=='atlas':
-            section,ds,lab,_=self.w._reg_lab
-            x,y=section.bbox0[:2]
-            h,b=lab.shape
-            corners=rectangle((x,y),(x+ds*b,y+ds*h))
-            projected=self.map(corners)
-            if np.all((projected>=[12,45]) & (projected<=[self.width()-12,self.height()-12])):
-                self.box=corners
-            self._atlas_lines()
-        (self.w.view_move if mode=='view' else self.w.atlas_move).setChecked(True)
+        self.w.view_move.setChecked(True)
         self._show()
 
     def _show(self):
@@ -138,27 +123,6 @@ class CanvasTransform(QWidget):
         self.show()
         self.raise_()
         self.update()
-
-    def _atlas_ready(self):
-        w=self.w
-        return (w.stack.currentIndex()==5 and w._reg_lab is not None and '脑区轮廓' in w.viewer.layers
-                and w.viewer.layers['脑区轮廓'].visible and bool(w._reg_paths))
-
-    def _atlas_lines(self):
-        sec,ds,_,_=self.w._reg_lab
-        self.lines=QPainterPath()
-        for path in self.w._reg_paths:
-            xy=path[:,::-1]*ds+sec.bbox0[:2]
-            if self.whole:
-                self.lines.moveTo(*xy[0])
-                for p in xy[1:]:
-                    self.lines.lineTo(*p)
-            else:
-                segments=clipped_segments(xy,self.box)
-                if segments is not None:
-                    for a,b in zip(*segments):
-                        self.lines.moveTo(*a)
-                        self.lines.lineTo(*b)
 
     def _select(self, a, b):
         if min(abs(b-a))<4:
@@ -168,29 +132,24 @@ class CanvasTransform(QWidget):
         w=self.w
         layer=w.viewer.layers.selection.active
         names=['自定义区域','排除区域']
-        if w.stack.currentIndex()==5 and self._atlas_ready() and getattr(layer,'name','') not in names:
-            self.mode='atlas'
-            self.whole=False
-            self._atlas_lines()
-        else:
-            if w.stack.currentIndex()==1 and getattr(layer,'name','')=='脑片':
-                names=['脑片']
-            self.mode='shapes'
-            lo,hi=np.minimum(a,b),np.maximum(a,b)
-            self.items=[]
-            self.lines=QPainterPath()
-            for name in names:
-                if name not in w.viewer.layers or not w.viewer.layers[name].visible:
+        if w.stack.currentIndex()==1 and getattr(layer,'name','')=='脑片':
+            names=['脑片']
+        self.mode='shapes'
+        lo,hi=np.minimum(a,b),np.maximum(a,b)
+        self.items=[]
+        self.lines=QPainterPath()
+        for name in names:
+            if name not in w.viewer.layers or not w.viewer.layers[name].visible:
+                continue
+            target=w.viewer.layers[name]
+            for i,data in enumerate(target.data):
+                xy=np.asarray(data)[:,::-1]
+                screen=self.map(xy)
+                if len(xy)<3 or not ((screen>=lo)&(screen<=hi)).all():
                     continue
-                target=w.viewer.layers[name]
-                for i,data in enumerate(target.data):
-                    xy=np.asarray(data)[:,::-1]
-                    screen=self.map(xy)
-                    if len(xy)<3 or not ((screen>=lo)&(screen<=hi)).all():
-                        continue
-                    self.items.append((target,i,xy.copy()))
-                    self.lines.addPolygon(poly(xy))
-                    self.lines.closeSubpath()
+                self.items.append((target,i,xy.copy()))
+                self.lines.addPolygon(poly(xy))
+                self.lines.closeSubpath()
         if self.lines.isEmpty():
             self.reset()
             w.statusBar().showMessage('框内没有可变换的轮廓。自定义区域和排除区域须完整框入。',6000)
@@ -287,39 +246,7 @@ class CanvasTransform(QWidget):
         w=self.w
         center=self.box.mean(axis=0)
         new=similarity(self.box,center,delta,angle,scale)
-        if self.mode=='atlas' and self._atlas_ready():
-            sec,ds,lab,_=w._reg_lab
-            s,reg=w._reg_current()
-            if s is not sec or not reg.done:
-                self.reset();return
-            H,W=lab.shape
-            box=(self.box-sec.bbox0[:2])/ds
-            move=delta/ds
-            if reg.orientation=='r180':
-                box=[W,H]-box
-                move=-move
-            point=make_edit(box,move,angle,scale,W,H,self.whole,reg.control_points)
-            reg.control_points.append(point)
-            reg.status='已手动调整'
-            w._reg_reviewed(reg)
-            old=sec.registration
-            sec.registration=reg.to_dict()
-            try:
-                w.project.save()
-            except OSError as exc:
-                sec.registration=old
-                self.reset()
-                w.error(str(exc))
-                return
-            self.committing=True
-            try:
-                w._reg_redraw()
-            finally:
-                self.committing=False
-            self.box=new
-            self._atlas_lines()
-            w.statusBar().showMessage('轮廓变换已保存，可点“撤销上一个修正”。',5000)
-        elif self.mode=='shapes':
+        if self.mode=='shapes':
             changed={}
             items=[]
             for layer,i,xy in self.items:
@@ -343,8 +270,8 @@ class CanvasTransform(QWidget):
         if w.pick_tiles.isChecked():
             w.pick_tiles.setChecked(False)
             engaged=True
-        if w._reg_drag_on or w._drag or w._trace_clicks:
-            w._reg_set_drag_mode(False)
+        if w._lm_on or w._lm_pending is not None:
+            w._reg_set_landmark_mode(False)
             engaged=True
         for layer in list(w.viewer.layers):
             if not isinstance(layer,(Shapes,Points)) or (layer.mode=='pan_zoom' and not layer.selected_data):

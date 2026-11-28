@@ -249,8 +249,8 @@ class MainWindow(ProcessingScopeMixin, UpdateMixin, TeachingMixin, FigureMixin, 
         self._update_tile_grid()
         if self._layout_mode == "single":
             self.pane_button.setChecked(False)
-        if i != 5 and getattr(self, "_reg_drag_on", False):
-            self._reg_set_drag_mode(False)
+        if i != 5 and getattr(self, "_lm_on", False):
+            self._reg_set_landmark_mode(False)
         self._refresh_step_marks()
         if i == 0:
             self._refresh_project_progress()
@@ -886,11 +886,11 @@ class MainWindow(ProcessingScopeMixin, UpdateMixin, TeachingMixin, FigureMixin, 
         self._preview_grid = None
         self.viewer.layers.clear()
         self.image_layers = []
-        self._drag = self._reg_lab = self._reg_bnd = self._atlas_curves = None
+        self._lm_pending = self._reg_lab = self._reg_bnd = self._atlas_curves = None
         self._reg_paths = []
         self._reg_timer.stop()
-        if self._reg_drag_on:
-            self._reg_set_drag_mode(False)
+        if self._lm_on:
+            self._reg_set_landmark_mode(False)
         self.det_summary.clear()
         self.tile_overlay.hide()
         self.z_info.clear()
