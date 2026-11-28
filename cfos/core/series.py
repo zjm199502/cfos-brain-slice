@@ -115,3 +115,144 @@ def animal_sections(project) -> dict[str, list[tuple]]:
             return -adjusted_plane(r).ap_mm() if r.done else 1e9
         lst.sort(key=ap)
     return out
+
+
+# ------------------------------------------------------------------ 按切片顺序联合定位前后位置
+VOXEL_UM = 25.0          # CCFv3 与 STAM 的编辑坐标都是 25 µm 一格
+AP_TOL_MIN_UM = 100.0    # 偏离顺序预测超过这么多才算异常（giRAff 单张的前后误差常在 ±100 µm 内）
+AP_TOL_MAX_UM = 300.0    # 离散度很大时容差也不超过这么多，免得掩盖 400 µm 这样的跳动
+AP_SEARCH_UM = 400.0     # 纹理微调前后位置的默认范围（与 deep_refine.search_plane 一致）
+
+
+def fit_order(positions, spacing_vox: float = 0.0) -> dict | None:
+    """按切片顺序排好的前后位置（体素）→ 稳健直线拟合 pos_i ≈ b + s·i，并找出偏离直线的切片。
+
+    间距已知时 s = ±间距（方向取所有两两斜率的中位数的符号）；未知时 s 用 Theil–Sen（两两斜率的中位数）。
+    异常：残差超过 tol = clip(3 × 1.4826 × MAD, 100 µm, max(100 µm, min(300 µm, 半个间距)))。异常的切片不参与第二次拟合。
+    间距未知时只有 3 张无法判断谁错（任意两张都能连成直线），至少要 4 张；已知间距时 3 张即可。
+    consistent=False 表示多数切片都对不上（切片顺序可能不是切的顺序），这时不应据此挪动切片。"""
+    x = np.asarray(positions, float)
+    n = len(x)
+    if n < (3 if spacing_vox > 0 else 4):
+        return None
+    idx = np.arange(n, dtype=float)
+
+    def line(keep):
+        i, p = idx[keep], x[keep]
+        a, b_ = np.triu_indices(len(p), 1)
+        slopes = (p[b_] - p[a]) / (i[b_] - i[a])
+        ts = float(np.median(slopes))
+        if spacing_vox > 0:
+            sign = np.sign(ts) or (1.0 if np.sum(slopes > 0) >= np.sum(slopes < 0) else -1.0)
+            s = sign * spacing_vox
+        else:
+            s = ts
+        return s, float(np.median(p - s * i))
+
+    s, b = line(np.ones(n, bool))
+    res = x - (b + s * idx)
+    sigma = 1.4826 * float(np.median(np.abs(res - np.median(res))))
+    # 偏离超过半个间距 = 已经落到相邻切片的位置上，无论离散度多大都算异常
+    cap = max(AP_TOL_MIN_UM / VOXEL_UM, min(AP_TOL_MAX_UM / VOXEL_UM, 0.5 * abs(s)))
+    tol = float(np.clip(3 * sigma, AP_TOL_MIN_UM / VOXEL_UM, cap))
+    out = np.abs(res) > tol
+    consistent = int(out.sum()) <= (n - 1) // 2 and (n - out.sum()) >= (2 if spacing_vox > 0 else 3)
+    if consistent and out.any():
+        s, b = line(~out)
+        res = x - (b + s * idx)
+        out = np.abs(res) > tol
+        consistent = int(out.sum()) <= (n - 1) // 2
+    pred = b + s * idx
+    return {"pred": pred, "resid": res, "slope": s, "intercept": b, "tol": tol,
+            "outliers": out, "consistent": bool(consistent)}
+
+
+def _series_key(project, image, section) -> str:
+    return (project.samples.get(f"{image.key}/{section.name}") or {}).get("animal") or image.key
+
+
+def _position(reg: Registration, n_med) -> float:
+    return float(np.dot(adjusted_plane(reg).center(), n_med))
+
+
+def _shift_base(reg: Registration, n_med, d: float):
+    if not reg.plane_raw:
+        reg.plane_raw = list(reg.plane)
+    p = Plane.from_list(reg.plane)
+    reg.plane = Plane(p.o + n_med * d, p.u, p.v).to_list()
+
+
+def position_series(project, new: dict, spacing_um: float | None = None) -> dict:
+    """自动配准的第二步（giRAff 逐张定位之后、非线性贴合之前）：同一动物的脑片按切片顺序联合定位前后位置。
+
+    new: {(image.source_id, section.name): Registration}，本次新定位的脑片（原地修改）。
+    同一动物以前已配准的脑片只作参照，不改动。切片顺序 = 项目里的图片顺序，图片内按脑片顺序（拆分时的编号）；
+    方向（从前到后还是从后到前）由数据决定。
+    - 前后位置偏离顺序预测超过容差的新脑片：基础平面挪到预测位置（可在“排序和联合校正”里撤销），并加 ⚠ 提示；
+    - 返回每张新脑片的纹理微调范围 {key: (lo, hi)}（体素，相对当前 ap_auto），保证微调后不会再跳出容差；
+    - 顺序与定位整体对不上（多数切片偏离）时不挪动，只给偏离的脑片加 ⚠。
+    返回 {"bounds": {...}, "notes": {key: [提示, ...]}, "groups": [每组的报告]}。"""
+    spacing_um = project.section_spacing_um if spacing_um is None else spacing_um
+    step = spacing_um / VOXEL_UM if spacing_um and spacing_um > 0 else 0.0
+    groups: dict[str, list] = {}
+    for im in project.images:
+        for s in im.sections:
+            key = (im.source_id, s.name)
+            if key in new:
+                reg = new[key]
+            elif s.enabled:
+                reg = Registration.from_dict(s.registration)
+                if reg.fit_atlas != project.registration_atlas:
+                    continue
+            else:
+                continue
+            if reg.done:
+                groups.setdefault(_series_key(project, im, s), []).append((key, reg, key in new, s.name))
+    bounds, notes, reports = {}, {}, []
+    lim = AP_SEARCH_UM / VOXEL_UM
+    for animal, items in groups.items():
+        if not any(is_new for _, _, is_new, _ in items):
+            continue
+        n_med = np.median([_normal(adjusted_plane(r)) for _, r, _, _ in items], axis=0)
+        n_med /= np.linalg.norm(n_med)
+        pos = [_position(r, n_med) for _, r, _, _ in items]
+        fit = fit_order(pos, step)
+        if fit is None:
+            # 张数太少、判断不了谁错：不挪动，只把纹理微调限制在半个间距内（至少 100 µm），切片顺序不会被微调打乱
+            if len(items) >= 2:
+                gap = step or float(np.median(np.abs(np.diff(pos))))
+                half = float(np.clip(0.5 * gap, AP_TOL_MIN_UM / VOXEL_UM, AP_TOL_MAX_UM / VOXEL_UM))
+                for key, reg, is_new, _ in items:
+                    if is_new:
+                        bounds[key] = (-half, half)
+                reports.append({"animal": animal, "consistent": True, "spacing_um": round(gap * VOXEL_UM, 1),
+                                "tol_um": round(half * VOXEL_UM), "moved": [], "flagged": [], "too_few": True})
+            continue
+        report = {"animal": animal, "consistent": fit["consistent"], "spacing_um": round(abs(fit["slope"]) * VOXEL_UM, 1),
+                  "tol_um": round(fit["tol"] * VOXEL_UM), "moved": [], "flagged": []}
+        for k, (key, reg, is_new, name) in enumerate(items):
+            if not is_new:
+                continue
+            got, want = pos[k], float(fit["pred"][k])
+            n_reg = _normal(adjusted_plane(reg))
+            cos = max(float(np.dot(n_reg, n_med)), 0.5)
+            if fit["outliers"][k]:
+                off = (got - want) * VOXEL_UM
+                if fit["consistent"]:
+                    _shift_base(reg, n_med, want - got)
+                    reg.status = f"{reg.status} · 按切片顺序校正前后位置"
+                    notes.setdefault(key, []).append(
+                        f"前后位置与切片顺序不符：giRAff 给出的位置偏离相邻切片推算的位置 {off:+.0f} µm，"
+                        f"已移到推算位置，请检查")
+                    report["moved"].append({"section": name, "offset_um": round(off)})
+                    got = want
+                else:
+                    notes.setdefault(key, []).append(
+                        f"前后位置与切片顺序不符（偏离 {off:+.0f} µm），同一动物多数切片也对不上，未自动挪动，请检查切片顺序")
+                    report["flagged"].append({"section": name, "offset_um": round(off)})
+                    continue
+            lo = (want - fit["tol"] - got) / cos
+            hi = (want + fit["tol"] - got) / cos
+            bounds[key] = (min(max(lo, -lim), 0.0), max(min(hi, lim), 0.0))
+        reports.append(report)
+    return {"bounds": bounds, "notes": notes, "groups": reports}

@@ -8,7 +8,8 @@ Run with the FosFolio app Python (needs itk-elastix):
     $PY tools/reg_bench/layers.py $OUT                                   # DAPI-detected DG/CA layers
     $PY tools/reg_bench/run.py $OUT pipeline                             # outline-only (old behaviour)
     $PY tools/reg_bench/run.py $OUT e2e                                  # plane search + deep texture fit
-    $PY tools/reg_bench/metrics.py $OUT ccf_affine,pipeline,e2e
+    $PY tools/reg_bench/run.py $OUT series 0                             # e2e + joint AP by slice order (spacing µm, 0 = unknown)
+    $PY tools/reg_bench/metrics.py $OUT ccf_affine,pipeline,e2e,series
     $PY tools/reg_bench/overlay.py $OUT pipeline,e2e                     # side-by-side PNGs
 
 Primary metric: mean distance (µm) from atlas DG-sg to the DAPI-detected granule layer.

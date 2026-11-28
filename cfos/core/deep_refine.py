@@ -225,11 +225,13 @@ def texture_score(reg, density, mask, interior, field):
     return _ncc(density, paint_labels(lab, density, mask), interior)
 
 
-def search_plane(reg, image_oriented, mask_oriented, prior_warp, pixel_um, rounds=3):
+def search_plane(reg, image_oriented, mask_oriented, prior_warp, pixel_um, rounds=3, ap_bounds=None):
     """Coordinate search of the cutting plane (AP shift, DV and ML tilt) that best explains the DAPI texture.
 
     giRAff only searches straight coronal planes.  Here the plane is nudged with the in-plane fit held fixed;
     every candidate is scored by how well the region-painted atlas correlates with the section.
+    ap_bounds=(lo, hi) limits the AP change (voxels, relative to the current ap_auto), e.g. to stay where the
+    slice order of the series allows; the default is the symmetric AP limit below.
     Returns a dict of the changed Registration fields (possibly empty) and a report."""
     mask = np.asarray(mask_oriented, bool)
     density = nuclear_density(image_oriented, mask, pixel_um)
@@ -240,13 +242,17 @@ def search_plane(reg, image_oriented, mask_oriented, prior_warp, pixel_um, round
     base = best_score = texture_score(probe(best), density, mask, interior, prior_warp)
     steps = {"ap_auto": (4., 2., 1.), "tilt_dv": (2., 1., .5), "tilt_ml": (2., 1., .5)}
     limits = {"ap_auto": 16., "tilt_dv": 8., "tilt_ml": 8.}
+    lo, hi = ap_bounds if ap_bounds is not None else (-limits["ap_auto"], limits["ap_auto"])
+    bounds = {"ap_auto": (max(lo, -limits["ap_auto"]), min(hi, limits["ap_auto"])),
+              "tilt_dv": (-limits["tilt_dv"], limits["tilt_dv"]), "tilt_ml": (-limits["tilt_ml"], limits["tilt_ml"])}
     for level in range(rounds):
         for key in best:
             step = steps[key][min(level, 2)]
             for sign in (1., -1.):
                 while True:
                     trial = {**best, key: best[key] + sign * step}
-                    if abs(trial[key] - float(getattr(reg, key))) > limits[key]:
+                    delta = trial[key] - float(getattr(reg, key))
+                    if not bounds[key][0] - 1e-9 <= delta <= bounds[key][1] + 1e-9:
                         break
                     score = texture_score(probe(trial), density, mask, interior, prior_warp)
                     if score <= best_score + 1e-3:
@@ -255,4 +261,7 @@ def search_plane(reg, image_oriented, mask_oriented, prior_warp, pixel_um, round
     changed = {k: v for k, v in best.items() if v != float(getattr(reg, k))}
     if best_score < base + .005:
         changed = {}
-    return changed, {"before": base, "after": best_score, "changed": changed}
+    report = {"before": base, "after": best_score, "changed": changed}
+    if ap_bounds is not None:
+        report["ap_bounds"] = [float(v) for v in bounds["ap_auto"]]
+    return changed, report

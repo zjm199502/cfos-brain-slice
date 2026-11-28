@@ -266,9 +266,10 @@ def _load_warp(reg, results_dir, h, w):
     return warp if warp.shape == (2, h, w) else None
 
 
-def refit_outline(reg, image, mask, results_dir, pixel_um, search_plane=False):
+def refit_outline(reg, image, mask, results_dir, pixel_um, search_plane=False, ap_bounds=None):
     """外轮廓贴合，随后（CCFv3）用 DAPI 纹理贴合深部结构。
-    search_plane=True 时先微调切面（前后位置、背腹/左右倾斜）；只在自动配准时使用，不覆盖手动调整过的切面。"""
+    search_plane=True 时先微调切面（前后位置、背腹/左右倾斜）；只在自动配准时使用，不覆盖手动调整过的切面。
+    ap_bounds=(lo, hi)：前后微调允许的范围（体素，相对当前 ap_auto），由同一动物的切片顺序给出（series.position_series）。"""
     h, w = image.shape
     landmarks = list(reg.landmarks)
     if reg.fit_atlas in DEEP_ATLASES and reg.control_points:
@@ -280,7 +281,7 @@ def refit_outline(reg, image, mask, results_dir, pixel_um, search_plane=False):
         from . import deep_refine
         oi, om = orient(image, reg.orientation), orient(mask, reg.orientation)
         if search_plane and not reg.control_points and not landmarks:
-            changed, plane_report = deep_refine.search_plane(reg, oi, om, warp, pixel_um)
+            changed, plane_report = deep_refine.search_plane(reg, oi, om, warp, pixel_um, ap_bounds=ap_bounds)
             if changed:
                 for key, value in changed.items():
                     setattr(reg, key, value)

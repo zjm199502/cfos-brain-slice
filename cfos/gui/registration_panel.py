@@ -835,12 +835,14 @@ class RegistrationMixin:
         tip = QLabel("下表按前后位置从前（Bregma 大）到后排列。动物编号在“⑦ 分组与统计”中填写；没填的按图片分组。\n"
                      "“统一切面角度”：把这只动物所有切片的倾斜角度统一为中位数，前后位置保持不变。\n"
                      "“切片间距”：知道相邻两张的实际间距时填写（例如 40 µm 切片每 4 张取 1 张 = 160 µm），"
-                     "软件会让前后位置等间距排列；不确定就填 0。")
+                     "软件会让前后位置等间距排列；不确定就填 0。\n"
+                     "填过的间距会记在项目里：之后自动配准时，按切片编号顺序推算每张的前后位置，偏离太多的会自动挪回并标 ⚠。")
         tip.setWordWrap(True); L.addWidget(tip)
         f = QFormLayout()
         animal = QComboBox(); animal.addItems(list(groups.keys()))
         fix = QCheckBox("统一切面角度（推荐）"); fix.setChecked(True)
         sp = QDoubleSpinBox(); sp.setRange(0, 2000); sp.setSingleStep(20); sp.setSuffix(" µm"); sp.setSpecialValueText("不调整")
+        sp.setValue(float(getattr(self.project, "section_spacing_um", 0.0) or 0.0))
         nl = QCheckBox("校正后重新做非线性贴合（推荐，约每张 10 秒）"); nl.setChecked(True)
         f.addRow("动物", animal); f.addRow(fix); f.addRow("切片间距", sp); f.addRow(nl)
         L.addLayout(f)
@@ -911,6 +913,7 @@ class RegistrationMixin:
                 rows = series.harmonize([r for _, r in done_items], sp.value(), fix.isChecked())
             except ValueError as e:
                 self.error(str(e)); return
+            self.project.section_spacing_um = float(sp.value())   # 之后的自动配准也按这个间距约束前后位置
             for (im, s_), r in done_items:
                 s_.registration = r.to_dict()
             self.project.save(); self._reg_cache.clear()

@@ -248,6 +248,7 @@ class Project:
     export_region_set: str = ""        # 导出哪些脑区：见 core/region_sets.py（空 = 旧项目，按上面两项）
     export_hemisphere: str = DEFAULT_EXPORT_HEMISPHERE
     export_intensity: bool = False     # 导出时统计脑区平均荧光强度（要读原图，较慢；v0.8.2 起默认不算）
+    section_spacing_um: float = 0.0   # 同一动物相邻两张脑片的实际间距（µm，0 = 不知道）；自动配准按它约束前后位置
     samples: dict = field(default_factory=dict)   # 实验分组：{"图片/脑片": {"animal": 动物编号, "group": 组别}}
     stats: dict = field(default_factory=dict)     # 组间统计参数（stats.StatsParams 的字典）
     network: dict = field(default_factory=dict)   # 功能网络分析参数（network.NetParams 的字典）
@@ -462,6 +463,7 @@ class Project:
             "export_region_ids": self.export_region_ids,
             "export_hemisphere": self.export_hemisphere,
             "export_intensity": self.export_intensity,
+            "section_spacing_um": self.section_spacing_um,
             "samples": self.samples, "stats": self.stats, "grading": self.grading, "network": self.network,
             "figure": self.figure,
             "accuracy": self.accuracy,
@@ -568,6 +570,10 @@ class Project:
             p.export_hemisphere = mode
         p.export_intensity = bool(d.get("export_intensity", False))
         p.samples = d.get("samples", {})
+        try:
+            p.section_spacing_um = max(0.0, float(d.get("section_spacing_um") or 0.0))
+        except (TypeError, ValueError):
+            p.section_spacing_um = 0.0
         p.stats = d.get("stats", {})
         p.grading = d.get("grading", {})
         p.network = d.get("network", {})
