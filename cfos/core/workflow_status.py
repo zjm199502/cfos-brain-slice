@@ -100,7 +100,7 @@ def save_cell_summary(path, df):
         logging.getLogger("cfos").exception("无法写入细胞结果进度索引")
 
 
-@lru_cache(maxsize=32)
+@lru_cache(maxsize=4096)
 def _cell_summary(path, size, mtime_ns):
     """旧结果无索引时只读一次，缓存小型摘要，不保留轮廓。"""
     index = path.with_suffix(".progress.json")
@@ -119,8 +119,33 @@ def _cell_summary(path, size, mtime_ns):
         return None
 
 
-@lru_cache(maxsize=32)
+def part_box_index(path):
+    return path.with_suffix(".box.json")
+
+
+def save_part_box(path, bbox0, outline):
+    """原始识别缓存附带一个很小的索引（脑片框和轮廓标识），项目页显示进度时不用读整个缓存文件。"""
+    index = part_box_index(path)
+    tmp = index.with_suffix(".tmp")
+    try:
+        stat = path.stat()
+        record = {"size": stat.st_size, "mtime_ns": stat.st_mtime_ns,
+                  "bbox0": [int(v) for v in bbox0], "outline": outline}
+        tmp.write_text(json.dumps(record, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(index)
+    except (OSError, ValueError, TypeError):
+        logging.getLogger("cfos").exception("无法写入原始识别缓存索引")
+
+
+# 每条只有几个数字；以前上限 32，脑片一多就被挤出缓存、反复读取整个文件
+@lru_cache(maxsize=8192)
 def _part_box(path, size, mtime_ns):
+    try:
+        record = json.loads(part_box_index(path).read_text(encoding="utf-8"))
+        if record["size"] == size and record["mtime_ns"] == mtime_ns:
+            return tuple(record["bbox0"]), record.get("outline")
+    except (OSError, ValueError, TypeError, KeyError):
+        pass
     saved = pd.read_pickle(path)
     return tuple(saved["bbox0"]), saved.get("outline")
 

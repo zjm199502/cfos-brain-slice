@@ -63,6 +63,101 @@ def _check_czi_channels(expected: list[str] | tuple[str, ...], actual: list[str]
                      f"当前文件为 {' / '.join(actual)}。请在 ZEN 统一通道顺序和名称，或使用独立项目。")
 
 
+
+def _dumps(obj) -> str:
+    # 紧凑格式：大项目的轮廓坐标很多，带缩进时文件大一倍、写得更慢
+    return json.dumps(obj, ensure_ascii=False, separators=(",", ":"))
+
+
+def _dump_project(payload: dict, f):
+    """分块写出项目文件，结果与 json.dump 相同（键的顺序不同）。
+    json 的 C 编码器整段执行期间不释放 GIL；按脑片分块写，后台保存时界面线程可以穿插运行，不会卡住。"""
+    f.write('{"images":[')
+    for i, im in enumerate(payload.get("images", [])):
+        head = _dumps({k: v for k, v in im.items() if k != "sections"})
+        f.write(("," if i else "") + head[:-1] + ("," if len(head) > 2 else "") + '"sections":[')
+        for j, sec in enumerate(im.get("sections", [])):
+            f.write(("," if j else "") + _dumps(sec))
+        f.write("]}")
+    f.write("]")
+    for k, v in payload.items():
+        if k != "images":
+            f.write("," + _dumps(k) + ":" + _dumps(v))
+    f.write("}")
+
+
+class _ProjectWriter:
+    """项目文件写盘：同一项目只保留最新的待写内容；后台写和立即写按顺序进行，旧内容不会覆盖新内容。"""
+
+    def __init__(self):
+        import threading
+        self._cond = threading.Condition()
+        self._write_lock = threading.Lock()
+        self._pending: dict[Path, dict] = {}
+        self._busy = False
+        self._thread = None
+        self._backed_up: set[Path] = set()
+
+    def submit(self, folder: Path, payload: dict):
+        import threading
+        with self._cond:
+            self._pending[Path(folder)] = payload
+            if self._thread is None or not self._thread.is_alive():
+                self._thread = threading.Thread(target=self._run, name="cfos-project-save", daemon=True)
+                self._thread.start()
+            self._cond.notify_all()
+
+    def write_now(self, folder: Path, payload: dict):
+        folder = Path(folder)
+        with self._cond:
+            self._pending.pop(folder, None)  # 更新的内容马上写，排队中的旧内容作废
+        with self._write_lock:
+            self._write(folder, payload)
+
+    def flush(self):
+        with self._cond:
+            while self._pending or self._busy:
+                self._cond.wait()
+
+    def _run(self):
+        import logging
+        while True:
+            with self._cond:
+                if not self._pending:
+                    self._thread = None
+                    self._cond.notify_all()
+                    return
+                folder = next(iter(self._pending))
+                payload = self._pending.pop(folder)
+                self._busy = True
+            try:
+                with self._write_lock:
+                    self._write(folder, payload)
+            except Exception:  # noqa: BLE001  后台线程里出错只能记日志
+                logging.getLogger("cfos").exception("后台保存项目文件失败：%s", folder)
+            finally:
+                with self._cond:
+                    self._busy = False
+                    self._cond.notify_all()
+
+    def _write(self, folder: Path, payload: dict):
+        tmp = folder / (PROJECT_FILE + ".tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
+            _dump_project(payload, f)
+        target = folder / PROJECT_FILE
+        if target.exists() and folder not in self._backed_up:
+            # 每次打开软件只备份一次：保留本次修改之前的版本，项目文件损坏时可以恢复
+            try:
+                import shutil
+                shutil.copy2(target, folder / (PROJECT_FILE + ".bak"))
+                self._backed_up.add(folder)
+            except OSError:
+                pass
+        tmp.replace(target)
+
+
+_WRITER = _ProjectWriter()
+
 @dataclass
 class ImageEntry:
     path: str
@@ -431,13 +526,19 @@ class Project:
         d.mkdir(parents=True, exist_ok=True)
         return d
 
-    def save(self):
+    def save(self, background: bool = False):
+        """保存项目文件。background=True 时在界面线程只做快照，序列化和写盘放到后台线程。"""
         self.folder.mkdir(parents=True, exist_ok=True)
         from .relocate import rel_path, file_size
+        # 原图可能在移动硬盘或网络盘上：每个路径每次打开项目只检查一次，不在每次保存时逐张访问磁盘。
+        located = self.__dict__.setdefault("_located", {})
         for im in self.images:
+            if located.get(id(im)) == im.path:
+                continue
             if Path(im.path).exists():  # 只在能找到原图时更新，避免把找不到的记录覆盖掉
                 im.rel = rel_path(im.path, self.folder)
                 im.size = file_size(im.path) or im.size
+                located[id(im)] = im.path
         d = {
             "version": 1, "reserved_keys": self.reserved_keys,
             "images": [im.to_dict() for im in self.images],
@@ -475,20 +576,25 @@ class Project:
         }
         from . import slide_io
         slide_io.Z_MODE = self.z_mode
-        tmp = self.folder / (PROJECT_FILE + ".tmp")
-        tmp.write_text(json.dumps(d, ensure_ascii=False, indent=2), encoding="utf-8")
-        target = self.folder / PROJECT_FILE
-        if target.exists():  # 保留上一个版本，项目文件损坏时可以恢复
-            try:
-                import shutil
-                shutil.copy2(target, self.folder / (PROJECT_FILE + ".bak"))
-            except OSError:
-                pass
-        tmp.replace(target)
+        if background:
+            # 后台线程序列化时界面可能还在修改设置：除了已经是新副本的脑片列表，其余部分先复制一份。
+            import copy
+            images = d.pop("images")
+            d = copy.deepcopy(d)
+            d["images"] = [{**copy.deepcopy({k: v for k, v in im.items() if k != "sections"}),
+                            "sections": im["sections"]} for im in images]
+            _WRITER.submit(self.folder, d)
+        else:
+            _WRITER.write_now(self.folder, d)
+
+    def wait_saved(self):
+        """等待后台保存写完（关闭项目、退出软件前调用）。"""
+        _WRITER.flush()
 
     @staticmethod
     def load(folder: str | Path) -> "Project":
         folder = Path(folder)
+        _WRITER.flush()  # 同一项目还有后台保存没写完时，先等它写完再读
         try:
             d = json.loads((folder / PROJECT_FILE).read_text(encoding="utf-8"))
         except (OSError, ValueError):
@@ -932,9 +1038,12 @@ class Project:
 
     def save_part(self, image: ImageEntry, section, signature: str, df: pd.DataFrame):
         from .contours import pack
-        self._dump(self.part_path(image, section.name),
-                   {"signature": signature, "outline": image.changed_outlines.get(section.name),
-                    "bbox0": tuple(section.bbox0), **pack(df)})
+        from .workflow_status import save_part_box
+        path = self.part_path(image, section.name)
+        outline = image.changed_outlines.get(section.name)
+        self._dump(path, {"signature": signature, "outline": outline,
+                          "bbox0": tuple(section.bbox0), **pack(df)})
+        save_part_box(path, section.bbox0, outline)
         old = self._old_part_path(image, section.name)
         if old.exists():
             old.unlink()

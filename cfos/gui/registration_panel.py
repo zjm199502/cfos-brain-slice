@@ -208,7 +208,7 @@ class RegistrationMixin:
         if s is None:
             return
         self._reg_reviewed(reg)
-        s.registration = reg.to_dict(); self.project.save()
+        s.registration = reg.to_dict(); self._save_later()
         self._reg_redraw()
 
     def _change_registration_atlas(self, index):
@@ -219,7 +219,7 @@ class RegistrationMixin:
             self.statusBar().showMessage("当前任务结束后可切换图谱。", 5000)
             return
         self.project.select_atlas(self.reg_atlas.itemData(index))
-        self.project.save()
+        self._save_later()
         self._reg_cache.clear()
         self._atlas_curves = self._reg_lab = self._reg_bnd = None
         self.reg_hover.setText("鼠标所在脑区：—")
@@ -761,7 +761,7 @@ class RegistrationMixin:
             return
         reg.control_points = []
         reg.status = "已手动调整"
-        s.registration = reg.to_dict(); self.project.save()
+        s.registration = reg.to_dict(); self._save_later()
         self._reg_redraw(); self._reg_draw_landmarks(s, reg)
         self.statusBar().showMessage("已移除旧版手动修正，现在可以添加标志点。", 8000)
 
@@ -779,7 +779,7 @@ class RegistrationMixin:
         ds, H, W, _ = self._reg_geometry(s)
         R.set_landmarks(reg, [], self.project.results_dir, W, H, self._reg_pixel_um(s))
         self._lm_undo = [(sec, L) for sec, L in self._lm_undo if sec is not s]
-        s.registration = reg.to_dict(); self.project.save()
+        s.registration = reg.to_dict(); self._save_later()
         self._reg_section_changed(self.reg_sec_combo.currentIndex())
         if moved and reg.nonlinear:
             self._reg_refit(label="正在恢复自动结果…")

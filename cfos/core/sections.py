@@ -1,7 +1,7 @@
 """在低分辨率图上自动找出一张玻片上的各个脑片。"""
 from __future__ import annotations
 
-from dataclasses import dataclass, asdict, field
+from dataclasses import dataclass, asdict, field, fields
 
 import numpy as np
 from scipy import ndimage as ndi
@@ -52,7 +52,14 @@ class Section:
                               min(ring_bytes(pts), ring_bytes(pts[::-1]))).hexdigest()
 
     def to_dict(self):
-        return asdict(self)
+        # 与 asdict 结果相同；轮廓点是不可变的元组，只复制外层列表，大项目保存时快得多。
+        import copy
+        d = {f.name: getattr(self, f.name) for f in fields(self)}
+        d["contour0"] = [tuple(p) for p in self.contour0]
+        for k, v in d.items():
+            if isinstance(v, (dict, list)) and k != "contour0":
+                d[k] = copy.deepcopy(v)
+        return d
 
     @staticmethod
     def from_dict(d):
