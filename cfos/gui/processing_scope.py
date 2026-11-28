@@ -111,6 +111,14 @@ class ProcessingScopeMixin:
         from ..core.scope import scoped_project
         return self.project if self._processing_scope is None else scoped_project(self.project, self._processing_scope)
 
+    def _scoped_sample_rows(self):
+        """与 _view_project().sample_rows() 相同，但不复制整个项目（分组表每次编辑都会调用）。"""
+        rows = self.project.sample_rows()
+        scope = self._processing_scope
+        if scope is None:
+            return rows
+        return [r for r in rows if r["图片"] in scope and (scope[r["图片"]] is None or r["脑片"] in scope[r["图片"]])]
+
     def choose_processing_scope(self, *_):
         if self.task is not None and self.task.isRunning():
             self.info("请在当前任务完成后更改处理范围。")
