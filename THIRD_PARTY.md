@@ -12,6 +12,7 @@
 | DeepSlice 小鼠模型权重（Allen_Mixed_Best、Synthetic_data_final） | — | DeepSlice 的预训练模型（两个模型取平均；v0.8.1 起转换为 ONNX 格式随安装包附带） | https://github.com/PolarBean/DeepSliceWeightsMQ | 同上 |
 | Xception ImageNet 预训练权重 | v0.4 | DeepSlice 网络的顶层（只带其中 ImageNet 分类层的权重） | https://github.com/fchollet/deep-learning-models/releases/tag/v0.4 | Chollet, CVPR 2017 |
 | Allen Mouse Brain Common Coordinate Framework v3（CCFv3） | 2017，25 µm | 脑图谱（注释、平均模板、脑区结构表），经 BrainGlobe（allen_mouse_25um）获取 | https://atlas.brain-map.org/ ； https://brainglobe.info/ | Wang et al., Cell 2020 |
+| Allen CCFv3 Nissl 体数据（ara_nissl） | 25 µm | 深部纹理贴合的参考纹理（对齐到 CCFv3 的 Nissl 染色平均体，转换为 uint8：cfos/core/ccf_data/allen_ccfv3_nissl_25um.npz，用 tools/reg_bench/nissl.py 生成） | https://download.alleninstitute.org/informatics-archive/current-release/mouse_ccf/ara_nissl/ | Wang et al., Cell 2020 |
 | elastix（itk-elastix） | 0.25.4 | 非线性配准 | https://github.com/InsightSoftwareConsortium/ITKElastix | Klein et al., IEEE TMI 2010; Shamonin et al., Front. Neuroinform. 2014 |
 | QuickNII 坐标约定 | — | 图谱切面参数（与 DeepSlice 输出一致），只参考了公开的格式说明，没有使用其代码 | https://www.nitrc.org/projects/quicknii | Puchades et al., PLoS ONE 2019 |
 | bioio-vsi | 2dd575b（2026-10-16） | 奥林巴斯 .vsi 文件的元数据解析（通道名、像素尺寸、维度顺序），代码收在 cfos/core/vsi_meta | https://github.com/szarma/bioio-vsi |  |

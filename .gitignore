@@ -7,4 +7,3 @@ resources/deepslice/
 resources/demo/
 resources/models/*/model.onnx
 resources/models/*/model.sig
-cfos/core/ccf_data/allen_ccfv3_nissl_25um.npz

@@ -2,7 +2,7 @@
 
 Allen CCFv3-aligned Nissl volume, used by deep_refine when TEXTURE = "nissl".  Download (≈130 MB):
 https://download.alleninstitute.org/informatics-archive/current-release/mouse_ccf/ara_nissl/ara_nissl_25.nrrd
-Needs `pip install pynrrd`.  Not bundled with the app yet (≈31 MB compressed)."""
+Needs `pip install pynrrd`.  The result is committed and bundled (≈31 MB); rerun only to regenerate it."""
 import sys, numpy as np, nrrd
 from pathlib import Path
 v, _ = nrrd.read(sys.argv[1])

@@ -30,6 +30,9 @@ def verify_app(app):
         import_module(module)
     resources = app / "resources"
     assert (resources / "atlas/allen_ccfv3_25um.npz").is_file()
+    from cfos.core import deep_refine
+    nissl = deep_refine.nissl_volume()   # deep CCFv3 refinement falls back to a weaker texture without it
+    assert nissl is not None and nissl.shape == (528, 320, 456), "Allen CCFv3 Nissl volume missing"
     slide = open_slide(resources / "demo/示例脑片.ome.tif")
     try:
         assert find_sections(slide), "Demo contains no recognized sections"
