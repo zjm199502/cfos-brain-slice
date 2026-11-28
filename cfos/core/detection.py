@@ -75,6 +75,10 @@ class DetectionSettings:
     resolution_percent: int | None = 100
     display_windows: dict = field(default_factory=dict)  # resolved per section, never the project defaults
     tile_in_source_pixels: bool = True   # False preserves the legacy pixel_um grid until a size is chosen.
+    # Downsampled channels: True makes the tile edge the model input (core + halo) in inference-grid
+    # pixels, so a 2048 tile stays 2048 px at 20 % instead of shrinking to ~450 px. Projects saved
+    # before this keep source pixels.
+    tile_in_model_pixels: bool = True
 
 
 def channel_percent(settings, channel):
@@ -99,7 +103,16 @@ def tile_dimensions(settings, step, preview=False):
     """Return the core edge and one-sided halo in pixels of the group's inference grid."""
     if settings.resolution_percent is None and not settings.tile_in_source_pixels:
         return settings.tile, settings.overlap
-    return max(1, round(settings.tile/step)), int(np.ceil(settings.overlap/step))
+    halo = int(np.ceil(settings.overlap/step))  # the halo stays physical: cells keep their size in µm
+    if tiles_in_model_pixels(settings):
+        # Core + halo on both sides = tile, e.g. 2048 px, which Cellpose covers with 9 × 9 network tiles.
+        return max(256, settings.tile - 2*halo), halo
+    return max(1, round(settings.tile/step)), halo
+
+
+def tiles_in_model_pixels(settings):
+    """Whether this (single-percent) group sizes its tile by the downsampled model input."""
+    return settings.tile_in_model_pixels and settings.resolution_percent not in (None, 100)
 
 
 def read_detection_tile(slide, level, bbox, width, height, step):
@@ -464,8 +477,9 @@ def detect_section(slide: Slide, section: Section, settings: DetectionSettings,
         unit = "原图" if percent is not None or local.tile_in_source_pixels else "识别层"
         grids.append(f"{label} 识别比例 {100/ds:g}% · 金字塔第 {lv} 层 · {ds*slide.pixel_size_um:g} µm/像素"
                      f" · 识别区域 {int(np.ceil(w/ds))} × {int(np.ceil(h/ds))} px"
-                     f" · 核心边长 {local.tile} {unit} px（识别层 {tile} px）"
-                     f" · 单侧重叠 {overlap} px，含重叠的模型输入边长最多 {tile + 2*overlap} px · {len(tiles)} 块")
+                     + (f" · 模型输入边长 {local.tile} 识别层 px（核心 {tile} px）" if tiles_in_model_pixels(local) else
+                        f" · 核心边长 {local.tile} {unit} px（识别层 {tile} px）")
+                     + f" · 单侧重叠 {overlap} px，含重叠的模型输入边长最多 {tile + 2*overlap} px · {len(tiles)} 块")
     if detail:
         detail(dict(kind="section", title=f"{image_name} · {section.name}", channels=names,
                     channel_totals=totals, total=max(totals.values()), grid="；".join(grids)))
@@ -657,6 +671,10 @@ def raw_signature(settings: DetectionSettings) -> str:
         d["resolution_percent"] = settings.resolution_percent
     if settings.tile_in_source_pixels and any(p.detect and channel_percent(settings, c) is None for c, p in settings.channels.items()):
         d["tile_in_source_pixels"] = True
+    # Only downsampled channels get a different grid, so full-resolution signatures stay unchanged.
+    if settings.tile_in_model_pixels and any(p.detect and channel_percent(settings, c) not in (None, 100)
+                                             for c, p in settings.channels.items()):
+        d["tile_in_model_pixels"] = True
     if any(p.detect and channel_percent(settings, c) != 100 for c, p in settings.channels.items()):
         d["native_pixel_centres"] = 1
     for c, p in settings.channels.items():

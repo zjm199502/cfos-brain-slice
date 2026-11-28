@@ -21,10 +21,12 @@ from .. import APP_NAME
 _RESULT_TILE_COLUMN = "结果使用的核心图块（不含重叠）"
 
 
-def _tile_size_text(edge, percent, source_pixels):
+def _tile_size_text(edge, percent, source_pixels, model_pixels=False):
     if percent is None:
         unit = "原图像素" if source_pixels else "识别层像素"
         return f"{edge} × {edge} {unit}"
+    if model_pixels and percent != 100:
+        return f"模型输入 {edge} × {edge} 识别层像素（含重叠，约 {round(edge * 100 / percent)} 原图像素）"
     result = f"{edge} × {edge} 原图像素"
     if percent != 100:
         effective = max(1, round(edge / (100 / percent)))
@@ -54,7 +56,8 @@ def _recorded_tile_size(section_settings, channel_names):
         percent = channel.get("resolution_percent", settings.get("resolution_percent"))
         if percent is not None and not (isinstance(percent, (int, float)) and 0 < percent <= 100):
             return "历史结果未记录"
-        size = _tile_size_text(settings["tile"], percent, settings.get("tile_in_source_pixels", False))
+        size = _tile_size_text(settings["tile"], percent, settings.get("tile_in_source_pixels", False),
+                               settings.get("tile_in_model_pixels", False))
         groups.setdefault(size, []).append(name)
     return "；".join(f"{'、'.join(names)} {size}" for size, names in groups.items()) or "历史结果未记录"
 
@@ -388,7 +391,8 @@ def params_table(project: Project, section_summary=None) -> pd.DataFrame:
         rows += [(f"{nm} 是否识别", "是" if p.detect else "否"),
                  (f"{nm} 识别分辨率（原图宽高）", f"{percent}%" if percent else f"旧项目 {project.detection.pixel_um} µm/像素"),
                  (f"{nm} 当前核心图块（不含重叠）",
-                  _tile_size_text(project.detection.tile, percent, project.detection.tile_in_source_pixels)),
+                  _tile_size_text(project.detection.tile, percent, project.detection.tile_in_source_pixels,
+                                  project.detection.tile_in_model_pixels)),
                  (f"{nm} 识别模型", p.model),
                  (f"{nm} Cellpose 掩膜阈值", p.cellprob_threshold),
                  (f"{nm} 最小面积 (µm²)", p.min_area_um2),

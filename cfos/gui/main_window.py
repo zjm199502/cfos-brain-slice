@@ -1932,16 +1932,21 @@ class MainWindow(ProcessingScopeMixin, UpdateMixin, TeachingMixin, FigureMixin, 
         settings = self.project.detection
         self.tile_size.clear()
         for size in det.TILE_SIZES:
-            label = f"{size} × {size} 原图 px"
+            label = f"{size} × {size} px（降采样通道按模型输入计）"
             self.tile_size.addItem(label + ("（默认）" if size == det.TILE_SIZES[0] else ""), size)
         old_units = (not settings.tile_in_source_pixels and
                      any(det.channel_percent(settings, c) is None for c in settings.channels))
+        downsampled = any(det.channel_percent(settings, c) not in (None, 100) for c in settings.channels)
         if old_units:
             self.tile_size.addItem(f"{settings.tile} × {settings.tile}（当前项目，沿用旧分块）", None)
             self.tile_size.setCurrentIndex(self.tile_size.count() - 1)
+        elif downsampled and not settings.tile_in_model_pixels:
+            # Saved before tiles were sized in model pixels: keep showing that grid until a size is picked.
+            self.tile_size.addItem(f"{settings.tile} × {settings.tile} 原图 px（当前项目，降采样后图块较小、较慢）", None)
+            self.tile_size.setCurrentIndex(self.tile_size.count() - 1)
         else:
             if self.tile_size.findData(settings.tile) < 0:
-                self.tile_size.addItem(f"{settings.tile} × {settings.tile} 原图 px（当前项目）", settings.tile)
+                self.tile_size.addItem(f"{settings.tile} × {settings.tile} px（当前项目）", settings.tile)
             self.tile_size.setCurrentIndex(self.tile_size.findData(settings.tile))
 
     def _select_tile_size(self, index):
@@ -1951,6 +1956,7 @@ class MainWindow(ProcessingScopeMixin, UpdateMixin, TeachingMixin, FigureMixin, 
         settings = self.project.detection
         settings.tile = size
         settings.tile_in_source_pixels = True
+        settings.tile_in_model_pixels = True
         self._sync_tile_size()
         self._update_tile_grid()
         self._save_later()
