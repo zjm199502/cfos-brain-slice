@@ -256,3 +256,95 @@ def position_series(project, new: dict, spacing_um: float | None = None) -> dict
             bounds[key] = (min(max(lo, -lim), 0.0), max(min(hi, lim), 0.0))
         reports.append(report)
     return {"bounds": bounds, "notes": notes, "groups": reports}
+
+
+AP_PRIOR_UM = 2.0        # 每偏离 giRAff（及上一步顺序校正）的位置 1 格，细胞层评分加这么多 µm（分数相近时少挪动）
+AP_MIN_GAP_UM = 50.0     # 间距未知时相邻切片至少相隔这么多（约一张切片的厚度），顺序不能颠倒
+
+
+def choose_ap(project, new: dict, profiles: dict, spacing_um: float | None = None) -> dict:
+    """按细胞层评分（deep_refine.ap_profile）选每张新脑片的前后位置，同一动物内保持切片顺序。
+
+    profiles: {key: {"offsets": [...], "scores": [...]}}（体素，相对当前 ap_auto；µm）。没有评分的新脑片和
+    以前配准好的脑片位置固定，只作为顺序的约束。同一动物里在两个方向（从前到后、从后到前）各做一次动态规划，
+    取总分低的：相邻切片间距不小于 AP_MIN_GAP_UM；已知间距时限制在间距 ± 100 µm 内。
+    返回 {"offsets": {key: 体素}, "notes": {key: [提示]}, "groups": [...]}；不修改 new。"""
+    spacing_um = project.section_spacing_um if spacing_um is None else spacing_um
+    step = spacing_um / VOXEL_UM if spacing_um and spacing_um > 0 else 0.0
+    groups: dict[str, list] = {}
+    for im in project.images:
+        for s in im.sections:
+            key = (im.source_id, s.name)
+            if key in new:
+                reg = new[key]
+            elif s.enabled:
+                reg = Registration.from_dict(s.registration)
+                if reg.fit_atlas != project.registration_atlas:
+                    continue
+            else:
+                continue
+            if reg.done:
+                groups.setdefault(_series_key(project, im, s), []).append((key, reg))
+    offsets, notes, reports = {}, {}, []
+    for animal, items in groups.items():
+        if not any(key in profiles for key, _ in items):
+            continue
+        n_med = np.median([_normal(adjusted_plane(r)) for _, r in items], axis=0)
+        n_med /= np.linalg.norm(n_med)
+        cand = []   # 每张切片：[(偏移体素, 位置, 代价)]
+        for key, reg in items:
+            pos = _position(reg, n_med)
+            prof = profiles.get(key)
+            if prof is None:
+                cand.append([(0.0, pos, 0.0)])
+                continue
+            o = np.asarray(prof["offsets"], float)
+            sc = np.asarray(prof["scores"], float)
+            ok = np.isfinite(sc)
+            cos = max(float(np.dot(_normal(adjusted_plane(reg)), n_med)), 0.5)
+            grid = np.arange(np.ceil(o[ok].min()), np.floor(o[ok].max()) + 1)
+            cost = np.interp(grid, o[ok], sc[ok]) + AP_PRIOR_UM * np.abs(grid)
+            cand.append([(float(g), pos + g * cos, float(c)) for g, c in zip(grid, cost)])
+        lo_gap = max(AP_MIN_GAP_UM / VOXEL_UM, step - AP_TOL_MIN_UM / VOXEL_UM) if step else AP_MIN_GAP_UM / VOXEL_UM
+        hi_gap = step + AP_TOL_MIN_UM / VOXEL_UM if step else np.inf
+        best = None
+        for direction in (1.0, -1.0):
+            total = [c for _, _, c in cand[0]]
+            back = []
+            for k in range(1, len(cand)):
+                nxt, arg = [], []
+                for _, p, c in cand[k]:
+                    options = [(total[j] + c, j) for j, (_, q, _) in enumerate(cand[k - 1])
+                               if np.isfinite(total[j]) and lo_gap - 1e-6 <= direction * (p - q) <= hi_gap + 1e-6]
+                    v, j = min(options) if options else (np.inf, -1)
+                    nxt.append(v)
+                    arg.append(j)
+                total, back = nxt, back + [arg]
+            j = int(np.argmin(total))
+            if np.isfinite(total[j]) and (best is None or total[j] < best[0]):
+                path = [j]
+                for arg in reversed(back):
+                    path.append(arg[path[-1]])
+                best = (total[j], direction, path[::-1])
+        report = {"animal": animal, "moved": []}
+        if best is None:
+            # 顺序约束无解（以前的切片或间距与评分矛盾）：各自取最低分，并提示
+            path = [int(np.argmin([c for _, _, c in cs])) for cs in cand]
+            report["unordered"] = True
+        else:
+            path = best[2]
+            report["direction"] = "前后位置随切片顺序增大" if best[1] > 0 else "前后位置随切片顺序减小"
+        for (key, _), cs, j in zip(items, cand, path):
+            if key not in profiles:
+                continue
+            off = cs[j][0]
+            offsets[key] = off
+            if off:
+                report["moved"].append({"section": key[1], "offset_um": round(off * VOXEL_UM)})
+            if best is None:
+                notes.setdefault(key, []).append("按细胞层选前后位置时与切片顺序对不上，已各自取最佳位置，请检查切片顺序")
+            elif abs(off) >= max(abs(o) for o in profiles[key]["offsets"]):
+                notes.setdefault(key, []).append(
+                    f"按海马细胞层把前后位置挪了 {off * VOXEL_UM:+.0f} µm，到了搜索范围的边缘，请检查")
+        reports.append(report)
+    return {"offsets": offsets, "notes": notes, "groups": reports}

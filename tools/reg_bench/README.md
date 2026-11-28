@@ -26,3 +26,9 @@ Metrics (metrics.py): DAPI-detected cell layers inside the hippocampus only (pir
 split into DG (granule layer -> atlas DG-sg) and CA (pyramidal layer -> atlas CA1-3 sp), plus atlas DG-sg ->
 DAPI granule layer.  The DG/CA split is fixed per section from the affine fit.
 Sections are hard-coded as S01–S03.
+
+## 'apl'：按海马细胞层选切面前后位置（实验，默认关闭）
+`python run.py S apl` 跑 autoreg 里的 AP_BY_LAYERS 流程：每个候选前后位置重贴轮廓，按 DAPI 细胞层脊线与图谱细胞层的
+双向平均距离打分，同一动物按切片顺序动态规划选位置，然后只微调倾斜。2026-11-28 在 S01–S03 上：评分选了
+S01 +150、S02 −100、S03 −300 µm，深部贴合后合计 P90 129 → 179 µm（更差）。在固定位置 −300…+200 µm 上分别做完整
+贴合，结果随前后位置剧烈跳动（例如 S03 −100 µm 好、−200 µm 很差），重贴轮廓阶段的评分预测不了深部贴合后的结果。

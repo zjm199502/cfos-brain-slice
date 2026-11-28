@@ -656,3 +656,49 @@ def search_plane(reg, image_oriented, mask_oriented, prior_warp, pixel_um, round
     if ap_bounds is not None:
         report["ap_bounds"] = [float(v) for v in bounds["ap_auto"]]
     return changed, report
+
+
+AP_PROFILE_OFFSETS = tuple(range(-12, 13, 2))   # voxels around the current plane (±300 µm, 13 outline refits)
+AP_PROFILE_MIN_UM = 900.   # at least this much DAPI cell-layer ridge (skeleton length) to trust the profile
+
+
+def ap_profile(reg, image, mask, pixel_um, offsets=AP_PROFILE_OFFSETS, cancelled=None):
+    """How well the hippocampal cell layers fit when the cutting plane is moved along AP.
+
+    For every candidate AP offset (voxels, relative to reg.ap_auto) the tissue outline is refitted
+    (stam_refinement, as the automatic registration does) and the atlas cell layers (DG-sg, CA-sp) are
+    compared with the DAPI cell-layer ridges: mean distance ridge -> atlas layer plus atlas layer -> ridge
+    (µm).  The outline alone barely changes with AP, the DG/CA geometry does: on the example series the
+    texture plane search moved a slice 100 µm the wrong way while this score pointed 250 µm the other way.
+    image/mask are in the section's own orientation (like registration._outline_warp).
+    Returns {"offsets": [...], "scores": [...]} or None when the section shows too little hippocampus."""
+    if reg.fit_atlas != "CCFv3":
+        return None
+    oi = R.orient(image, reg.orientation)
+    om = np.asarray(R.orient(mask, reg.orientation), bool)
+    H, W = oi.shape
+    lab0 = R.label_maps(reg, W, H, None)[0]
+    if not np.isin(lab0, indices("layers")).any():
+        return None
+    ridges = cell_ridges(nuclear_density(oi, om, pixel_um), om, lab0, pixel_um)
+    from skimage.morphology import skeletonize
+    if skeletonize(ridges).sum() * pixel_um < AP_PROFILE_MIN_UM:
+        return None
+    to_ridge = ndi.distance_transform_edt(~ridges) * pixel_um
+    scores = []
+    for off in offsets:
+        if cancelled and cancelled():
+            raise InterruptedError
+        probe = R.Registration(**{**reg.__dict__, "ap_auto": float(reg.ap_auto) + off, "control_points": [],
+                                  "nonlinear": False})
+        warp, _ = R._outline_warp(probe, image, mask, pixel_um)
+        if warp is not None:
+            probe.nonlinear = True
+        layers = np.isin(R.label_maps(probe, W, H, warp)[0], indices("layers"))
+        if not layers.any():
+            scores.append(float("inf"))
+            continue
+        scores.append(float((ndi.distance_transform_edt(~layers) * pixel_um)[ridges].mean() + to_ridge[layers].mean()))
+    if sum(np.isfinite(scores)) < 3:
+        return None
+    return {"offsets": [float(o) for o in offsets], "scores": scores}

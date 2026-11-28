@@ -146,6 +146,49 @@ class SearchBoundsTest(unittest.TestCase):
             D.texture_score, D.TEXTURE = orig, tex
 
 
+def prof(best, slope=20.):
+    """A V-shaped cell-layer score with its minimum at offset `best` (voxels)."""
+    o = np.arange(-12, 13, 2.)
+    return {"offsets": list(o), "scores": list(100 + slope * np.abs(o - best))}
+
+
+class ChooseApTest(unittest.TestCase):
+    def test_order_kept_when_independent_minima_would_swap(self):
+        # giRAff: S01 245, S02 257, S03 268; the scores alone want 253, 250, 256 (S01 and S02 swapped).
+        names = [("S01", 245.), ("S02", 257.), ("S03", 268.)]
+        new = {("src1", n): coronal(y) for n, y in names}
+        profiles = {("src1", "S01"): prof(8), ("src1", "S02"): prof(-7), ("src1", "S03"): prof(-12)}
+        out = S.choose_ap(project(names), new, profiles)
+        pos = [y + out["offsets"][("src1", n)] for n, y in names]
+        gap = S.AP_MIN_GAP_UM / S.VOXEL_UM
+        self.assertTrue(all(b - a >= gap - 1e-6 for a, b in zip(pos, pos[1:])), pos)
+        self.assertEqual(out["offsets"][("src1", "S03")], -12.)
+        self.assertTrue(all(not r.plane_raw and r.ap_auto == 0 for r in new.values()))   # new is not modified
+
+    def test_single_slice_takes_its_best_offset(self):
+        new = {("src1", "S01"): coronal(250.)}
+        out = S.choose_ap(project([("S01", 250.)]), new, {("src1", "S01"): prof(-6)})
+        self.assertEqual(out["offsets"], {("src1", "S01"): -6.})
+        self.assertFalse(out["notes"])
+
+    def test_known_spacing_and_reference_sections(self):
+        # S01 registered before (fixed at 300); 160 µm spacing; S02's score alone would sit on top of S01.
+        names = [("S01", 300.), ("S02", 300 + STEP), ("S03", 300 + 2 * STEP)]
+        proj = project(names, registered={"S01"})
+        proj.section_spacing_um = 160.
+        new = {("src1", n): coronal(y) for n, y in names[1:]}
+        out = S.choose_ap(proj, new, {("src1", "S02"): prof(-6), ("src1", "S03"): prof(0)})
+        self.assertNotIn(("src1", "S01"), out["offsets"])
+        gap = 300 + STEP + out["offsets"][("src1", "S02")] - 300
+        self.assertGreaterEqual(gap, STEP - 4 - 1e-6)
+
+    def test_edge_of_range_is_flagged(self):
+        new = {("src1", "S01"): coronal(250.)}
+        out = S.choose_ap(project([("S01", 250.)]), new, {("src1", "S01"): prof(-20)})
+        self.assertEqual(out["offsets"][("src1", "S01")], -12.)
+        self.assertIn("边缘", out["notes"][("src1", "S01")][0])
+
+
 class AutoregRunTest(unittest.TestCase):
     def test_run_positions_series_before_the_texture_fit(self):
         from cfos.core import autoreg
@@ -159,19 +202,49 @@ class AutoregRunTest(unittest.TestCase):
             seen[round(R.adjusted_plane(reg).center()[1], 3)] = ap_bounds
             reg.warnings = []          # the real refit resets warnings; series notes must survive it
             reg.nonlinear = True
-        saved = autoreg.fit_section, R.section_thumbnail, R.refit_outline
+        saved = autoreg.fit_section, R.section_thumbnail, R.refit_outline, D.ap_profile
         autoreg.fit_section = lambda sl, sec, *a, **k: coronal(ys[sec.name])
+        D.ap_profile = lambda *a, **k: None
         R.section_thumbnail = lambda *a: (np.zeros((4, 4), np.uint8), np.ones((4, 4), bool), 16.)
         R.refit_outline = refit
         try:
             out = autoreg.run(proj, proj.images, 0, nonlinear=True, slides={"src1": slide})
         finally:
-            autoreg.fit_section, R.section_thumbnail, R.refit_outline = saved
+            autoreg.fit_section, R.section_thumbnail, R.refit_outline, D.ap_profile = saved
         regs = out["src1"]
         self.assertEqual(sorted(seen), [300., round(300 + STEP, 3), round(300 + 2 * STEP, 3)])
         self.assertTrue(all(b is not None for b in seen.values()))
         self.assertTrue(regs["S03"].warnings and not regs["S01"].warnings)
         self.assertIn("series", regs["S03"].metrics)
+
+    def test_layer_profile_fixes_ap_before_the_tilt_search(self):
+        from cfos.core import autoreg
+        ys = {"S01": 245., "S02": 257., "S03": 268.}
+        proj = project(list(ys.items()))
+        proj.z_mode, proj.results_dir = "max", "/nonexistent"
+        best = {245.: 8, 257.: -7, 268.: -12}
+        seen = {}
+
+        def refit(reg, image, mask, results_dir, pixel_um, search_plane=False, ap_bounds=None):
+            seen[reg.status] = (R.adjusted_plane(reg).center()[1], ap_bounds)
+            reg.warnings = []
+        saved = autoreg.fit_section, R.section_thumbnail, R.refit_outline, D.ap_profile
+        autoreg.fit_section = lambda sl, sec, *a, **k: R.Registration(
+            **{**coronal(ys[sec.name]).__dict__, "status": sec.name})
+        R.section_thumbnail = lambda *a: (np.zeros((4, 4), np.uint8), np.ones((4, 4), bool), 16.)
+        R.refit_outline = refit
+        D.ap_profile = lambda reg, *a, **k: prof(best[round(R.adjusted_plane(reg).center()[1])])
+        flag, autoreg.AP_BY_LAYERS = autoreg.AP_BY_LAYERS, True
+        try:
+            out = autoreg.run(proj, proj.images, 0, nonlinear=True, slides={"src1": SimpleNamespace(pixel_size_um=.5)})
+        finally:
+            autoreg.fit_section, R.section_thumbnail, R.refit_outline, D.ap_profile = saved
+            autoreg.AP_BY_LAYERS = flag
+        pos = [seen[n][0] for n in ("S01", "S02", "S03")]
+        self.assertTrue(pos[0] < pos[1] < pos[2], pos)
+        self.assertEqual(pos[2], 256.)
+        self.assertTrue(all(b == (0.0, 0.0) for _, b in seen.values()))
+        self.assertEqual(out["src1"]["S03"].metrics["ap_profile"]["chosen"], -12.)
 
 
 class ProjectSpacingTest(unittest.TestCase):

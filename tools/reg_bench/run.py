@@ -1,6 +1,8 @@
 """python run.py S method [spacing_um]  -> writes {n}_{method}.json/_warp.npy
 
-method 'series': joint AP positioning of S01-S03 by slice order (and spacing, if given) before the e2e fit."""
+method 'series': joint AP positioning of S01-S03 by slice order (and spacing, if given) before the e2e fit.
+method 'apl': what the app does now (autoreg.run): 'series', then the AP of each slice chosen from the hippocampal
+cell-layer score with the slice order kept (deep_refine.ap_profile + series.choose_ap), then the tilt-only search."""
 import sys, json, os, time, numpy as np
 sys.path.insert(0, __import__('os').path.join(__import__('os').path.dirname(__import__('os').path.abspath(__file__)), '..', '..'))
 from cfos.core import registration as R
@@ -23,6 +25,8 @@ if ':' in method:   # e.g. e2e:nissl+guard+ridge -> deep_refine.TEXTURE='nissl',
 os.chdir('/')   # reproduce the Finder-launched app
 NAMES = ('S01','S02','S03')
 joint = {"bounds": {}, "notes": {}}
+apl = method == 'apl'
+if apl: method = 'series'
 if method == 'series':
     from types import SimpleNamespace
     from cfos.core import series
@@ -33,6 +37,19 @@ if method == 'series':
     for n in NAMES: print(n, 'giRAff AP', f"{R.adjusted_plane(new[('bench', n)]).ap_mm():+.3f} mm")
     joint = series.position_series(proj, new)
     print(' series', json.dumps(joint["groups"], ensure_ascii=False), {k[1]: [round(v * 25) for v in b] for k, b in joint["bounds"].items()}, 'µm')
+    if apl:
+        from cfos.core import deep_refine
+        profiles = {}
+        for n in NAMES:
+            z = np.load(f"{S}/{n}.npz"); t = time.time()
+            p = deep_refine.ap_profile(new[("bench", n)], z['img'], z['mask'], float(z['pix']))
+            print(' profile', n, f"{time.time()-t:.0f}s", p and [round(v) for v in p["scores"]])
+            if p: profiles[("bench", n)] = p
+        chosen = series.choose_ap(proj, new, profiles)
+        print(' chosen', {k[1]: v for k, v in chosen["offsets"].items()}, chosen["groups"])
+        for k, off in chosen["offsets"].items():
+            new[k].ap_auto += off; joint["bounds"][k] = (0., 0.)
+            joint["notes"][k] = joint["notes"].get(k, []) + chosen["notes"].get(k, [])
 for n in NAMES:
     z = np.load(f"{S}/{n}.npz"); reg = R.Registration.from_dict(json.load(open(f"{S}/{n}_ccf_affine.json")))
     if method == 'series': reg = new[("bench", n)]
