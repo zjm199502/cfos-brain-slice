@@ -133,6 +133,30 @@ def evaluate(model, source, batch_size, threshold, report=None):
     return np.asarray(labels, dtype=np.int32).reshape(source.shape[:2])
 
 
+# Network tiles (256 px) evaluated per forward pass. GPUs (CUDA, Apple MPS with unified memory)
+# get 8; CPU stays at 4. CFOS_CELLPOSE_BATCH overrides it. On an out-of-memory error the batch
+# is halved (8 -> 4 -> 2 -> 1) before the worker gives up the GPU.
+GPU_BATCH = 8
+CPU_BATCH = 4
+
+
+def initial_batch_size(device_type, env=None):
+    value = (os.environ if env is None else env).get("CFOS_CELLPOSE_BATCH", "").strip()
+    if value:
+        try:
+            return max(1, min(64, int(value)))
+        except ValueError:
+            pass
+    return GPU_BATCH if device_type in ("cuda", "mps") else CPU_BATCH
+
+
+def smaller_batch(batch_size, error_text):
+    """The next batch size to try after a device error, or None to fall back to the CPU."""
+    if batch_size > 1 and "memory" in error_text.lower():
+        return batch_size // 2
+    return None
+
+
 def check_environment(weights):
     import numpy as np
     import torch
@@ -159,7 +183,7 @@ def serve(weights, pref):
         protocol.flush()
 
     model = None
-    batch_size = 4
+    batch_size = None
     while True:
         command = json.loads(commands.get())
         try:
@@ -176,6 +200,8 @@ def serve(weights, pref):
                         release_device_cache()
                         model, label = load_model(weights, "cpu")
                         label = f"CPU（GPU 加载失败：{fallback}）"
+                if batch_size is None:
+                    batch_size = initial_batch_size(model.device.type)
                 folder = Path(command["folder"])
                 x = np.load(folder/"image.npy", allow_pickle=False)
                 # Explicit channel axis also handles narrow sections and one-pixel fields.
@@ -190,14 +216,16 @@ def serve(weights, pref):
                         if model.device.type == "cpu" or not device_error(e):
                             raise
                         fallback = str(e).splitlines()[0][:100]
-                    if batch_size > 1 and "memory" in fallback.lower():
-                        batch_size = 1
+                    smaller = smaller_batch(batch_size, fallback)
+                    if smaller is not None:
+                        batch_size = smaller
                         release_device_cache()
                         continue
                     model = None
                     release_device_cache()
                     model, _ = load_model(weights, "cpu")
                     label = f"CPU（GPU 推理回退：{fallback}）"
+                    batch_size = initial_batch_size("cpu")
                 np.save(folder/"labels.npy", labels, allow_pickle=False)
                 response = {"device": label}
         except Exception as e:

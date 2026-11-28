@@ -79,6 +79,10 @@ class DetectionSettings:
     # pixels, so a 2048 tile stays 2048 px at 20 % instead of shrinking to ~450 px. Projects saved
     # before this keep source pixels.
     tile_in_model_pixels: bool = True
+    # Split each section into n = ceil(extent / tile) equal tiles per axis instead of full tiles plus a
+    # thin remainder sliver, and crop each tile's model input to the tissue inside it (plus halo).
+    # Projects saved before this keep their grid (and raw results) until a tile size is picked again.
+    equal_tiles: bool = True
 
 
 def channel_percent(settings, channel):
@@ -360,9 +364,9 @@ def _native_position(indices, step, extent):
 
 
 def _measure_tile(lab, img, c, tile, geo, crit):
-    """测量一块图像上一个通道识别出的细胞。tile=(tx, ty, T, rx0, ry0)；geo=(x0, y0, w, h, ds, pix, contour0)；
+    """测量一块图像上一个通道识别出的细胞。tile=(tx, ty, tw, th, rx0, ry0)；geo=(x0, y0, w, h, ds, pix, contour0)；
     crit=(prefilter, min_area, thr, min_contrast, bg)。返回每个细胞一行的列表。"""
-    tx, ty, T, rx0, ry0 = tile
+    tx, ty, tw, th, rx0, ry0 = tile
     x0, y0, width, height, ds, pix, contour0 = geo
     prefilter, min_area, thr, min_contrast, bg = crit
     poly = MplPath(np.asarray(contour0)) if contour0 is not None and len(contour0) > 2 else None
@@ -389,7 +393,7 @@ def _measure_tile(lab, img, c, tile, geo, crit):
             gy = (ry0 + cyl) * ds + (ds - 1) / 2
             area = rp.area * pix * pix
         # Ownership is defined in native coordinates, independent of tile overlap.
-        if not (tx * ds <= gx < (tx + T) * ds and ty * ds <= gy < (ty + T) * ds):
+        if not (tx * ds <= gx < (tx + tw) * ds and ty * ds <= gy < (ty + th) * ds):
             continue
         if area < 2.0 or (prefilter and area < min_area):
             continue
@@ -417,10 +421,44 @@ def _measure_tile(lab, img, c, tile, geo, crit):
     return rows
 
 
-def section_tiles(section: Section, ds: float, tile: int, field_box=None):
-    """Core tiles intersecting tissue, including partially covered edge tiles."""
+def _equal_edges(extent: int, tile: int):
+    """Edges of n = ceil(extent / tile) cores whose sizes differ by at most one pixel."""
+    n = max(1, int(np.ceil(extent/tile)))
+    return [(i*extent)//n for i in range(n+1)]
+
+
+def _section_path(section: Section):
+    if len(section.contour0) < 3:
+        return None
+    points = np.asarray(section.contour0, dtype=float)
+    if not np.array_equal(points[0], points[-1]):
+        points = np.vstack((points, points[0]))
+    return MplPath(points)
+
+
+def section_tiles(section: Section, ds: float, tile: int, field_box=None, equal=False):
+    """Core tiles (tx, ty, tw, th) intersecting tissue, including partially covered edge tiles.
+
+    equal=True splits the section into equal cores per axis (no remainder sliver). A field box only
+    selects tiles of that section-anchored grid, so a field preview reads the same tiles as a full run.
+    """
     x, y, w, h = section.bbox0
     width, height = int(np.ceil(w/ds)), int(np.ceil(h/ds))
+    poly = _section_path(section)
+    if equal:
+        xs, ys = _equal_edges(width, tile), _equal_edges(height, tile)
+        result = []
+        for ty, ty1 in zip(ys, ys[1:]):
+            for tx, tx1 in zip(xs, xs[1:]):
+                l, t, r, b = x+tx*ds, y+ty*ds, x+min(w, tx1*ds), y+min(h, ty1*ds)
+                if field_box is not None:
+                    fx, fy, fw, fh = field_box
+                    if not (l < fx+fw and r > fx and t < fy+fh and b > fy):
+                        continue
+                # One spare pixel keeps a core whose edge lies exactly on the contour.
+                if poly is None or poly.intersects_bbox(Bbox.from_extents(l-ds, t-ds, r+ds, b+ds), filled=True):
+                    result.append((tx, ty, tx1-tx, ty1-ty))
+        return result
     left, top, right, bottom = 0, 0, width, height
     if field_box is not None:
         fx, fy, fw, fh = field_box
@@ -428,19 +466,64 @@ def section_tiles(section: Section, ds: float, tile: int, field_box=None):
         top = max(0, int(np.floor((fy-y)/(ds*tile)))*tile)
         right = min(width, int(np.ceil((fx+fw-x)/ds)))
         bottom = min(height, int(np.ceil((fy+fh-y)/ds)))
-    poly = None
-    if len(section.contour0) >= 3:
-        points = np.asarray(section.contour0)
-        if not np.array_equal(points[0], points[-1]):
-            points = np.vstack((points, points[0]))
-        poly = MplPath(points)
     result = []
     for ty in range(top,bottom,tile):
         for tx in range(left,right,tile):
             bounds = Bbox.from_extents(x+tx*ds, y+ty*ds, x+min(w,(tx+tile)*ds), y+min(h,(ty+tile)*ds))
             if poly is None or poly.intersects_bbox(bounds, filled=True):
-                result.append((tx, ty))
+                result.append((tx, ty, tile, tile))
     return result
+
+
+def _clip_polygon(points, left, top, right, bottom):
+    """Sutherland-Hodgman clip of a (possibly concave) polygon to an axis-aligned rectangle."""
+    def clip(pts, inside, cross):
+        out = []
+        for i, cur in enumerate(pts):
+            prev = pts[i-1]
+            if inside(cur):
+                if not inside(prev):
+                    out.append(cross(prev, cur))
+                out.append(cur)
+            elif inside(prev):
+                out.append(cross(prev, cur))
+        return out
+    def at_x(xv):
+        return lambda p, q: (xv, p[1] + (q[1]-p[1])*(xv-p[0])/(q[0]-p[0]))
+    def at_y(yv):
+        return lambda p, q: (p[0] + (q[0]-p[0])*(yv-p[1])/(q[1]-p[1]), yv)
+    pts = [tuple(p) for p in points]
+    for inside, cross in ((lambda p: p[0] >= left, at_x(left)), (lambda p: p[0] <= right, at_x(right)),
+                          (lambda p: p[1] >= top, at_y(top)), (lambda p: p[1] <= bottom, at_y(bottom))):
+        if not pts:
+            break
+        pts = clip(pts, inside, cross)
+    return pts
+
+
+def tissue_crop(section: Section, ds: float, core):
+    """Bounding box (x0, y0, x1, y1), in inference pixels, of the tissue inside a core tile.
+
+    Cells are kept only if their centroid lies inside the section contour, so the model input
+    can shrink to this box plus the halo without changing which tissue cells a tile owns.
+    """
+    tx, ty, tw, th = core
+    if len(section.contour0) < 3:
+        return tx, ty, tx+tw, ty+th
+    x0, y0 = section.bbox0[:2]
+    points = (np.asarray(section.contour0, dtype=float) - (x0, y0)) / ds
+    clipped = _clip_polygon(points, tx-1, ty-1, tx+tw+1, ty+th+1)
+    if len(clipped) < 3:
+        return tx, ty, tx+tw, ty+th
+    c = np.asarray(clipped)
+    # The rasterised contour covers whole inference pixels: round outward and keep one spare pixel.
+    left = max(tx, int(np.floor(c[:, 0].min())) - 1)
+    top = max(ty, int(np.floor(c[:, 1].min())) - 1)
+    right = min(tx+tw, int(np.ceil(c[:, 0].max())) + 1)
+    bottom = min(ty+th, int(np.ceil(c[:, 1].max())) + 1)
+    if right <= left or bottom <= top:
+        return tx, ty, tx+tw, ty+th
+    return left, top, right, bottom
 
 
 def detect_section(slide: Slide, section: Section, settings: DetectionSettings,
@@ -464,12 +547,12 @@ def detect_section(slide: Slide, section: Section, settings: DetectionSettings,
         local = replace(settings, resolution_percent=percent, channels=channels)
         lv, ds = detection_grid(slide, local)
         tile, overlap = tile_dimensions(local, ds, preview)
-        tiles = section_tiles(section, ds, tile, field_box)
+        tiles = section_tiles(section, ds, tile, field_box, equal=local.equal_tiles)
         if selected_boxes is not None:
             sx, sy = section.bbox0[:2]
-            tiles = [(tx, ty) for tx, ty in tiles if any(
-                sx + tx*ds < right and sx + (tx+tile)*ds > left and
-                sy + ty*ds < bottom and sy + (ty+tile)*ds > top
+            tiles = [(tx, ty, tw, th) for tx, ty, tw, th in tiles if any(
+                sx + tx*ds < right and sx + (tx+tw)*ds > left and
+                sy + ty*ds < bottom and sy + (ty+th)*ds > top
                 for left, top, right, bottom in selected_boxes)]
         plans.append((local, lv, ds, tile, overlap, tiles))
         totals.update(dict.fromkeys(channels, len(tiles)))
@@ -479,6 +562,7 @@ def detect_section(slide: Slide, section: Section, settings: DetectionSettings,
                      f" · 识别区域 {int(np.ceil(w/ds))} × {int(np.ceil(h/ds))} px"
                      + (f" · 模型输入边长 {local.tile} 识别层 px（核心 {tile} px）" if tiles_in_model_pixels(local) else
                         f" · 核心边长 {local.tile} {unit} px（识别层 {tile} px）")
+                     + (" · 等分图块并裁到组织范围" if local.equal_tiles else "")
                      + f" · 单侧重叠 {overlap} px，含重叠的模型输入边长最多 {tile + 2*overlap} px · {len(tiles)} 块")
     if detail:
         detail(dict(kind="section", title=f"{image_name} · {section.name}", channels=names,
@@ -509,7 +593,7 @@ def detect_section(slide: Slide, section: Section, settings: DetectionSettings,
     return df
 
 
-def _detect_at_scale(slide, section, settings, lv, ds, T, ov, tiles, names,
+def _detect_at_scale(slide, section, settings, lv, ds, _T, ov, tiles, names,
                      progress, cancel, prefilter, norms, field_box, detail):
     pix = slide.pixel_size_um * ds
     x0, y0, w, h = section.bbox0
@@ -589,12 +673,14 @@ def _detect_at_scale(slide, section, settings, lv, ds, T, ov, tiles, names,
         tick()
 
     try:
-        for tile_index, (tx, ty) in enumerate(tiles, 1):
+        for tile_index, (tx, ty, tw, th) in enumerate(tiles, 1):
             if cancel is not None and cancel():
                 raise InterruptedError("已取消")
-            # 带重叠的读取区域（识别层坐标）
-            rx0, ry0 = max(0, tx - ov), max(0, ty - ov)
-            rx1, ry1 = min(W, tx + T + ov), min(H, ty + T + ov)
+            # 带重叠的读取区域（识别层坐标）；等分图块时只读组织所在范围
+            cx0, cy0, cx1, cy1 = (tissue_crop(section, ds, (tx, ty, tw, th)) if settings.equal_tiles
+                                  else (tx, ty, tx + tw, ty + th))
+            rx0, ry0 = max(0, cx0 - ov), max(0, cy0 - ov)
+            rx1, ry1 = min(W, cx1 + ov), min(H, cy1 + ov)
             bb = (x0 + rx0 * ds, y0 + ry0 * ds, min((rx1-rx0)*ds, w-rx0*ds), min((ry1-ry0)*ds, h-ry0*ds))
             img = read_detection_tile(slide, lv, bb, rx1-rx0, ry1-ry0, ds)
             if um is not None and img.size:
@@ -613,7 +699,7 @@ def _detect_at_scale(slide, section, settings, lv, ds, T, ov, tiles, names,
                 if p.skip_dark_tiles and float(x.max()) < 0.2:
                     emit("skip", channel=c, text=f"图块 {tile_index} 跳过暗区")
                     dark_tiles.append((c, x0 + tx * ds, y0 + ty * ds,
-                                       x0 + min(tx + T, W) * ds, y0 + min(ty + T, H) * ds))
+                                       x0 + min(tx + tw, W) * ds, y0 + min(ty + th, H) * ds))
                     tick()
                     continue
                 crit = (prefilter, p.min_area_um2, thr, p.min_contrast, bg)
@@ -625,7 +711,7 @@ def _detect_at_scale(slide, section, settings, lv, ds, T, ov, tiles, names,
                 duration = monotonic()-started
                 emit("done", channel=c, duration=duration, text=f"图块 {tile_index} 完成 · {duration:.1f} 秒 · {device}")
                 devices[c].add(device)
-                submit((labels, img, c, (tx, ty, T, rx0, ry0), geo, crit))
+                submit((labels, img, c, (tx, ty, tw, th, rx0, ry0), geo, crit))
                 collect(block=True)
         emit("note", text=f"{section.name} 正在汇总细胞测量")
         for i in pending():
@@ -677,6 +763,8 @@ def raw_signature(settings: DetectionSettings) -> str:
         d["tile_in_model_pixels"] = True
     if any(p.detect and channel_percent(settings, c) != 100 for c, p in settings.channels.items()):
         d["native_pixel_centres"] = 1
+    if settings.equal_tiles:   # older projects load with False, so their signatures stay unchanged
+        d["equal_tiles"] = 1
     for c, p in settings.channels.items():
         if p.detect and channel_percent(settings, c) != settings.resolution_percent:
             d["ch"][str(c)]["resolution_percent"] = p.resolution_percent

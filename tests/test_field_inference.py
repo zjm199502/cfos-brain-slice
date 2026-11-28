@@ -37,9 +37,10 @@ class FieldInferenceTests(unittest.TestCase):
         slide = SimpleNamespace(channels=[0], pixel_size_um=1., level_for_pixel_size=lambda _: 0,
                                 downsample=lambda _: 1., read=read)
         section = Section(1, (10, 40, 150, 65), [], "S")
-        settings = detection.DetectionSettings(tile=32, overlap=8, channels={0: detection.ChannelParams()})
+        settings = detection.DetectionSettings(tile=32, overlap=8, channels={0: detection.ChannelParams()},
+                                               equal_tiles=False)
         def measure(labels, img, ch, tile, geo, crit):
-            tx, ty, T, _, _ = tile
+            tx, ty, _, _, _, _ = tile
             return [dict(x=geo[0]+tx+12, y=geo[1]+ty+12, channel=0)]
         with patch.object(detection, "_pool", return_value=None), patch.object(
                 detection.cellpose4, "predict_labels", return_value=np.zeros((1,1), np.int32)), \
