@@ -39,6 +39,7 @@ from .tile_selection import TileSelectionMixin
 from .cell_rings import CellRings, add_cell_layer
 from .roi_counter import RoiCounter, RoiShapes
 from .update_panel import UpdateMixin
+from .clear_panel import ClearResultsMixin
 
 from .. import APP_NAME  # noqa: E402
 COLORMAP = {"DAPI": "blue", "Green": "green", "Red": "red", "Far red": "magenta"}
@@ -68,7 +69,7 @@ def big_button(text: str) -> QPushButton:
     return b
 
 
-class MainWindow(ProcessingScopeMixin, UpdateMixin, TeachingMixin, FigureMixin, TileSelectionMixin, RelocateMixin, QualityMixin, GroupsMixin, RegistrationMixin, QMainWindow):
+class MainWindow(ClearResultsMixin, ProcessingScopeMixin, UpdateMixin, TeachingMixin, FigureMixin, TileSelectionMixin, RelocateMixin, QualityMixin, GroupsMixin, RegistrationMixin, QMainWindow):
     def __init__(self):
         super().__init__()
         from ..core.updater import version_text
@@ -117,7 +118,9 @@ class MainWindow(ProcessingScopeMixin, UpdateMixin, TeachingMixin, FigureMixin, 
         for panel in (self._panel_project, self._panel_sections, self._panel_display,
                       self._panel_detection, self._panel_coloc, self._panel_registration,
                       self._panel_groups, self._panel_export, self._panel_figure):
-            self.stack.addWidget(PanelScroll(panel()))
+            widget = panel()
+            self._add_clear_box(widget, self.stack.count())
+            self.stack.addWidget(PanelScroll(widget))
         self.roi_slots[3].addWidget(self.roi_counter)
         self.steps.currentRowChanged.connect(self._on_step)
         self.stack.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)

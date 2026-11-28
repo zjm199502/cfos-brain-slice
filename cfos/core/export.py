@@ -117,7 +117,7 @@ def build_tables(project: Project, intensity: bool | None = None, *, for_excel=F
         if not enabled:
             continue
         df = df[df["section"].isin(enabled)]
-        if len(df) and "combo" not in df.columns:
+        if len(df) and ("combo" not in df.columns or df["combo"].isna().any()):
             with closing(im.open_slide()) as slide:
                 df = colocalize(df, slide.pixel_size_um, project.coloc, nucleus_channel(names))
         cells = merged_cells(df, len(names))
