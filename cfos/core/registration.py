@@ -238,7 +238,7 @@ def save_warp(results_dir, warp, atlas=CCF):
     return name
 
 
-def refit_outline(reg, image, mask, results_dir, pixel_um):
+def _outline_warp(reg, image, mask, pixel_um):
     from . import stam_refinement
     h, w = image.shape
     plane = adjusted_plane(reg)
@@ -247,11 +247,35 @@ def refit_outline(reg, image, mask, results_dir, pixel_um):
         tissue = stam_refinement.tissue_mask(ref, pixel_um)
     else:
         tissue = sample_plane(plane, w, h)["annotation"] > 0
-    warp, reg.metrics = stam_refinement.refine(orient(image, reg.orientation), orient(mask, reg.orientation),
-                                               ref, tissue, pixel_um)
+    return stam_refinement.refine(orient(image, reg.orientation), orient(mask, reg.orientation),
+                                  ref, tissue, pixel_um)
+
+
+DEEP_ATLASES = (CCF,)   # 深部纹理贴合目前只在 CCFv3 上验证过
+
+
+def refit_outline(reg, image, mask, results_dir, pixel_um, search_plane=False):
+    """外轮廓贴合，随后（CCFv3）用 DAPI 纹理贴合深部结构。
+    search_plane=True 时先微调切面（前后位置、背腹/左右倾斜）；只在自动配准时使用，不覆盖手动调整过的切面。"""
+    warp, reg.metrics = _outline_warp(reg, image, mask, pixel_um)
+    if reg.fit_atlas in DEEP_ATLASES:
+        from . import deep_refine
+        oi, om = orient(image, reg.orientation), orient(mask, reg.orientation)
+        if search_plane and not reg.control_points:
+            changed, plane_report = deep_refine.search_plane(reg, oi, om, warp, pixel_um)
+            if changed:
+                for key, value in changed.items():
+                    setattr(reg, key, value)
+                warp, reg.metrics = _outline_warp(reg, image, mask, pixel_um)
+            reg.metrics = {**reg.metrics, "plane_search": plane_report}
+        deep, deep_report = deep_refine.refine(reg, oi, om, warp, pixel_um)
+        reg.metrics = {**reg.metrics, "deep": deep_report}
+        if deep is not None:
+            warp = deep
     reg.nonlinear = warp is not None
     reg.warp_file = save_warp(results_dir, warp, reg.fit_atlas) if reg.nonlinear else ""
-    reg.nl_method = "轮廓 + DAPI 纹理" if reg.nonlinear else ""
+    deep_ok = reg.metrics.get("deep", {}).get("accepted", False)
+    reg.nl_method = ("轮廓 + DAPI 纹理（含深部结构）" if deep_ok else "轮廓 + DAPI 纹理") if reg.nonlinear else ""
     reg.warnings = [] if reg.nonlinear else [reg.metrics["reason"]]
 
 
@@ -320,9 +344,22 @@ def _elastix(fixed, moving, fixed2=None, moving2=None, grid=NL_GRID, w2=NL_TEXTU
         po.AddParameterMap(bs)
     m.SetParameterObject(po); m.SetLogToConsole(False)
     m.UpdateLargestPossibleRegion()
-    field_ = itk.transformix_deformation_field(itk.image_view_from_array(np.ascontiguousarray(moving)),
-                                               m.GetTransformParameterObject())
-    f = itk.array_from_image(field_)  # (H, W, 2)，单位：像素，(x, y)
+    return _deformation_field(itk, moving, m.GetTransformParameterObject())
+
+
+def _deformation_field(itk, moving, parameters):
+    """transformix 会把 deformationField.nii 写进输出目录；不指定时写进当前目录。
+    从 Finder 启动的 App 当前目录是只读的“/”，此前每次非线性贴合都会因此失败，所以显式给一个临时目录。"""
+    image = itk.image_view_from_array(np.ascontiguousarray(moving, dtype=np.float32))
+    with tempfile.TemporaryDirectory(prefix="fos-transformix-") as tmp:
+        t = itk.TransformixFilter[type(image)].New()
+        t.SetMovingImage(image)
+        t.SetTransformParameterObject(parameters)
+        t.SetComputeDeformationField(True)
+        t.SetLogToConsole(False)
+        t.SetOutputDirectory(tmp)
+        t.UpdateLargestPossibleRegion()
+        f = np.array(itk.array_from_image(t.GetOutputDeformationField()), copy=True)  # (H, W, 2)，像素，(x, y)
     return f[..., 0].astype(np.float32), f[..., 1].astype(np.float32)
 
 

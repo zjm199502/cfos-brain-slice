@@ -26,7 +26,7 @@ def fit_section(slide, section, nuc, results_dir, nonlinear, atlas, say=None, ca
             raise InterruptedError
         if say:
             say(0, 1, f"正在贴合 {atlas} 组织外轮廓…")
-        R.refit_outline(reg, image, mask, results_dir, pixel_um)
+        R.refit_outline(reg, image, mask, results_dir, pixel_um, search_plane=True)
     return reg
 
 
