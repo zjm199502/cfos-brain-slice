@@ -439,22 +439,28 @@ def _section_path(section: Section):
 def section_tiles(section: Section, ds: float, tile: int, field_box=None, equal=False):
     """Core tiles (tx, ty, tw, th) intersecting tissue, including partially covered edge tiles.
 
-    equal=True splits the section into equal cores per axis (no remainder sliver). A field box only
-    selects tiles of that section-anchored grid, so a field preview reads the same tiles as a full run.
+    equal=True splits the section into equal cores per axis (no remainder sliver). With a field box
+    only the field is split, so a small preview runs no tiles beyond it; cells near tile seams may then
+    differ slightly from a full run. The legacy grid keeps field tiles on the section-anchored grid.
     """
     x, y, w, h = section.bbox0
     width, height = int(np.ceil(w/ds)), int(np.ceil(h/ds))
     poly = _section_path(section)
     if equal:
-        xs, ys = _equal_edges(width, tile), _equal_edges(height, tile)
+        x0, y0, x1, y1 = 0, 0, width, height
+        if field_box is not None:
+            # Previews favour speed: split only the field itself into equal tiles (with the usual halo).
+            fx, fy, fw, fh = field_box
+            x0, y0 = max(0, int(np.floor((fx-x)/ds))), max(0, int(np.floor((fy-y)/ds)))
+            x1, y1 = min(width, int(np.ceil((fx+fw-x)/ds))), min(height, int(np.ceil((fy+fh-y)/ds)))
+            if x1 <= x0 or y1 <= y0:
+                return []
+        xs = [x0 + e for e in _equal_edges(x1-x0, tile)]
+        ys = [y0 + e for e in _equal_edges(y1-y0, tile)]
         result = []
         for ty, ty1 in zip(ys, ys[1:]):
             for tx, tx1 in zip(xs, xs[1:]):
                 l, t, r, b = x+tx*ds, y+ty*ds, x+min(w, tx1*ds), y+min(h, ty1*ds)
-                if field_box is not None:
-                    fx, fy, fw, fh = field_box
-                    if not (l < fx+fw and r > fx and t < fy+fh and b > fy):
-                        continue
                 # One spare pixel keeps a core whose edge lies exactly on the contour.
                 if poly is None or poly.intersects_bbox(Bbox.from_extents(l-ds, t-ds, r+ds, b+ds), filled=True):
                     result.append((tx, ty, tx1-tx, ty1-ty))

@@ -42,8 +42,10 @@ class EqualGridTests(unittest.TestCase):
             cover[ty:ty+th, tx:tx+tw] += 1
         self.assertTrue((cover == 1).all())
         self.assertEqual(len(tiles), 5 * 3)
-        field = detection.section_tiles(section, 1., 32, field_box=(54, 47, 32, 22), equal=True)
-        self.assertTrue(field and set(field) < set(tiles))
+        # A preview field is tiled on its own: no core reaches beyond it.
+        field = detection.section_tiles(section, 1., 32, field_box=(54, 47, 40, 22), equal=True)
+        self.assertEqual(field, [(44, 7, 20, 22), (64, 7, 20, 22)])
+        self.assertEqual(detection.section_tiles(section, 1., 32, field_box=(500, 47, 10, 10), equal=True), [])
         legacy = detection.section_tiles(section, 1., 32)
         self.assertTrue(all(tw == th == 32 for _, _, tw, th in legacy))
 
@@ -118,6 +120,30 @@ class OwnershipTests(unittest.TestCase):
             self.assertEqual(len(found), len(expected))
             np.testing.assert_allclose(found, expected, atol=1e-6)
         self.assertLess(sum(w*h for *_, w, h in equal_boxes), sum(w*h for *_, w, h in legacy_boxes))
+
+
+class PreviewFieldTests(unittest.TestCase):
+    def test_field_preview_reads_only_the_field_and_finds_its_cells(self):
+        centres = [(60., 30.), (90., 40.), (150., 30.), (40., 150.)]
+        img = blob_image(centres)
+        boxes = []
+        def read(level, box, channels=None):
+            x, y, w, h = (int(v) for v in box)
+            boxes.append((x, y, w, h))
+            return img[None, y:y+h, x:x+w]
+        slide = SimpleNamespace(channels=[0], pixel_size_um=1., level_for_pixel_size=lambda _: 0,
+                                downsample=lambda _: 1., read=read)
+        section = Section(1, (0, 0, 300, 200), CONTOUR, "S")
+        settings = detection.DetectionSettings(tile=64, overlap=8, channels={0: detection.ChannelParams(min_area_um2=0)})
+        def predict(x, params, cancel, progress=None):
+            return measure.label(x > 0.5).astype(np.int32), "CPU"
+        with patch.object(detection, "_pool", return_value=None), \
+                patch.object(detection.segmentation, "predict", side_effect=predict):
+            df = detection.detect_section(slide, section, settings, norms={0: (0, 1000, 1)}, prefilter=False,
+                                          field_box=(50, 20, 50, 30))
+        self.assertEqual(sorted(zip(df.x, df.y)), [(60., 30.), (90., 40.)])
+        for x, y, w, h in boxes:
+            self.assertTrue(x >= 50-8 and y >= 20-8 and x+w <= 100+8 and y+h <= 50+8)
 
 
 class SettingsTests(unittest.TestCase):
