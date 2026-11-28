@@ -14,6 +14,9 @@ if ':' in method:   # e.g. e2e:nissl+guard+ridge -> deep_refine.TEXTURE='nissl',
     _D.LAYER_GUARD = 'guard' in flags
     _D.W_RIDGE = .3 if 'ridge' in flags else 0.
     if 'search' in flags: _D.SEARCH_TEXTURE = _D.TEXTURE
+    _D.LAYER_PULL = 'pull' in flags
+    _D.PREPROC = next((f[4:] for f in flags if f.startswith('pre=')), _D.PREPROC)
+    tag = tag.replace('=', '')
     tag = tag.replace('+', '_')
 os.chdir('/')   # reproduce the Finder-launched app
 NAMES = ('S01','S02','S03')

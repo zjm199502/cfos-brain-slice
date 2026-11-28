@@ -12,7 +12,12 @@ Run with the FosFolio app Python (needs itk-elastix):
     $PY tools/reg_bench/metrics.py $OUT ccf_affine,pipeline,e2e,series
     $PY tools/reg_bench/overlay.py $OUT pipeline,e2e                     # side-by-side PNGs
 
-Deep-refine variants (2026-11-28): `run.py $OUT e2e:<texture>[+guard][+ridge][+search]` with texture
+Defaults since 2026-11-28 round 3: TEXTURE=nissl (falls back to paint without the Nissl file), PREPROC=clahe,
+LAYER_PULL on (CA pyramidal layer pulled onto the DAPI ridges, DG pinned).  Mean of S01-S03 (DG / CA / overall
+P90, µm): old 56 / 74 / 217, paint+clahe+pull 57 / 45 / 181, nissl+clahe+pull 33 / 41 / 93.
+Any `e2e:<...>` method switches LAYER_PULL off unless +pull is given; +pre=flat|flat150|clahe|zscore picks PREPROC.
+
+Deep-refine variants (2026-11-28): `run.py $OUT e2e:<texture>[+guard][+ridge][+search][+pull][+pre=X]` with texture
 paint (default) / layers (cell layers painted bright) / nissl (Allen CCFv3 Nissl, install with nissl.py);
 +guard rejects fits that move DG-sg or CA-sp away from the in-app DAPI ridges, +ridge adds the ridge metric,
 +search also scores the plane search with that texture.  Results are tagged e.g. e2e_nissl_guard.

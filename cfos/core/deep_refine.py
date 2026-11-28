@@ -24,9 +24,12 @@ GRID_UM = (320.0, 480.0)  # B-spline control-point spacing; the wider grid is tr
 DENSITY_SIGMA_UM = 12.0  # nuclear density smoothing
 BACKGROUND_UM = 400.0    # illumination flattening
 MIN_JACOBIAN = 0.25
-TEXTURE = "paint"        # "paint": every region its median section density (self-locks on thin layers that start
+TEXTURE = "nissl"        # "paint": every region its median section density (self-locks on thin layers that start
                          # off target); "layers": same, but principal cell layers painted bright; "nissl": the
-                         # CCFv3-aligned Allen Nissl volume (ccf_data/allen_ccfv3_nissl_25um.npz), when present
+                         # CCFv3-aligned Allen Nissl volume (ccf_data/allen_ccfv3_nissl_25um.npz), falls back to
+                         # "paint" when it is not installed.
+# Benchmark 2026-11-28 (S01-S03, mean µm, DG / CA / overall P90): old default (paint, flat, no pull) 56 / 74 / 217;
+# paint+clahe+pull 57 / 45 / 181; nissl+clahe+pull 33 / 41 / 93.
 # Experimental (off by default; benchmark 2026-11-28 in tools/reg_bench): the in-app DAPI ridge detector does not
 # yet agree with the benchmark's, so neither the ridge term nor the per-structure check can be trusted to decide.
 W_RIDGE = 0.             # weight of the DAPI cell-layer ridge term (atlas DG-sg/CA-sp mask vs detected ridges)
@@ -55,27 +58,39 @@ def indices(name):
     return _IDX[name]
 
 
+RIDGE_REACH_UM = 600.    # search for DAPI cell layers this far around the atlas hippocampus
+RIDGE_MIN_LEN_UM = 450.  # a cell-layer piece is at least this long ...
+RIDGE_MIN_WIDTH_UM = 42. # ... and this thick on average (vessels, fibre edges are thinner and branchy)
+
+
 def cell_ridges(density, mask, labels, pixel_um):
-    """DAPI principal cell layers near the atlas hippocampus: the densest 7 % within ~480 µm of it, in pieces of
-    at least ~0.01 mm².  Returns a bool mask (empty when the section has no hippocampus)."""
+    """DAPI principal cell layers (DG granule, CA pyramidal) around the atlas hippocampus.
+
+    Bright-ridge filter (Sato, 12–30 µm) on the nuclear density within RIDGE_REACH_UM of the atlas hippocampus,
+    kept where the ridge response and the density are both high, in long, thick pieces that are not on a
+    ventricle wall.  Wide reach on purpose: dorsal CA1 can sit 300–500 µm from where the affine atlas puts it.
+    Returns a bool mask (empty when the section has no hippocampus)."""
+    from skimage.filters import sato
+    from skimage.morphology import skeletonize
     hip = np.isin(labels, indices("hip"))
     if hip.sum() < 50:
         return np.zeros(mask.shape, bool)
-    inner = ndi.distance_transform_edt(mask) * pixel_um > 200
-    roi = ndi.distance_transform_edt(~hip) * pixel_um <= 480
-    roi &= inner
+    roi = (ndi.distance_transform_edt(~hip) * pixel_um <= RIDGE_REACH_UM) & \
+          (ndi.distance_transform_edt(mask) * pixel_um > 150)
     if roi.sum() < 100:
         return np.zeros(mask.shape, bool)
-    m = (density > np.percentile(density[roi], 93)) & roi
-    m = ndi.binary_opening(m, iterations=1)
+    ridge = sato(density, sigmas=[v / pixel_um for v in (12., 20., 30.)], black_ridges=False)
+    m = (ridge > np.percentile(ridge[roi], 88)) & (density > np.percentile(density[roi], 75)) & roi
+    m = ndi.binary_closing(m, iterations=1)
     comp, k = ndi.label(m)
-    near = ndi.distance_transform_edt(~hip) * pixel_um <= 200
     vent = np.isin(labels, indices("vent"))
     keep = []
     for c in range(1, k + 1):
         sel = comp == c
-        # pieces mostly away from the hippocampus or on a ventricle wall (ependyma, choroid plexus) are not layers
-        if sel.sum() * pixel_um ** 2 >= 1e4 and near[sel].mean() >= .5 and vent[sel].mean() <= .3:
+        length = skeletonize(sel).sum() * pixel_um
+        if length < RIDGE_MIN_LEN_UM or sel.sum() * pixel_um ** 2 / length < RIDGE_MIN_WIDTH_UM:
+            continue
+        if vent[sel].mean() <= .3:
             keep.append(c)
     return np.isin(comp, keep)
 
@@ -149,15 +164,34 @@ def sample_nissl(reg, W, H, field):
     return ndi.map_coordinates(nissl_volume(), [idx[..., 0], idx[..., 1], idx[..., 2]], order=1, mode="constant")
 
 
-def nuclear_density(image, mask, pixel_um):
-    """Flat-field normalised DAPI density in [0, 1] inside the tissue."""
+PREPROC = "clahe"        # DAPI local-contrast step before the density map: "flat" (divide by the BACKGROUND_UM
+                         # background), "flat150" (150 µm background), "clahe", "zscore" (local mean/sd, 150 µm)
+
+
+def _local_mean(x, m, s):
+    # Normalised convolution keeps the tissue edge from darkening the background estimate.
+    return ndi.gaussian_filter(np.where(m, x, 0), s) / np.maximum(ndi.gaussian_filter(m.astype(np.float32), s), 1e-3)
+
+
+def nuclear_density(image, mask, pixel_um, preproc=None):
+    """Flat-field normalised DAPI density in [0, 1] inside the tissue (local-contrast step: PREPROC)."""
+    preproc = preproc or PREPROC
     x = np.asarray(image, np.float32)
     m = np.asarray(mask, bool)
+    if preproc == "clahe" and m.any():
+        from skimage import exposure
+        hi = float(np.percentile(x[m], 99.8)) or 1.
+        x = exposure.equalize_adapthist(np.clip(x / hi, 0, 1), kernel_size=max(8, round(200. / pixel_um)),
+                                        clip_limit=.02).astype(np.float32) * 255
     d = ndi.gaussian_filter(x, max(.7, DENSITY_SIGMA_UM / pixel_um))
-    # Normalised convolution keeps the tissue edge from darkening the background estimate.
-    s = BACKGROUND_UM / pixel_um
-    bg = ndi.gaussian_filter(np.where(m, x, 0), s) / np.maximum(ndi.gaussian_filter(m.astype(np.float32), s), 1e-3)
-    r = np.where(m, d / (bg + 1.0), 0).astype(np.float32)
+    s = (150. if preproc in ("flat150", "zscore") else BACKGROUND_UM) / pixel_um
+    bg = _local_mean(x, m, s)
+    if preproc == "zscore":
+        sd = np.sqrt(np.maximum(_local_mean(x * x, m, s) - bg * bg, 1e-6))
+        z = np.where(m, (d - bg) / sd, 0)
+        r = np.clip(z + 3, 0, None).astype(np.float32)
+    else:
+        r = np.where(m, d / (bg + 1.0), 0).astype(np.float32)
     hi = float(np.percentile(r[m], 99.5)) if m.any() else 1.
     return np.clip(r / max(hi, 1e-6), 0, 1)
 
@@ -289,7 +323,99 @@ def landmark_error(field, landmarks):
     return [float(np.hypot(*(displaced(field, f) - np.asarray(a, float)))) for f, a in landmarks]
 
 
+LAYER_PULL = True        # after the texture fit, pull atlas CA-sp onto the DAPI CA ridges with DG pinned
+PULL_REACH_UM = 500.     # a CA ridge pixel looks this far for the atlas CA-sp it belongs to
+PULL_SIGMA_UM = 160.     # smoothness of the pull (100 µm folded on S01/S03; 160 µm: CA 74 -> 58 µm on the benchmark)
+PULL_ROUNDS = 25
+PULL_STEP_UM = 20.       # largest move per round (keeps each update fold-free)
+PULL_STEP_JAC = .6       # each round's own displacement keeps its Jacobian above this
+
+
 def refine(reg, image_oriented, mask_oriented, prior_warp, pixel_um, landmarks=()):
+    """Texture fit (texture_refine), then optionally the CA layer pull (layer_pull)."""
+    warp, report = texture_refine(reg, image_oriented, mask_oriented, prior_warp, pixel_um, landmarks)
+    if not LAYER_PULL or landmarks or reg.fit_atlas != "CCFv3":
+        return warp, report
+    base = warp if warp is not None else prior_warp
+    mask = np.asarray(mask_oriented, bool)
+    density = nuclear_density(image_oriented, mask, pixel_um)
+    pulled, pull_report = layer_pull(reg, base, density, mask, pixel_um)
+    report = {**report, "layer_pull": pull_report}
+    if pulled is None:
+        return warp, report
+    reason = report["reason"] + "，CA 细胞层对齐" if report.get("accepted") else "CA 细胞层对齐"
+    return pulled, {**report, "accepted": True, "reason": reason}
+
+
+def layer_pull(reg, field, density, mask, pixel_um):
+    """Move the atlas CA pyramidal layer onto the DAPI CA ridges while the dentate gyrus stays where it is.
+
+    A smooth texture fit cannot do both when the section's DG–CA1 distance differs from the atlas: fitting DG
+    drags dorsal CA1 100–300 µm away (benchmark 2026-11-28).  Here every CA ridge pixel is paired with the
+    nearest atlas CA-sp pixel (within PULL_REACH_UM), DG ridges and the tissue outline are pinned, and the
+    residuals are smoothed by normalised Gaussian convolution, a few damped rounds (ICP-like).
+    Returns (field or None, report); None when it did not help or would fold."""
+    from skimage.morphology import skeletonize
+    H, W = mask.shape
+    probe = lambda f: R.Registration(**{**reg.__dict__, "nonlinear": f is not None, "control_points": []})
+    labels_for = lambda f: R.label_maps(probe(f), W, H, None if f is None else np.asarray(f))[0]
+    lab = labels_for(field)
+    ridges = cell_ridges(density, mask, lab, pixel_um)
+    if not ridges.any():
+        return None, {"applied": False, "reason": "没有检测到海马细胞层"}
+    cls0 = ridge_classes(ridges, lab)
+    dg_r, ca_r = cls0 == 1, cls0 == 2
+    if ca_r.sum() * pixel_um < 300:
+        return None, {"applied": False, "reason": "没有检测到 CA 锥体层"}
+    cls = (dg_r * 1 + ca_r * 2).astype(np.uint8)
+    before = class_distances(cls, lab, pixel_um)
+    sigma = PULL_SIGMA_UM / pixel_um
+    floor = np.exp(-2.) / (2 * np.pi * sigma * sigma)        # one sample two sigmas away
+    edge = mask ^ ndi.binary_erosion(mask)
+    pins = [np.argwhere(dg_r)[::3], np.argwhere(edge)[::6]]
+    ca_pts = np.argwhere(ca_r)[::2]
+    cur = field
+    jac_floor = min(MIN_JACOBIAN, R.min_jacobian(field) if field is not None else 1.)
+    for _ in range(PULL_ROUNDS):
+        lab = labels_for(cur)
+        atlas_ca = np.isin(lab, indices("ca"))
+        if not atlas_ca.any():
+            break
+        dist, (iy, ix) = ndi.distance_transform_edt(~atlas_ca, return_indices=True)
+        q = ca_pts[dist[ca_pts[:, 0], ca_pts[:, 1]] * pixel_um <= PULL_REACH_UM]
+        num = np.zeros((2, H, W), np.float32); den = np.zeros((H, W), np.float32)
+        a_y, a_x = iy[q[:, 0], q[:, 1]], ix[q[:, 0], q[:, 1]]
+        np.add.at(num[0], (q[:, 0], q[:, 1]), a_x - q[:, 1])
+        np.add.at(num[1], (q[:, 0], q[:, 1]), a_y - q[:, 0])
+        np.add.at(den, (q[:, 0], q[:, 1]), 1.)
+        for pts in pins:
+            np.add.at(den, (pts[:, 0], pts[:, 1]), 1.)
+        g = [ndi.gaussian_filter(v, sigma) for v in (num[0], num[1], den)]
+        scale = 1. / np.maximum(g[2], floor)
+        residual = [g[0] * scale, g[1] * scale]
+        peak = float(np.hypot(*residual).max()) * pixel_um
+        if peak < 2:
+            break
+        if peak > PULL_STEP_UM:
+            residual = [v * (PULL_STEP_UM / peak) for v in residual]
+        if not R.min_jacobian(tuple(residual)) >= PULL_STEP_JAC:
+            residual = [v * .5 for v in residual]
+            if not R.min_jacobian(tuple(residual)) >= PULL_STEP_JAC:
+                break
+        nxt = compose(residual, cur)
+        if not R.min_jacobian(nxt) >= jac_floor:
+            break
+        cur = nxt
+    if cur is field:
+        return None, {"applied": False, "reason": "CA 对齐会折叠或无需移动", "before": before}
+    after = class_distances(cls, labels_for(cur), pixel_um)
+    ok = after.get("ca", np.inf) < before.get("ca", np.inf) - LAYER_TOL_UM and \
+        after.get("dg", 0.) <= before.get("dg", 0.) + LAYER_TOL_UM
+    report = {"applied": bool(ok), "before": before, "after": after, "min_jacobian": R.min_jacobian(cur)}
+    return (cur if ok else None), report
+
+
+def texture_refine(reg, image_oriented, mask_oriented, prior_warp, pixel_um, landmarks=()):
     """Return (warp, report).  warp is the full fixed->atlas field replacing prior_warp, or None to keep it.
 
     landmarks: [((section_x, section_y), (atlas_x, atlas_y)), ...] in pixel-index coordinates of the
@@ -307,7 +433,7 @@ def refine(reg, image_oriented, mask_oriented, prior_warp, pixel_um, landmarks=(
         return R.label_maps(probe, W, H, None if field is None else np.asarray(field))[0]
 
     lab0 = labels_for(prior_warp)
-    texture = TEXTURE if TEXTURE != "nissl" or nissl_volume() is not None else "layers"
+    texture = TEXTURE if TEXTURE != "nissl" or nissl_volume() is not None else "paint"
     ridges = cell_ridges(density, mask, lab0, pixel_um)
     bright = None
     if texture == "layers" and ridges.any():
@@ -395,7 +521,7 @@ def texture_score(reg, density, mask, interior, field, texture="paint", bright=N
 def texture_setup(reg, density, mask, field, pixel_um, texture=None):
     """(texture, bright) for the given texture (default TEXTURE), as refine() and search_plane() use them."""
     texture = texture or TEXTURE
-    texture = texture if texture != "nissl" or nissl_volume() is not None else "layers"
+    texture = texture if texture != "nissl" or nissl_volume() is not None else "paint"
     bright = None
     if texture == "layers":
         H, W = mask.shape

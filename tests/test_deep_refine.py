@@ -38,6 +38,22 @@ class DeepRefineTest(unittest.TestCase):
         self.assertAlmostEqual(float(synth[80, 100]), .9, places=5)
         self.assertAlmostEqual(float(synth[70, 100]), .2, places=5)
 
+    def test_cell_ridges_keep_thick_layers_drop_thin_vessels(self):
+        yy, xx = np.mgrid[:300, :400]
+        mask = np.ones((300, 400), bool)
+        density = np.full((300, 400), .2, np.float32)
+        density[(np.abs(yy - 100) < 4) & (xx > 60) & (xx < 340)] = .9      # 7 px = 56 µm thick layer
+        density[(np.abs(yy - 200) < 1) & (xx > 60) & (xx < 340)] = .9      # 2 px = 16 µm thin line
+        labels = np.zeros((300, 400), np.int32); labels[60:240, 40:360] = 7
+        saved = dict(D._IDX)
+        D._IDX.update(hip=np.array([7]), vent=np.array([99]))
+        try:
+            r = D.cell_ridges(density, mask, labels, 8.)
+        finally:
+            D._IDX.clear(); D._IDX.update(saved)
+        self.assertTrue(r[100, 200])
+        self.assertFalse(r[200, 200])
+
     def test_compose_adds_prior_at_displaced_point(self):
         shape = (20, 30)
         residual = (np.full(shape, 2., np.float32), np.zeros(shape, np.float32))
