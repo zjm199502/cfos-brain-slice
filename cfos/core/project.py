@@ -450,6 +450,8 @@ class Project:
                 "resolution_percent": self.detection.resolution_percent, "pixel_um": self.detection.pixel_um,
                 "tile": self.detection.tile,
                 "tile_in_source_pixels": self.detection.tile_in_source_pixels,
+                "tile_in_model_pixels": self.detection.tile_in_model_pixels,
+                "equal_tiles": self.detection.equal_tiles,
                 "overlap": self.detection.overlap,
                 "channels": {str(k): v.to_dict() for k, v in self.detection.channels.items()},
             },
@@ -519,6 +521,9 @@ class Project:
             resolution_percent=det.get("resolution_percent"), pixel_um=det.get("pixel_um", 0.5),
             tile=det.get("tile", 2048), overlap=det.get("overlap", 96),
             tile_in_source_pixels=det.get("tile_in_source_pixels", det.get("resolution_percent") is not None),
+            # Older projects keep their saved grid (and results) until a tile size is picked again.
+            tile_in_model_pixels=det.get("tile_in_model_pixels", False),
+            equal_tiles=det.get("equal_tiles", False),
             channels={int(k): ChannelParams.from_dict(v, p.channel_names[int(k)] if int(k) < len(p.channel_names) else "") for k, v in det.get("channels", {}).items()})
         p.coloc = ColocParams(**{k: v for k, v in d.get("coloc", {}).items() if k in ColocParams.__dataclass_fields__})
         p.thickness = d.get("thickness", "thin")
@@ -647,7 +652,9 @@ class Project:
         """不含图片的参数（识别、共标、显示、厚度、z-stack），可以保存成模板给别的项目用。"""
         return {"kind": "cfos参数模板", "version": 1, "channel_names": self.channel_names,
                 "detection": {"resolution_percent": self.detection.resolution_percent, "pixel_um": self.detection.pixel_um, "tile": self.detection.tile,
-                              "tile_in_source_pixels": self.detection.tile_in_source_pixels, "overlap": self.detection.overlap,
+                              "tile_in_source_pixels": self.detection.tile_in_source_pixels,
+                              "tile_in_model_pixels": self.detection.tile_in_model_pixels,
+                              "equal_tiles": self.detection.equal_tiles, "overlap": self.detection.overlap,
                               "channels": {str(k): v.to_dict() for k, v in self.detection.channels.items()}},
                 "coloc": self.coloc.to_dict(), "thickness": self.thickness, "z_mode": self.z_mode,
                 "unused_channels": self.unused_channels,
@@ -676,6 +683,8 @@ class Project:
         if "tile" in det:
             self.detection.tile = det["tile"]
             self.detection.tile_in_source_pixels = det.get("tile_in_source_pixels", det.get("resolution_percent") is not None)
+            self.detection.tile_in_model_pixels = det.get("tile_in_model_pixels", False)
+            self.detection.equal_tiles = det.get("equal_tiles", False)
         if "overlap" in det:
             self.detection.overlap = det["overlap"]
         chs = det.get("channels", {})
