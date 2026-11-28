@@ -39,6 +39,7 @@ from .tile_selection import TileSelectionMixin
 from .cell_rings import CellRings, add_cell_layer
 from .roi_counter import RoiCounter, RoiShapes
 from .update_panel import UpdateMixin
+from .clear_panel import ClearResultsMixin
 
 from .. import APP_NAME  # noqa: E402
 COLORMAP = {"DAPI": "blue", "Green": "green", "Red": "red", "Far red": "magenta"}
@@ -68,7 +69,7 @@ def big_button(text: str) -> QPushButton:
     return b
 
 
-class MainWindow(ProcessingScopeMixin, UpdateMixin, TeachingMixin, FigureMixin, TileSelectionMixin, RelocateMixin, QualityMixin, GroupsMixin, RegistrationMixin, QMainWindow):
+class MainWindow(ClearResultsMixin, ProcessingScopeMixin, UpdateMixin, TeachingMixin, FigureMixin, TileSelectionMixin, RelocateMixin, QualityMixin, GroupsMixin, RegistrationMixin, QMainWindow):
     def __init__(self):
         super().__init__()
         from ..core.updater import version_text
@@ -79,7 +80,12 @@ class MainWindow(ProcessingScopeMixin, UpdateMixin, TeachingMixin, FigureMixin, 
         self.slide = None
         self.task: Task | None = None
         self._after_task = None
-        self._cells_cache: dict[str, pd.DataFrame] = {}
+        from ..core.coloc_table import LRUDict
+        # 只保留最近查看的几张图的细胞结果；以前所有图片都常驻内存，大项目会占满内存而变慢
+        self._cells_cache: dict[str, pd.DataFrame] = LRUDict(4)
+        self._coloc_summaries: dict = {}     # 共标汇总表缓存：签名 → 每张图片的汇总
+        self._coloc_jobs: list = []
+        self._coloc_generation = 0
 
         # 看图窗口
         self.viewer = ViewerModel(title=APP_NAME)
@@ -112,7 +118,9 @@ class MainWindow(ProcessingScopeMixin, UpdateMixin, TeachingMixin, FigureMixin, 
         for panel in (self._panel_project, self._panel_sections, self._panel_display,
                       self._panel_detection, self._panel_coloc, self._panel_registration,
                       self._panel_groups, self._panel_export, self._panel_figure):
-            self.stack.addWidget(PanelScroll(panel()))
+            widget = panel()
+            self._add_clear_box(widget, self.stack.count())
+            self.stack.addWidget(PanelScroll(widget))
         self.roi_slots[3].addWidget(self.roi_counter)
         self.steps.currentRowChanged.connect(self._on_step)
         self.stack.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
@@ -395,6 +403,10 @@ class MainWindow(ProcessingScopeMixin, UpdateMixin, TeachingMixin, FigureMixin, 
             action()
 
     def _release_project(self):
+        for job in list(getattr(self, "_coloc_jobs", [])):
+            job.cancel()
+            job.wait()
+        self._coloc_generation = getattr(self, "_coloc_generation", 0) + 1
         self.task = None
         self._after_task = None
         self.centralWidget().setEnabled(True)
@@ -408,6 +420,8 @@ class MainWindow(ProcessingScopeMixin, UpdateMixin, TeachingMixin, FigureMixin, 
         if getattr(self, "_save_timer", None) and self._save_timer.isActive() and self.project:
             self._save_timer.stop()
             self.project.save()
+        if self.project:
+            self.project.wait_saved()
 
     def closeEvent(self, event):
         if self.task is not None and self.task.isRunning():
@@ -616,7 +630,8 @@ class MainWindow(ProcessingScopeMixin, UpdateMixin, TeachingMixin, FigureMixin, 
         attach_project(p.folder); log.info("打开项目 %s", p.folder)
         self.project = p
         self._sync_export_panel()
-        self._cells_cache.clear()
+        self._cells_cache.clear(); self._coloc_summaries.clear()
+        self.__dict__.pop("_exists_cache", None)
         self._reg_cache.clear()
         self.project_label.set_project(f"项目：{p.folder.name}")
         self._refresh_images()
@@ -745,7 +760,7 @@ class MainWindow(ProcessingScopeMixin, UpdateMixin, TeachingMixin, FigureMixin, 
             return chk
 
         def done(chk):
-            self._cells_cache.clear(); self._refresh_images(); self._refresh_channels_form(); self._refresh_enabled()
+            self._cells_cache.clear(); self._coloc_summaries.clear(); self._refresh_images(); self._refresh_channels_form(); self._refresh_enabled()
             self._q_levels = None; self._refresh_section_table()
             imports = [c for c in chk if c.get("类型") == "导入"]
             results = [c for c in chk if c.get("类型") != "导入"]
@@ -815,7 +830,7 @@ class MainWindow(ProcessingScopeMixin, UpdateMixin, TeachingMixin, FigureMixin, 
             item = self._update_project_cell(table, i, 0, im.display_name, f"{im.display_name}\n{im.path}")
             self._update_project_cell(table, i, 1, str(len(im.sections)) if im.sections else "—")
             status, tip = im.status, ""
-            missing = not Path(im.path).exists()
+            missing = not self._image_exists(im.path)
             if missing:
                 status = "找不到原图"
                 tip = f"原路径：{im.path}\n点下方“重新定位找不到的图片…”找回。"
@@ -850,6 +865,16 @@ class MainWindow(ProcessingScopeMixin, UpdateMixin, TeachingMixin, FigureMixin, 
             self.images_table.setCurrentCell(selected if 0 <= selected < len(p.images) else self.image_combo.currentIndex(), 0)
         self.images_table.blockSignals(False)
         self._refresh_project_progress()
+
+    def _image_exists(self, path):
+        """原图在移动硬盘或网络盘上时逐张检查很慢：结果缓存 30 秒（重新插上硬盘后最多 30 秒恢复显示）。"""
+        import time
+        cache = self.__dict__.setdefault("_exists_cache", {})
+        now = time.monotonic()
+        hit = cache.get(path)
+        if hit is None or now - hit[1] > 30:
+            hit = cache[path] = (Path(path).exists(), now)
+        return hit[0]
 
     def _refresh_project_progress(self):
         if self.stack.currentIndex() != 0:
@@ -1246,7 +1271,7 @@ class MainWindow(ProcessingScopeMixin, UpdateMixin, TeachingMixin, FigureMixin, 
         i = item.data(Qt.UserRole)
         if self.image and 0 <= i < len(self.image.rois) and item.text().strip():
             self.image.rois[i]["name"] = item.text().strip()
-            self.project.save(); self._draw_polygons()
+            self._save_later(); self._draw_polygons()
 
     def _edit_polygons(self, name):
         self.canvas_tools.reset()
@@ -1300,7 +1325,7 @@ class MainWindow(ProcessingScopeMixin, UpdateMixin, TeachingMixin, FigureMixin, 
         self.image.exclusions = [p for p in self.image.exclusions if not self._polygon_in_scope(p)] + ex
         rois = [r for r in self.image.rois if not self._polygon_in_scope(r["polygon"])] + new_rois
         self.image.rois = rois
-        self.project.save(); self._draw_polygons()
+        self._save_later(); self._draw_polygons()
         self.statusBar().showMessage(f"已保存：{len(self.image.exclusions)} 个排除区域，{len(rois)} 个自定义区域。"
                                      "导出 Excel 时生效，不需要重新识别。", 10000)
 
@@ -1350,6 +1375,7 @@ class MainWindow(ProcessingScopeMixin, UpdateMixin, TeachingMixin, FigureMixin, 
     def _replace_section_outlines(self, image, sections):
         if image.replace_sections(sections):
             self._cells_cache.pop(image.key, None)
+            self._coloc_summaries.clear()
             if self.image is image:
                 self._preview_grid = None
                 self._draw_cells()
@@ -1429,7 +1455,7 @@ class MainWindow(ProcessingScopeMixin, UpdateMixin, TeachingMixin, FigureMixin, 
             if names is not None:
                 self._processing_scope[self.image.key] = tuple(new_name if n == s.name else n for n in names)
             s.name = new_name
-        self.project.save(); self._draw_sections(); self._refresh_scope()
+        self._save_later(); self._draw_sections(); self._refresh_scope()
 
     def _zoom_section(self, r, _c):
         s = self.image.sections[r]
@@ -1704,7 +1730,7 @@ class MainWindow(ProcessingScopeMixin, UpdateMixin, TeachingMixin, FigureMixin, 
     def _save_later(self):
         if not hasattr(self, "_save_timer"):
             self._save_timer = QTimer(self); self._save_timer.setSingleShot(True)
-            self._save_timer.timeout.connect(lambda: self.project and self.project.save())
+            self._save_timer.timeout.connect(lambda: self.project and self.project.save(background=True))
         self._save_timer.start(500)
 
     # ================================================================ ④ 细胞识别
@@ -2378,8 +2404,10 @@ class MainWindow(ProcessingScopeMixin, UpdateMixin, TeachingMixin, FigureMixin, 
         def done(out):
             res, errors, reused = out
             self.project.save(); self._refresh_images(); self._sync_unmix_box(); self._sync_corrected_view()
+            self._coloc_summaries.clear()
             for k_, df in res.items():
-                self._cells_cache[k_] = df
+                if df is not None:
+                    self._cells_cache[k_] = df
             self._draw_cells()
             lines = []
             if section_names:
@@ -2505,7 +2533,7 @@ class MainWindow(ProcessingScopeMixin, UpdateMixin, TeachingMixin, FigureMixin, 
             return refresh_coloc(project, task.report, selection=selection, cancel=task.is_cancelled)
 
         def done(_):
-            self._cells_cache.clear(); self._refresh_coloc_table()
+            self._cells_cache.clear(); self._coloc_summaries.clear(); self._refresh_coloc_table()
             self.roi_counter.schedule()
 
         self.run_task(job, done, label="正在计算共标…")
@@ -2514,17 +2542,63 @@ class MainWindow(ProcessingScopeMixin, UpdateMixin, TeachingMixin, FigureMixin, 
         if not self.project:
             return
         self._load_coloc_controls()
-        frames = []
-        for im in self._view_project().images:
-            df = self.cells_for(im)
-            if df is None or df.empty or "merged_id" not in df.columns:
+        from dataclasses import replace as clone
+        from ..core.coloc_table import image_signature
+        view = self._view_project()
+        names = list(self.project.channel_names)
+        require = self.project.coloc.require_nucleus
+        signatures, missing = [], []
+        for im in view.images:
+            sig = image_signature(view, im, names, require)
+            if sig is None:
                 continue
-            enabled = {s.name for s in im.sections if s.enabled}
-            from ..core.pipeline import drop_excluded
-            cells = merged_cells(drop_excluded(df[df["section"].isin(enabled)], im), len(self.project.channel_names))
-            cells.insert(0, "图片", im.key)
-            frames.append(summarize(cells, self.project.channel_names, ("图片", "section"), require_nucleus=self.project.coloc.require_nucleus))
-        t = pd.concat(frames, ignore_index=True).rename(columns={"section": "脑片"}) if frames else pd.DataFrame()
+            signatures.append(sig)
+            if sig not in self._coloc_summaries:
+                # 后台线程只读这份浅拷贝，界面上继续修改脑片或排除区域不影响正在进行的汇总
+                missing.append((clone(im, sections=list(im.sections), exclusions=list(im.exclusions),
+                                      changed_outlines=dict(im.changed_outlines)), sig))
+        self._coloc_generation += 1
+        if not missing:
+            self._show_coloc_table(signatures)
+            return
+        self.coloc_table.clear()
+        self.coloc_table.setRowCount(1); self.coloc_table.setColumnCount(1)
+        self.coloc_table.setHorizontalHeaderLabels(["状态"])
+        self.coloc_table.setItem(0, 0, QTableWidgetItem(f"正在汇总 {len(missing)} 张图片的共标结果…"))
+        self.coloc_table.resizeColumnsToContents()
+        generation = self._coloc_generation
+
+        def job(task):
+            from ..core.coloc_table import image_summary
+            out = {}
+            for im, sig in missing:
+                if task.is_cancelled():
+                    break
+                out[sig] = image_summary(view, im, names, require)
+            return out
+
+        task = Task(job)
+        self._coloc_jobs.append(task)
+
+        def finished(result):
+            if len(self._coloc_summaries) > 4096:
+                self._coloc_summaries.clear()
+            self._coloc_summaries.update(result)
+            if generation == self._coloc_generation and self.project is not None:
+                self._show_coloc_table(signatures)
+
+        def failed(text):
+            if generation == self._coloc_generation:
+                self.coloc_table.setItem(0, 0, QTableWidgetItem(f"共标汇总出错：{text}"))
+
+        task.finished_ok.connect(finished, Qt.QueuedConnection)
+        task.failed.connect(failed, Qt.QueuedConnection)
+        task.finished.connect(lambda: task in self._coloc_jobs and self._coloc_jobs.remove(task), Qt.QueuedConnection)
+        task.start()
+
+    def _show_coloc_table(self, signatures):
+        from ..core.coloc_table import combine
+        t = combine(self._coloc_summaries.get(sig) for sig in signatures)
         self.coloc_table.clear()
         self.coloc_table.setRowCount(len(t)); self.coloc_table.setColumnCount(len(t.columns))
         self.coloc_table.setHorizontalHeaderLabels([str(c) for c in t.columns])

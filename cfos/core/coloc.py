@@ -139,7 +139,10 @@ def merged_cells(df: pd.DataFrame, n_channels: int) -> pd.DataFrame:
     g = df.groupby("merged_id")
     out = g.agg(section=("section", "first"), x=("x", "mean"), y=("y", "mean"))
     if "combo" in df.columns:
-        chs = g["combo"].first().apply(lambda s: {int(x) for x in str(s).split("+") if x != ""})
+        chs = g["combo"].first().apply(lambda s: None if pd.isna(s) else
+                                       {int(x) for x in str(s).split("+") if x != ""})
+        if chs.isna().any():  # 共标结果被清除的脑片（⑤ 清除共标）：按各自识别到的通道
+            chs = chs.where(chs.notna(), g["channel"].apply(set))
     else:
         chs = g["channel"].apply(set)
     for c in range(n_channels):

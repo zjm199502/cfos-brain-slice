@@ -194,7 +194,7 @@ class GroupsMixin:
         p = self.project
         if p is None:
             return
-        rows = self._view_project().sample_rows() if self._processing_scope is not None else []
+        rows = self._scoped_sample_rows() if self._processing_scope is not None else []
         t = self.grp_table
         t.blockSignals(True)
         t.setRowCount(len(rows))
@@ -248,7 +248,7 @@ class GroupsMixin:
     def _refresh_behavior_cells(self):
         """同一只动物的所有行显示同一个行为分数。"""
         t = self.grp_table
-        rows = {r["key"]: r for r in self._view_project().sample_rows()}
+        rows = {r["key"]: r for r in self._scoped_sample_rows()}
         t.blockSignals(True)
         for i in range(t.rowCount()):
             it = t.item(i, 4)
@@ -258,7 +258,7 @@ class GroupsMixin:
         t.blockSignals(False)
 
     def _refresh_ctrl_groups(self):
-        self._set_stat_groups(self._view_project().sample_rows(), self.st_ctrl.currentText())
+        self._set_stat_groups(self._scoped_sample_rows(), self.st_ctrl.currentText())
 
     def _set_stat_groups(self, rows, control):
         groups = sorted({r["组别"] for r in rows if r["动物"] and r["组别"]})
@@ -289,16 +289,16 @@ class GroupsMixin:
         for r in rows:
             key = self.grp_table.item(r, 0).data(Qt.UserRole)
             self.project.set_sample(key, **{what: text})
-        self.project.save(); self._sync_groups_panel()
+        self._save_later(); self._sync_groups_panel()
 
     def _grp_guess(self):
         if not self._require_scope():
             return
-        rows = [r for r in self._view_project().sample_rows() if not r["动物"]]
+        rows = [r for r in self._scoped_sample_rows() if not r["动物"]]
         for r in rows:
             self.project.set_sample(r["key"], animal=r["图片"])
         n = len(rows)
-        self.project.save(); self._sync_groups_panel()
+        self._save_later(); self._sync_groups_panel()
         self.statusBar().showMessage(f"已为 {n} 张脑片填写动物编号（= 图片名）。一张玻片上有多只动物时请手动修改。", 10000)
 
     def _grp_export(self):
@@ -307,7 +307,7 @@ class GroupsMixin:
         f, _ = QFileDialog.getSaveFileName(self, "导出分组表", str(self.project.folder / "分组表.xlsx"), "Excel 文件 (*.xlsx)")
         if not f:
             return
-        df = pd.DataFrame(self._view_project().sample_rows(), columns=["图片", "脑片", "动物", "组别", "行为分数"]).rename(columns={"动物": "动物编号"})
+        df = pd.DataFrame(self._scoped_sample_rows(), columns=["图片", "脑片", "动物", "组别", "行为分数"]).rename(columns={"动物": "动物编号"})
         try:
             df.to_excel(f, index=False)
         except PermissionError:
@@ -332,7 +332,7 @@ class GroupsMixin:
             self.error("分组表必须包含“图片”“脑片”两列（建议先用“导出分组表”生成）。")
             return
         df = df.fillna("")
-        keys = {r["key"] for r in self._view_project().sample_rows()}
+        keys = {r["key"] for r in self._scoped_sample_rows()}
         n, miss, bad = 0, [], []
         for _, r in df.iterrows():
             k = f"{r['图片']}/{r['脑片']}"
@@ -345,7 +345,7 @@ class GroupsMixin:
                 if not self.project.set_behavior(animal, b):
                     bad.append(f"{animal}：{b}")
             n += 1
-        self.project.save(); self._sync_groups_panel()
+        self._save_later(); self._sync_groups_panel()
         msg = f"已导入 {n} 张脑片的分组。"
         if miss:
             msg += f"\n以下 {len(miss)} 行在项目中找不到，已忽略：\n" + "\n".join(miss[:10])
@@ -358,7 +358,7 @@ class GroupsMixin:
         if self.project is not None:
             self.project.stats.update(region_set=self.st_scope.mode(), max_depth=0,
                                       region_ids=self.st_scope.region_ids())
-            self.project.save()
+            self._save_later()
 
     def _stats_params(self) -> StatsParams:
         from ..core.region_sets import CUSTOM
@@ -367,7 +367,7 @@ class GroupsMixin:
                          min_area_mm2=self.st_area.value(),
                          region_set=self.st_scope.mode(), region_ids=self.st_scope.region_ids())
         if sp.region_set != CUSTOM or sp.region_ids:
-            self.project.stats = sp.to_dict(); self.project.save()
+            self.project.stats = sp.to_dict(); self._save_later()
         return sp
 
     def run_stats(self, region_sec=None):

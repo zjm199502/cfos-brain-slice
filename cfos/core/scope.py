@@ -72,7 +72,8 @@ def scoped_project(project: Project, selection: Selection | None):
         names = {s.name for s in chosen}
         if selection[im.key] is not None and not names:
             continue
-        clone = deepcopy(im)
+        # 报表只读脑片轮廓：轮廓点是不可变元组，直接共用，不逐点复制（大项目里这是复制的主要耗时）
+        clone = deepcopy(im, {id(s.contour0): s.contour0 for s in im.sections})
         clone.sections = [s for s in clone.sections if s.name in names]
         clone.field_reviews = [row for row in clone.field_reviews if row.get("脑片") in names]
         if selection[im.key] is not None and clone.figure_rois:

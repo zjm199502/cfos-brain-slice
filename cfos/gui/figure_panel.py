@@ -306,7 +306,7 @@ class FigureMixin:
                     k += 1
                 r["name"] = f"ROI{k}"; used.add(r["name"])
         self.image.figure_rois = new
-        self.project.save()
+        self._save_later()
         self._draw_figure_rois(force=True)
         self._refresh_fig_list()
         self.statusBar().showMessage(f"已保存 {len(new)} 个截图框。", 5000)
@@ -332,7 +332,7 @@ class FigureMixin:
         name = it.text().strip() or self.image.figure_rois[i]["name"]
         self.image.figure_rois[i]["name"] = name
         self.fig_list.blockSignals(True); it.setText(name); self.fig_list.blockSignals(False)
-        self.project.save(); self._draw_figure_rois()
+        self._save_later(); self._draw_figure_rois()
 
     def _fig_zoom(self, it):
         if it is None or self.image is None:
@@ -351,7 +351,7 @@ class FigureMixin:
         if self.image is None or not (0 <= i < len(self.image.figure_rois)):
             return
         del self.image.figure_rois[i]
-        self.project.save(); self._draw_figure_rois(force=True); self._refresh_fig_list()
+        self._save_later(); self._draw_figure_rois(force=True); self._refresh_fig_list()
 
     def fig_copy_rois(self):
         if not self._require_scope():
@@ -377,7 +377,7 @@ class FigureMixin:
                         continue
                     im.figure_rois.append({"name": name, "x": cx - r["w"] / 2, "y": cy - r["h"] / 2, "w": r["w"], "h": r["h"]})
                     n += 1
-        self.project.save(); self._draw_figure_rois(force=True); self._refresh_fig_list()
+        self._save_later(); self._draw_figure_rois(force=True); self._refresh_fig_list()
         self.info(f"已按相对位置复制，新增 {n} 个截图框。请到各张图片上检查位置是否合适（不合适可以拖动调整后再保存）。")
 
     # ---------------------------------------------------------------- 预览与导出
