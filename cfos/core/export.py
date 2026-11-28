@@ -323,8 +323,8 @@ def _registration_rows(project: Project) -> list:
             if r.nonlinear:
                 method += " + 非线性贴合" + (f"（{r.nl_method}）" if r.nl_method else "")
             methods[method] += 1
-            if r.control_points:
-                fixes += len(r.control_points); fixed_secs += 1
+            if r.control_points or r.landmarks:
+                fixes += len(r.control_points) + len(r.landmarks); fixed_secs += 1
             if r.ap_auto:
                 ap_n += 1; ap_um.append(abs(r.ap_auto) * 25)
             if r.plane_raw:
@@ -338,7 +338,7 @@ def _registration_rows(project: Project) -> list:
             ("前后位置自动校正（图谱模板与 DAPI 互信息最大）",
              f"{ap_n} 张脑片校正过，挪动 {min(ap_um):.0f}–{max(ap_um):.0f} µm" if ap_n else "无"),
             ("同一动物统一切面角度", f"{unified} 张脑片" if unified else "无"),
-            ("手动修正", f"{fixed_secs} 张脑片，共 {fixes} 个修正点" if fixes else "无")]
+            ("手动修正", f"{fixed_secs} 张脑片，共 {fixes} 个标志点 / 修正点" if fixes else "无")]
 
 
 @project_atlas
