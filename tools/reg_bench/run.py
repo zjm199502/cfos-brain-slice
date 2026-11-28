@@ -5,6 +5,16 @@ import sys, json, os, time, numpy as np
 sys.path.insert(0, __import__('os').path.join(__import__('os').path.dirname(__import__('os').path.abspath(__file__)), '..', '..'))
 from cfos.core import registration as R
 S, method = sys.argv[1], sys.argv[2]
+tag = method.replace(':', '_')
+if ':' in method:   # e.g. e2e:nissl+guard+ridge -> deep_refine.TEXTURE='nissl', LAYER_GUARD, W_RIDGE=.3
+    from cfos.core import deep_refine as _D
+    method, opts = method.split(':', 1)
+    tex, *flags = opts.split('+')
+    _D.TEXTURE = tex or _D.TEXTURE
+    _D.LAYER_GUARD = 'guard' in flags
+    _D.W_RIDGE = .3 if 'ridge' in flags else 0.
+    if 'search' in flags: _D.SEARCH_TEXTURE = _D.TEXTURE
+    tag = tag.replace('+', '_')
 os.chdir('/')   # reproduce the Finder-launched app
 NAMES = ('S01','S02','S03')
 joint = {"bounds": {}, "notes": {}}
@@ -58,5 +68,5 @@ for n in NAMES:
     elif method == 'legacy':
         warp = R.nonlinear_fit(reg, R.orient(mask, reg.orientation), R.orient(img, reg.orientation)); reg.nonlinear = True
     print(n, method, f"{time.time()-t:.1f}s", reg.nonlinear, json.dumps(reg.metrics, ensure_ascii=False, default=float)[:400], flush=True)
-    json.dump(reg.to_dict(), open(f"{S}/{n}_{method}.json", "w"), default=float)
-    if warp is not None: np.save(f"{S}/{n}_{method}_warp.npy", np.asarray(warp, np.float32))
+    json.dump(reg.to_dict(), open(f"{S}/{n}_{tag}.json", "w"), default=float)
+    if warp is not None: np.save(f"{S}/{n}_{tag}_warp.npy", np.asarray(warp, np.float32))

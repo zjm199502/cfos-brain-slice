@@ -28,6 +28,16 @@ class DeepRefineTest(unittest.TestCase):
         self.assertAlmostEqual(float(synth[80, 100]), .2, places=5)
         self.assertEqual(float(synth[0, 0]), 0.)
 
+    def test_bright_layers_do_not_inherit_what_lies_under_them(self):
+        # The atlas layer (label 2) sits 20 px off the real bright band: painted by median it would be dark.
+        labels, mask = bands(shift=20)
+        real, _ = bands()
+        density = np.where(real >= 2, .9, .2).astype(np.float32)
+        self.assertAlmostEqual(float(D.paint_labels(labels, density, mask)[80, 100]), .2, places=5)
+        synth = D.paint_labels(labels, density, mask, bright=(np.array([2, 3]), .9))
+        self.assertAlmostEqual(float(synth[80, 100]), .9, places=5)
+        self.assertAlmostEqual(float(synth[70, 100]), .2, places=5)
+
     def test_compose_adds_prior_at_displaced_point(self):
         shape = (20, 30)
         residual = (np.full(shape, 2., np.float32), np.zeros(shape, np.float32))

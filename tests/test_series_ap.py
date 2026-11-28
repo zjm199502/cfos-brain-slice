@@ -131,8 +131,9 @@ class FewSlicesTest(unittest.TestCase):
 
 class SearchBoundsTest(unittest.TestCase):
     def test_ap_search_respects_series_bounds(self):
-        orig = D.texture_score
-        D.texture_score = lambda reg, *a: float(reg.ap_auto)   # texture keeps pulling posterior/anterior
+        orig, tex = D.texture_score, D.TEXTURE
+        D.TEXTURE = "paint"
+        D.texture_score = lambda reg, *a, **k: float(reg.ap_auto)   # texture keeps pulling posterior/anterior
         try:
             img = np.random.default_rng(0).random((40, 50)).astype(np.float32)
             mask = np.zeros((40, 50), bool); mask[5:35, 5:45] = True
@@ -142,7 +143,7 @@ class SearchBoundsTest(unittest.TestCase):
             changed, _ = D.search_plane(coronal(300.), img, mask, None, 25.)
             self.assertEqual(changed["ap_auto"], 16.)
         finally:
-            D.texture_score = orig
+            D.texture_score, D.TEXTURE = orig, tex
 
 
 class AutoregRunTest(unittest.TestCase):

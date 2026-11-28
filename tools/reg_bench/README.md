@@ -12,5 +12,12 @@ Run with the FosFolio app Python (needs itk-elastix):
     $PY tools/reg_bench/metrics.py $OUT ccf_affine,pipeline,e2e,series
     $PY tools/reg_bench/overlay.py $OUT pipeline,e2e                     # side-by-side PNGs
 
-Primary metric: mean distance (µm) from atlas DG-sg to the DAPI-detected granule layer.
+Deep-refine variants (2026-11-28): `run.py $OUT e2e:<texture>[+guard][+ridge][+search]` with texture
+paint (default) / layers (cell layers painted bright) / nissl (Allen CCFv3 Nissl, install with nissl.py);
++guard rejects fits that move DG-sg or CA-sp away from the in-app DAPI ridges, +ridge adds the ridge metric,
++search also scores the plane search with that texture.  Results are tagged e.g. e2e_nissl_guard.
+
+Metrics (metrics.py): DAPI-detected cell layers inside the hippocampus only (piriform, choroid plexus removed),
+split into DG (granule layer -> atlas DG-sg) and CA (pyramidal layer -> atlas CA1-3 sp), plus atlas DG-sg ->
+DAPI granule layer.  The DG/CA split is fixed per section from the affine fit.
 Sections are hard-coded as S01–S03.

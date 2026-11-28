@@ -24,6 +24,129 @@ GRID_UM = (320.0, 480.0)  # B-spline control-point spacing; the wider grid is tr
 DENSITY_SIGMA_UM = 12.0  # nuclear density smoothing
 BACKGROUND_UM = 400.0    # illumination flattening
 MIN_JACOBIAN = 0.25
+TEXTURE = "paint"        # "paint": every region its median section density (self-locks on thin layers that start
+                         # off target); "layers": same, but principal cell layers painted bright; "nissl": the
+                         # CCFv3-aligned Allen Nissl volume (ccf_data/allen_ccfv3_nissl_25um.npz), when present
+# Experimental (off by default; benchmark 2026-11-28 in tools/reg_bench): the in-app DAPI ridge detector does not
+# yet agree with the benchmark's, so neither the ridge term nor the per-structure check can be trusted to decide.
+W_RIDGE = 0.             # weight of the DAPI cell-layer ridge term (atlas DG-sg/CA-sp mask vs detected ridges)
+LAYER_GUARD = False      # reject a fit that moves the atlas DG-sg or CA-sp further from the DAPI ridges
+LAYER_TOL_UM = 10.       # ... by more than this
+SEARCH_TEXTURE = "paint" # the plane search with "layers"/"nissl" scoring jumped AP by up to 200 µm on S02
+CELL_LAYERS = (632, 407, 446, 495)   # DG-sg, CA1sp, CA2sp, CA3sp (structure ids)
+DG_LAYER = (632,)
+HIPPOCAMPUS = 1080
+
+
+def _indices(ids):
+    from .atlas import load_atlas
+    from .atlas_choice import CCF
+    st = load_atlas(CCF).structures
+    return st[st.path.astype(str).apply(lambda p: any(f"/{i}/" in f"/{p}/" for i in ids))]["index"].to_numpy()
+
+
+_IDX = {}
+
+
+def indices(name):
+    if name not in _IDX:
+        _IDX[name] = _indices({"layers": CELL_LAYERS, "dg": DG_LAYER, "ca": CELL_LAYERS[1:],
+                               "hip": (HIPPOCAMPUS,), "vent": (73,)}[name])
+    return _IDX[name]
+
+
+def cell_ridges(density, mask, labels, pixel_um):
+    """DAPI principal cell layers near the atlas hippocampus: the densest 7 % within ~480 µm of it, in pieces of
+    at least ~0.01 mm².  Returns a bool mask (empty when the section has no hippocampus)."""
+    hip = np.isin(labels, indices("hip"))
+    if hip.sum() < 50:
+        return np.zeros(mask.shape, bool)
+    inner = ndi.distance_transform_edt(mask) * pixel_um > 200
+    roi = ndi.distance_transform_edt(~hip) * pixel_um <= 480
+    roi &= inner
+    if roi.sum() < 100:
+        return np.zeros(mask.shape, bool)
+    m = (density > np.percentile(density[roi], 93)) & roi
+    m = ndi.binary_opening(m, iterations=1)
+    comp, k = ndi.label(m)
+    near = ndi.distance_transform_edt(~hip) * pixel_um <= 200
+    vent = np.isin(labels, indices("vent"))
+    keep = []
+    for c in range(1, k + 1):
+        sel = comp == c
+        # pieces mostly away from the hippocampus or on a ventricle wall (ependyma, choroid plexus) are not layers
+        if sel.sum() * pixel_um ** 2 >= 1e4 and near[sel].mean() >= .5 and vent[sel].mean() <= .3:
+            keep.append(c)
+    return np.isin(comp, keep)
+
+
+def layer_distances(ridges, labels, pixel_um):
+    """Mean distance (µm) of DAPI ridge pixels to the atlas DG-sg and CA-sp, each ridge piece assigned to the
+    nearer of the two in the given labels.  Returns {"dg": µm or None, "ca": µm or None}."""
+    out = {"dg": None, "ca": None}
+    if not ridges.any():
+        return out
+    d = {k: ndi.distance_transform_edt(~np.isin(labels, indices(k))) * pixel_um for k in ("dg", "ca")}
+    comp, k = ndi.label(ridges)
+    vals = {"dg": [], "ca": []}
+    for c in range(1, k + 1):
+        m = comp == c
+        key = "dg" if np.median(d["dg"][m]) <= np.median(d["ca"][m]) else "ca"
+        vals[key].append(d[key][m])
+    for key, v in vals.items():
+        if v:
+            out[key] = float(np.concatenate(v).mean())
+    return out
+
+
+def ridge_classes(ridges, labels):
+    """Freeze the DG/CA assignment of each ridge piece (from the labels before refinement)."""
+    cls = np.zeros(ridges.shape, np.uint8)
+    if not ridges.any():
+        return cls
+    d = {k: ndi.distance_transform_edt(~np.isin(labels, indices(k))) for k in ("dg", "ca")}
+    comp, k = ndi.label(ridges)
+    for c in range(1, k + 1):
+        m = comp == c
+        cls[m] = 1 if np.median(d["dg"][m]) <= np.median(d["ca"][m]) else 2
+    return cls
+
+
+def class_distances(cls, labels, pixel_um):
+    out = {}
+    for key, c in (("dg", 1), ("ca", 2)):
+        sel = cls == c
+        if sel.any():
+            out[key] = float((ndi.distance_transform_edt(~np.isin(labels, indices(key))) * pixel_um)[sel].mean())
+    return out
+
+
+_NISSL = {}
+
+
+def nissl_volume():
+    """The CCFv3-aligned Allen Nissl volume (AP, DV, ML at 25 µm, uint8), or None if it is not installed."""
+    if "v" not in _NISSL:
+        from .resources import allen_atlas_dir
+        path = allen_atlas_dir() / "allen_ccfv3_nissl_25um.npz"
+        try:
+            with np.load(path, allow_pickle=False) as z:
+                _NISSL["v"] = z["nissl"]
+        except (OSError, KeyError, ValueError):
+            _NISSL["v"] = None
+    return _NISSL["v"]
+
+
+def sample_nissl(reg, W, H, field):
+    from .atlas import qn_to_asr
+    pl = R.adjusted_plane(reg)
+    t, s = np.mgrid[0:H, 0:W].astype(np.float32)
+    if field is not None:
+        s = s + field[0]; t = t + field[1]
+    s = (s + .5) / W; t = (t + .5) / H
+    p = pl.o[None, None, :] + s[..., None] * pl.u[None, None, :] + t[..., None] * pl.v[None, None, :]
+    idx = qn_to_asr(p)
+    return ndi.map_coordinates(nissl_volume(), [idx[..., 0], idx[..., 1], idx[..., 2]], order=1, mode="constant")
 
 
 def nuclear_density(image, mask, pixel_um):
@@ -39,8 +162,12 @@ def nuclear_density(image, mask, pixel_um):
     return np.clip(r / max(hi, 1e-6), 0, 1)
 
 
-def paint_labels(labels, density, mask, min_pixels=8):
-    """Synthetic DAPI: each atlas label painted with the median section density inside it."""
+def paint_labels(labels, density, mask, min_pixels=8, bright=None):
+    """Synthetic DAPI: each atlas label painted with the median section density inside it.
+
+    bright=(label indices, value): those labels get the fixed value instead.  Thin principal cell layers that
+    start off target would otherwise be painted with whatever lies under them (often darker than the tissue)
+    and never pull towards the real layer."""
     lab = np.asarray(labels)
     inside = (lab > 0) & mask
     keys, inverse = np.unique(lab[inside], return_inverse=True)
@@ -52,6 +179,8 @@ def paint_labels(labels, density, mask, min_pixels=8):
     for i in range(len(keys)):
         v = values[order[bounds[i]:bounds[i + 1]]]
         out[i] = np.median(v) if v.size >= min_pixels else fill
+    if bright is not None:
+        out[np.isin(keys, bright[0])] = bright[1]
     synth = np.zeros(lab.shape, np.float32)
     synth[inside] = out[inverse]
     synth[(lab > 0) & ~mask] = fill
@@ -65,7 +194,8 @@ def _write_points(path, points):
             f.write(f"{float(x):.4f} {float(y):.4f}\n")
 
 
-def _bspline(fixed, moving, fixed2, moving2, grid_px, w_outline=.3, iters=400, points=None, w_points=.5):
+def _bspline(fixed, moving, fixed2, moving2, grid_px, w_outline=.3, iters=400, points=None, w_points=.5,
+             ridge=None, w_ridge=W_RIDGE):
     """B-spline on texture NCC + outline MI (+ landmarks); returns fixed->moving (dx, dy) in pixels.
 
     points: [((fixed_x, fixed_y), (moving_x, moving_y)), ...] in pixel-index coordinates."""
@@ -76,13 +206,20 @@ def _bspline(fixed, moving, fixed2, moving2, grid_px, w_outline=.3, iters=400, p
     m.SetFixedImage(as_img(fixed)); m.SetMovingImage(as_img(moving))
     metrics = ["AdvancedNormalizedCorrelation", "AdvancedMattesMutualInformation", "TransformBendingEnergyPenalty"]
     weights = [1. - w_outline, w_outline, .05]
+    pairs = [(fixed2, moving2)] * 2
+    if ridge is not None:
+        # DAPI ridges (fixed) vs atlas cell layers (moving), both blurred so the metric sees them from afar.
+        metrics.append("AdvancedMeanSquares")
+        weights.append(w_ridge)
+        pairs.append(ridge)
     if points:
         metrics.append("CorrespondingPointsEuclideanDistanceMetric")
         weights.append(w_points)
+        pairs.append((fixed2, moving2))
     # Multi-metric elastix needs one image pair, interpolator, sampler and pyramid per metric,
     # even for the bending penalty and the landmark term, which ignore the images.
-    for _ in metrics[1:]:
-        m.AddFixedImage(as_img(fixed2)); m.AddMovingImage(as_img(moving2))
+    for f2, m2 in pairs:
+        m.AddFixedImage(as_img(f2)); m.AddMovingImage(as_img(m2))
     po = itk.ParameterObject.New()
     bs = po.GetDefaultParameterMap("bspline", 3, float(grid_px))
     bs["Registration"] = ["MultiMetricMultiResolutionRegistration"]
@@ -170,9 +307,26 @@ def refine(reg, image_oriented, mask_oriented, prior_warp, pixel_um, landmarks=(
         return R.label_maps(probe, W, H, None if field is None else np.asarray(field))[0]
 
     lab0 = labels_for(prior_warp)
-    synth0 = paint_labels(lab0, density, mask)
+    texture = TEXTURE if TEXTURE != "nissl" or nissl_volume() is not None else "layers"
+    ridges = cell_ridges(density, mask, lab0, pixel_um)
+    bright = None
+    if texture == "layers" and ridges.any():
+        bright = (indices("layers"), float(np.median(density[ridges])))
+
+    def synth_for(field, lab):
+        if texture == "nissl":
+            nis = sample_nissl(reg, W, H, None if field is None else np.asarray(field)).astype(np.float32)
+            return nuclear_density(nis, lab > 0, pixel_um)
+        return paint_labels(lab, density, mask, bright=bright)
+
+    blur = max(1., 40. / pixel_um)
+    fixed_ridge = ndi.gaussian_filter(ridges.astype(np.float32), blur) if ridges.any() else None
+    moving_ridge = lambda lab: ndi.gaussian_filter(np.isin(lab, indices("layers")).astype(np.float32), blur)
+    cls = ridge_classes(ridges, lab0)
+    synth0 = synth_for(prior_warp, lab0)
     interior = ndi.binary_erosion(mask, iterations=max(1, round(150. / pixel_um)))
-    before = {"texture_ncc": _ncc(density, synth0, interior), "dice": R.dice(lab0 > 0, mask)}
+    before = {"texture_ncc": _ncc(density, synth0, interior), "dice": R.dice(lab0 > 0, mask),
+              "layers_um": class_distances(cls, lab0, pixel_um), "texture": texture}
     if landmarks:
         before["landmark_um"] = [e * pixel_um for e in landmark_error(prior_warp, landmarks)]
     fixed_outline = ndi.gaussian_filter(mask.astype(np.float32), 2)
@@ -185,7 +339,8 @@ def refine(reg, image_oriented, mask_oriented, prior_warp, pixel_um, landmarks=(
         for spacing in GRID_UM:
             try:
                 residual = _bspline(density, synth, fixed_outline, moving_outline, max(8., spacing / pixel_um),
-                                    points=points)
+                                    points=points,
+                                    ridge=None if fixed_ridge is None or W_RIDGE <= 0 else (fixed_ridge, moving_ridge(lab)))
             except (RuntimeError, ImportError) as exc:
                 return None, {"accepted": False, "reason": "深部纹理贴合失败，保留原结果。", "error": str(exc),
                               "before": before}
@@ -200,11 +355,12 @@ def refine(reg, image_oriented, mask_oriented, prior_warp, pixel_um, landmarks=(
             break
         field = candidate
         lab = labels_for(field)
-        synth = paint_labels(lab, density, mask)
+        synth = synth_for(field, lab)
     if field is prior_warp:
         return None, {"accepted": False, "reason": "深部纹理贴合出现折叠，保留原结果。", "before": before}
     after = {"texture_ncc": _ncc(density, synth, interior), "dice": R.dice(lab > 0, mask),
-             "min_jacobian": R.min_jacobian(field)}
+             "min_jacobian": R.min_jacobian(field), "layers_um": class_distances(cls, lab, pixel_um)}
+    worse = [k for k, v in after["layers_um"].items() if v > before["layers_um"].get(k, np.inf) + LAYER_TOL_UM]
     if landmarks:
         after["landmark_um"] = [e * pixel_um for e in landmark_error(field, landmarks)]
         # Landmarks are the user's explicit decision; only reject if they are not honoured or the outline breaks.
@@ -213,23 +369,49 @@ def refine(reg, image_oriented, mask_oriented, prior_warp, pixel_um, landmarks=(
             return None, {"accepted": False, "reason": "标志点没有贴合到位，保留原结果。", "before": before,
                           "candidate": after}
         return field, {"accepted": True, "reason": "深部纹理贴合（含标志点）", "before": before, "after": after}
-    if after["texture_ncc"] <= before["texture_ncc"] + .01 or after["dice"] < before["dice"] - .005:
+    if worse and LAYER_GUARD:
+        return None, {"accepted": False, "reason": "深部纹理贴合让海马细胞层（" + "、".join(
+            {"dg": "DG", "ca": "CA"}[k] for k in worse) + "）离 DAPI 更远，保留原结果。", "before": before,
+                      "candidate": after}
+    improved = LAYER_GUARD and any(after["layers_um"][k] < before["layers_um"][k] - LAYER_TOL_UM
+                                   for k in after["layers_um"] if k in before["layers_um"])
+    if (after["texture_ncc"] <= before["texture_ncc"] + .01 and not improved) or after["dice"] < before["dice"] - .005:
         return None, {"accepted": False, "reason": "深部纹理检查未通过，保留原结果。", "before": before,
                       "candidate": after}
     return field, {"accepted": True, "reason": "深部纹理贴合", "before": before, "after": after}
 
 
-def texture_score(reg, density, mask, interior, field):
+def texture_score(reg, density, mask, interior, field, texture="paint", bright=None, pixel_um=8.):
     H, W = mask.shape
-    lab = R.label_maps(reg, W, H, None if field is None else np.asarray(field))[0]
-    return _ncc(density, paint_labels(lab, density, mask), interior)
+    f = None if field is None else np.asarray(field)
+    if texture == "nissl":
+        lab = R.label_maps(reg, W, H, f)[0]
+        synth = nuclear_density(sample_nissl(reg, W, H, f).astype(np.float32), lab > 0, pixel_um)
+    else:
+        synth = paint_labels(R.label_maps(reg, W, H, f)[0], density, mask, bright=bright)
+    return _ncc(density, synth, interior)
+
+
+def texture_setup(reg, density, mask, field, pixel_um, texture=None):
+    """(texture, bright) for the given texture (default TEXTURE), as refine() and search_plane() use them."""
+    texture = texture or TEXTURE
+    texture = texture if texture != "nissl" or nissl_volume() is not None else "layers"
+    bright = None
+    if texture == "layers":
+        H, W = mask.shape
+        lab = R.label_maps(R.Registration(**{**reg.__dict__, "nonlinear": field is not None, "control_points": []}),
+                           W, H, None if field is None else np.asarray(field))[0]
+        ridges = cell_ridges(density, mask, lab, pixel_um)
+        if ridges.any():
+            bright = (indices("layers"), float(np.median(density[ridges])))
+    return texture, bright
 
 
 def search_plane(reg, image_oriented, mask_oriented, prior_warp, pixel_um, rounds=3, ap_bounds=None):
     """Coordinate search of the cutting plane (AP shift, DV and ML tilt) that best explains the DAPI texture.
 
     giRAff only searches straight coronal planes.  Here the plane is nudged with the in-plane fit held fixed;
-    every candidate is scored by how well the region-painted atlas correlates with the section.
+    every candidate is scored by how well the synthetic atlas texture (see TEXTURE) correlates with the section.
     ap_bounds=(lo, hi) limits the AP change (voxels, relative to the current ap_auto), e.g. to stay where the
     slice order of the series allows; the default is the symmetric AP limit below.
     Returns a dict of the changed Registration fields (possibly empty) and a report."""
@@ -239,7 +421,10 @@ def search_plane(reg, image_oriented, mask_oriented, prior_warp, pixel_um, round
     best = {"ap_auto": float(reg.ap_auto), "tilt_dv": float(reg.tilt_dv), "tilt_ml": float(reg.tilt_ml)}
     probe = lambda values: R.Registration(**{**reg.__dict__, **values, "control_points": [],
                                             "nonlinear": prior_warp is not None})
-    base = best_score = texture_score(probe(best), density, mask, interior, prior_warp)
+    texture, bright = texture_setup(reg, density, mask, prior_warp, pixel_um, SEARCH_TEXTURE)
+    score = lambda r: texture_score(r, density, mask, interior, prior_warp, texture=texture, bright=bright,
+                                    pixel_um=pixel_um)
+    base = best_score = score(probe(best))
     steps = {"ap_auto": (4., 2., 1.), "tilt_dv": (2., 1., .5), "tilt_ml": (2., 1., .5)}
     limits = {"ap_auto": 16., "tilt_dv": 8., "tilt_ml": 8.}
     lo, hi = ap_bounds if ap_bounds is not None else (-limits["ap_auto"], limits["ap_auto"])
@@ -254,14 +439,14 @@ def search_plane(reg, image_oriented, mask_oriented, prior_warp, pixel_um, round
                     delta = trial[key] - float(getattr(reg, key))
                     if not bounds[key][0] - 1e-9 <= delta <= bounds[key][1] + 1e-9:
                         break
-                    score = texture_score(probe(trial), density, mask, interior, prior_warp)
-                    if score <= best_score + 1e-3:
+                    value = score(probe(trial))
+                    if value <= best_score + 1e-3:
                         break
-                    best, best_score = trial, score
+                    best, best_score = trial, value
     changed = {k: v for k, v in best.items() if v != float(getattr(reg, k))}
     if best_score < base + .005:
         changed = {}
-    report = {"before": base, "after": best_score, "changed": changed}
+    report = {"before": base, "after": best_score, "changed": changed, "texture": texture}
     if ap_bounds is not None:
         report["ap_bounds"] = [float(v) for v in bounds["ap_auto"]]
     return changed, report
