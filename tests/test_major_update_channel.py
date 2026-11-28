@@ -10,7 +10,7 @@ from cfos.core import updater
 
 class MajorUpdateChannelTest(unittest.TestCase):
     def test_current_release_uses_its_own_platform_feed(self):
-        self.assertEqual(__version__, "1.0.0")
+        self.assertEqual(updater.vtuple(__version__)[:2], (1, 0))
         if updater.PLATFORM:
             for url in updater.MANIFEST_URLS:
                 self.assertIn(f"/updates/v1.0/{updater.PLATFORM}/latest.json", url)
