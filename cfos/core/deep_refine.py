@@ -54,6 +54,7 @@ _IDX = {}
 def indices(name):
     if name not in _IDX:
         _IDX[name] = _indices({"layers": CELL_LAYERS, "dg": DG_LAYER, "ca": CELL_LAYERS[1:],
+                               "ca1": (407, 446), "ca3": (495,),
                                "hip": (HIPPOCAMPUS,), "vent": (73,)}[name])
     return _IDX[name]
 
@@ -130,6 +131,27 @@ def ridge_classes(ridges, labels):
 def class_distances(cls, labels, pixel_um):
     out = {}
     for key, c in (("dg", 1), ("ca", 2)):
+        sel = cls == c
+        if sel.any():
+            out[key] = float((ndi.distance_transform_edt(~np.isin(labels, indices(key))) * pixel_um)[sel].mean())
+    return out
+
+
+def pixel_classes(ridges, labels, pixel_um):
+    """Per ridge pixel: 1 = DG, 2 = CA1/CA2, 3 = CA3 (nearest atlas layer, smoothed over ~40 µm).
+    Per pixel, not per piece: the CA3 pyramidal layer often runs into the DG granule layer as one piece."""
+    if not ridges.any():
+        return np.zeros(ridges.shape, np.uint8)
+    d = np.stack([ndi.distance_transform_edt(~np.isin(labels, indices(k))) for k in ("dg", "ca1", "ca3")])
+    near = d.argmin(0)
+    vote = np.stack([ndi.gaussian_filter((ridges & (near == i)).astype(np.float32), 40. / pixel_um)
+                     for i in range(3)])
+    return np.where(ridges, vote.argmax(0) + 1, 0).astype(np.uint8)
+
+
+def pixel_class_distances(cls, labels, pixel_um):
+    out = {}
+    for key, c in (("dg", 1), ("ca1", 2), ("ca3", 3)):
         sel = cls == c
         if sel.any():
             out[key] = float((ndi.distance_transform_edt(~np.isin(labels, indices(key))) * pixel_um)[sel].mean())
@@ -331,15 +353,66 @@ PULL_STEP_UM = 20.       # largest move per round (keeps each update fold-free)
 PULL_STEP_JAC = .6       # each round's own displacement keeps its Jacobian above this
 
 
+COMBINE = ()                   # e.g. ("nissl", "paint"): textures tried per section; the one closest to the DAPI cell
+                               # layers is kept (each finished with layer_pull).  () = TEXTURE only.  Off by default:
+                               # on S01-S03 Nissl won every section, so trying both only doubled the time.
+
+
 def refine(reg, image_oriented, mask_oriented, prior_warp, pixel_um, landmarks=()):
-    """Texture fit (texture_refine), then optionally the CA layer pull (layer_pull)."""
-    warp, report = texture_refine(reg, image_oriented, mask_oriented, prior_warp, pixel_um, landmarks)
+    """Texture fit (texture_refine) + CA1/CA3 layer pull (layer_pull), for each texture in COMBINE; the result
+    closest to the DAPI cell layers wins (old region painting and Allen Nissl each win on some sections)."""
+    global TEXTURE
+    textures = [t for t in COMBINE if t != "nissl" or nissl_volume() is not None] or [TEXTURE]
+    if landmarks or reg.fit_atlas != "CCFv3" or len(textures) == 1:
+        if len(textures) == 1:
+            return _refine_one(reg, image_oriented, mask_oriented, prior_warp, pixel_um, landmarks, textures[0])
+        return _refine_one(reg, image_oriented, mask_oriented, prior_warp, pixel_um, landmarks, TEXTURE)
+    mask = np.asarray(mask_oriented, bool)
+    density = nuclear_density(image_oriented, mask, pixel_um)
+    H, W = mask.shape
+    labels_for = lambda f: R.label_maps(R.Registration(**{**reg.__dict__, "nonlinear": f is not None,
+                                                         "control_points": []}), W, H,
+                                        None if f is None else np.asarray(f))[0]
+    lab0 = labels_for(prior_warp)
+    cls = pixel_classes(cell_ridges(density, mask, lab0, pixel_um), lab0, pixel_um)
+    best = None
+    scores = {}
+    for tex in textures:
+        warp, report = _refine_one(reg, image_oriented, mask_oriented, prior_warp, pixel_um, landmarks, tex)
+        lab = labels_for(warp if warp is not None else prior_warp)
+        score = _layer_score(cls, lab, pixel_um)
+        scores[tex] = score
+        if best is None or score < best[0]:
+            best = (score, warp, report, tex)
+    _, warp, report, tex = best
+    return warp, {**report, "texture_choice": {"chosen": tex, "layer_um": scores}}
+
+
+def _layer_score(cls, labels, pixel_um):
+    """Mean distance (µm) of all DG/CA1/CA3 ridge pixels to their atlas layer; inf without ridges."""
+    total, n = 0., 0
+    for key, c in (("dg", 1), ("ca1", 2), ("ca3", 3)):
+        sel = cls == c
+        if sel.any():
+            total += float((ndi.distance_transform_edt(~np.isin(labels, indices(key))) * pixel_um)[sel].sum())
+            n += int(sel.sum())
+    return total / n if n else float("inf")
+
+
+def _refine_one(reg, image_oriented, mask_oriented, prior_warp, pixel_um, landmarks, texture):
+    global TEXTURE
+    saved, TEXTURE = TEXTURE, texture
+    try:
+        warp, report = texture_refine(reg, image_oriented, mask_oriented, prior_warp, pixel_um, landmarks)
+    finally:
+        TEXTURE = saved
+    report = {**report, "texture": texture}
     if not LAYER_PULL or landmarks or reg.fit_atlas != "CCFv3":
         return warp, report
     base = warp if warp is not None else prior_warp
     mask = np.asarray(mask_oriented, bool)
     density = nuclear_density(image_oriented, mask, pixel_um)
-    pulled, pull_report = layer_pull(reg, base, density, mask, pixel_um)
+    pulled, pull_report = layer_pull(reg, base, density, mask, pixel_um, class_field=prior_warp)
     report = {**report, "layer_pull": pull_report}
     if pulled is None:
         return warp, report
@@ -347,13 +420,18 @@ def refine(reg, image_oriented, mask_oriented, prior_warp, pixel_um, landmarks=(
     return pulled, {**report, "accepted": True, "reason": reason}
 
 
-def layer_pull(reg, field, density, mask, pixel_um):
-    """Move the atlas CA pyramidal layer onto the DAPI CA ridges while the dentate gyrus stays where it is.
+_SAME = object()
+
+
+def layer_pull(reg, field, density, mask, pixel_um, class_field=_SAME):
+    """Move the atlas CA1 and CA3 pyramidal layers onto the DAPI ridges while the dentate gyrus stays put.
 
     A smooth texture fit cannot do both when the section's DG–CA1 distance differs from the atlas: fitting DG
-    drags dorsal CA1 100–300 µm away (benchmark 2026-11-28).  Here every CA ridge pixel is paired with the
-    nearest atlas CA-sp pixel (within PULL_REACH_UM), DG ridges and the tissue outline are pinned, and the
+    drags dorsal CA1 100–300 µm away (benchmark 2026-11-28).  Here every CA1 (CA3) ridge pixel is paired with
+    the nearest atlas CA1 (CA3) sp pixel (within PULL_REACH_UM), DG ridges and the tissue outline are pinned, and the
     residuals are smoothed by normalised Gaussian convolution, a few damped rounds (ICP-like).
+    class_field: the field whose labels decide which ridge pixel is DG, CA1 or CA3 (default: field).  Use the
+    pre-texture field: a texture fit that drags CA3 onto the DG would otherwise get its error pinned in place.
     Returns (field or None, report); None when it did not help or would fold."""
     from skimage.morphology import skeletonize
     H, W = mask.shape
@@ -363,31 +441,32 @@ def layer_pull(reg, field, density, mask, pixel_um):
     ridges = cell_ridges(density, mask, lab, pixel_um)
     if not ridges.any():
         return None, {"applied": False, "reason": "没有检测到海马细胞层"}
-    cls0 = ridge_classes(ridges, lab)
-    dg_r, ca_r = cls0 == 1, cls0 == 2
-    if ca_r.sum() * pixel_um < 300:
+    cls = pixel_classes(ridges, lab if class_field is _SAME else labels_for(class_field), pixel_um)
+    dg_r = cls == 1
+    if (cls >= 2).sum() * pixel_um < 300:
         return None, {"applied": False, "reason": "没有检测到 CA 锥体层"}
-    cls = (dg_r * 1 + ca_r * 2).astype(np.uint8)
-    before = class_distances(cls, lab, pixel_um)
+    before = pixel_class_distances(cls, lab, pixel_um)
     sigma = PULL_SIGMA_UM / pixel_um
     floor = np.exp(-2.) / (2 * np.pi * sigma * sigma)        # one sample two sigmas away
     edge = mask ^ ndi.binary_erosion(mask)
     pins = [np.argwhere(dg_r)[::3], np.argwhere(edge)[::6]]
-    ca_pts = np.argwhere(ca_r)[::2]
+    groups = [(np.argwhere(cls == c)[::2], key) for c, key in ((2, "ca1"), (3, "ca3")) if (cls == c).any()]
     cur = field
     jac_floor = min(MIN_JACOBIAN, R.min_jacobian(field) if field is not None else 1.)
     for _ in range(PULL_ROUNDS):
         lab = labels_for(cur)
-        atlas_ca = np.isin(lab, indices("ca"))
-        if not atlas_ca.any():
-            break
-        dist, (iy, ix) = ndi.distance_transform_edt(~atlas_ca, return_indices=True)
-        q = ca_pts[dist[ca_pts[:, 0], ca_pts[:, 1]] * pixel_um <= PULL_REACH_UM]
         num = np.zeros((2, H, W), np.float32); den = np.zeros((H, W), np.float32)
-        a_y, a_x = iy[q[:, 0], q[:, 1]], ix[q[:, 0], q[:, 1]]
-        np.add.at(num[0], (q[:, 0], q[:, 1]), a_x - q[:, 1])
-        np.add.at(num[1], (q[:, 0], q[:, 1]), a_y - q[:, 0])
-        np.add.at(den, (q[:, 0], q[:, 1]), 1.)
+        for pts, key in groups:
+            # each pyramidal-layer pixel looks for its own atlas layer: CA1 ridges for CA1sp, CA3 ridges for CA3sp
+            target = np.isin(lab, indices(key))
+            if not target.any():
+                continue
+            dist, (iy, ix) = ndi.distance_transform_edt(~target, return_indices=True)
+            q = pts[dist[pts[:, 0], pts[:, 1]] * pixel_um <= PULL_REACH_UM]
+            a_y, a_x = iy[q[:, 0], q[:, 1]], ix[q[:, 0], q[:, 1]]
+            np.add.at(num[0], (q[:, 0], q[:, 1]), a_x - q[:, 1])
+            np.add.at(num[1], (q[:, 0], q[:, 1]), a_y - q[:, 0])
+            np.add.at(den, (q[:, 0], q[:, 1]), 1.)
         for pts in pins:
             np.add.at(den, (pts[:, 0], pts[:, 1]), 1.)
         g = [ndi.gaussian_filter(v, sigma) for v in (num[0], num[1], den)]
@@ -408,9 +487,10 @@ def layer_pull(reg, field, density, mask, pixel_um):
         cur = nxt
     if cur is field:
         return None, {"applied": False, "reason": "CA 对齐会折叠或无需移动", "before": before}
-    after = class_distances(cls, labels_for(cur), pixel_um)
-    ok = after.get("ca", np.inf) < before.get("ca", np.inf) - LAYER_TOL_UM and \
-        after.get("dg", 0.) <= before.get("dg", 0.) + LAYER_TOL_UM
+    after = pixel_class_distances(cls, labels_for(cur), pixel_um)
+    worse = [k for k in after if after[k] > before[k] + LAYER_TOL_UM]
+    gain = sum(before[k] - after[k] for k in ("ca1", "ca3") if k in after)
+    ok = not worse and gain > LAYER_TOL_UM
     report = {"applied": bool(ok), "before": before, "after": after, "min_jacobian": R.min_jacobian(cur)}
     return (cur if ok else None), report
 

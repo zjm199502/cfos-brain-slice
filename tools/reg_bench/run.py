@@ -5,12 +5,14 @@ import sys, json, os, time, numpy as np
 sys.path.insert(0, __import__('os').path.join(__import__('os').path.dirname(__import__('os').path.abspath(__file__)), '..', '..'))
 from cfos.core import registration as R
 S, method = sys.argv[1], sys.argv[2]
-tag = method.replace(':', '_')
+tag = method.replace(':', '_').replace('|', '-')
 if ':' in method:   # e.g. e2e:nissl+guard+ridge -> deep_refine.TEXTURE='nissl', LAYER_GUARD, W_RIDGE=.3
     from cfos.core import deep_refine as _D
     method, opts = method.split(':', 1)
     tex, *flags = opts.split('+')
     _D.TEXTURE = tex or _D.TEXTURE
+    _D.COMBINE = tuple(tex.split('|')) if '|' in tex else ()
+    if '|' in tex: _D.TEXTURE = tex.split('|')[0]
     _D.LAYER_GUARD = 'guard' in flags
     _D.W_RIDGE = .3 if 'ridge' in flags else 0.
     if 'search' in flags: _D.SEARCH_TEXTURE = _D.TEXTURE
